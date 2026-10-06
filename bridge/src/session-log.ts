@@ -16,7 +16,9 @@ export type SessionEventKind =
   | 'diff_rejected'
   | 'repl'
   /** NovaLab 增补（超出 spec §11 清单）：用户直接保存 cell 的留痕。 */
-  | 'save';
+  | 'save'
+  /** NovaLab 增补（P1.8）：外部改动 .py → 热重载（load_file + notebook.state 广播）。 */
+  | 'external_reload';
 
 export type SessionActor = 'user' | 'agent';
 

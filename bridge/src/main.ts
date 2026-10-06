@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import { ERR_PARSE, type RpcRequest } from './protocol';
 import { RpcRouter } from './router';
 import { KernelSupervisor, StdioKernelTransport } from './supervisor';
+import { createChokidarEventSource } from './watch';
 
 const BASE_PORT = 7788;
 const MAX_PORT_TRIES = 10;
@@ -33,7 +34,12 @@ function broadcast(method: string, params: unknown): void {
   }
 }
 
-const router = new RpcRouter({ supervisor, broadcast });
+const router = new RpcRouter({
+  supervisor,
+  broadcast,
+  // P1.8：外部 .py 变更热重载（生产用 chokidar 事件源；单测在 RouterDeps 注入假源）
+  watcherFactory: createChokidarEventSource,
+});
 
 function start(port: number): WebSocketServer {
   const wss = new WebSocketServer({ port, host: '127.0.0.1' });
@@ -78,6 +84,7 @@ function start(port: number): WebSocketServer {
 }
 
 function shutdown(): void {
+  router.dispose(); // 停 watcher + ui.json 落盘
   supervisor.stop();
   activeWss?.close();
   process.exit(0);

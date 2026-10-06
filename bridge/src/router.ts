@@ -28,6 +28,8 @@ import {
 } from './protocol';
 import { KernelError, KernelSupervisor } from './supervisor';
 import { SessionLogger, type SessionEventKind } from './session-log';
+import { NotebookWatcher, type FsEventSource } from './watch';
+import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 
 /** 带 JSON-RPC 错误码的路由级异常。 */
 export class RpcFault extends Error {
@@ -42,9 +44,19 @@ export class RpcFault extends Error {
 
 export interface RouterDeps {
   supervisor: KernelSupervisor;
-  /** 通知广播（bridge → 所有已连接 ws 客户端）。 */
+  /** 通知广播（bridge → 所有 ws 客户端）。 */
   broadcast: (method: string, params: unknown) => void;
   clock?: () => Date;
+  /**
+   * 文件事件源工厂（P1.8 热重载）。生产传 createChokidarEventSource；
+   * 单测注入假事件源；**不传 = 不启用 watcher**（既有路由单测保持无 fs 监听）。
+   */
+  watcherFactory?: () => FsEventSource;
+  /** watcher debounce（默认 300ms）/ 自写跳过窗口（默认 500ms），单测缩短用。 */
+  watcherDebounceMs?: number;
+  watcherSuppressMs?: number;
+  /** UI sidecar 存储（默认新建 UiStore；单测注入以控制 debounce/flush）。 */
+  uiStore?: UiStore;
 }
 
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
@@ -56,14 +68,32 @@ export class RpcRouter {
   private diffs: StagedDiff[] = [];
   private diffSeq = 0;
   private readonly clock: () => Date;
+  private readonly ui: UiStore;
+  private readonly watcher?: NotebookWatcher;
 
   constructor(private readonly deps: RouterDeps) {
     this.clock = deps.clock ?? (() => new Date());
+    this.ui = deps.uiStore ?? new UiStore();
+    if (deps.watcherFactory) {
+      const factory = deps.watcherFactory;
+      this.watcher = new NotebookWatcher({
+        sourceFactory: factory,
+        onExternalChange: (filePath) => this.externalReload(filePath),
+        ...(deps.watcherDebounceMs !== undefined ? { debounceMs: deps.watcherDebounceMs } : {}),
+        ...(deps.watcherSuppressMs !== undefined ? { suppressMs: deps.watcherSuppressMs } : {}),
+      });
+    }
     deps.supervisor.on('status', (params) => deps.broadcast('kernel.status', params));
     deps.supervisor.on('notification', (n: { method: string; params?: unknown }) => {
       this.onKernelNotification(n.method, n.params);
       deps.broadcast(n.method, n.params);
     });
+  }
+
+  /** 进程退场：停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
+  dispose(): void {
+    this.watcher?.close();
+    this.ui.flush();
   }
 
   async handle(req: RpcRequest): Promise<RpcResponse> {
@@ -100,6 +130,10 @@ export class RpcRouter {
         return this.diffAccept(params);
       case 'diff.reject':
         return this.diffReject(params);
+      case 'ui.get':
+        return this.uiGet(params);
+      case 'ui.set':
+        return this.uiSet(params);
       case 'export.ipynb':
         throw new RpcFault(ERR_INVALID_REQUEST, 'P3 feature');
       default:
@@ -120,7 +154,30 @@ export class RpcRouter {
     this.logger = new SessionLogger(path.dirname(p), this.clock);
     this.diffs = [];
     this.diffSeq = 0;
+    // P1.8 热重载：watch 新路径（内部先 unwatch 旧路径）
+    this.watcher?.watch(p);
     return this.snapshot();
+  }
+
+  /**
+   * 外部改动 .py → 内核 load_file → 广播全量 notebook.state（前端 applyNotebookState）
+   * + session 留痕 external_reload。失败只记 stderr，保留旧缓存（文件可能处于半保存态）。
+   */
+  private async externalReload(filePath: string): Promise<void> {
+    if (!this.cache || !this.notebookPath) return;
+    if (path.resolve(filePath) !== path.resolve(this.notebookPath)) return;
+    try {
+      const state = (await this.deps.supervisor.request('load_file', {
+        path: this.notebookPath,
+      })) as NotebookState;
+      this.cache = normalizeState(state);
+      this.deps.broadcast('notebook.state', this.snapshot());
+      this.log('external_reload', undefined, filePath);
+    } catch (err) {
+      process.stderr.write(
+        `[bridge] 外部变更重载失败（${filePath}）: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   private requireCache(): NotebookState {
@@ -186,7 +243,7 @@ export class RpcRouter {
     }
   }
 
-  /** 全量 cells 推给内核 set_cells，并用返回值刷新缓存。 */
+  /** 全量 cells 推给内核 set_cells，并用返回值刷新缓存；随后落盘 .py（P1.8）。 */
   private async applyCellsToKernel(): Promise<SetCellsResult> {
     const cache = this.requireCache();
     const res = (await this.deps.supervisor.request('set_cells', {
@@ -195,7 +252,28 @@ export class RpcRouter {
     if (res.cells) cache.cells = normalizeCells(res.cells);
     cache.dagEdges = res.dagEdges ?? [];
     cache.staleSet = res.staleSet ?? [];
+    await this.persistToDisk();
     return res;
+  }
+
+  /**
+   * cell.save / diff.accept 后把全量 cells 写回 .py（内核 save_file）。
+   * 写盘前后各续一次自写跳过窗口：watcher 忽略写后 suppressMs 内的 fs 事件，
+   * 防自己的保存触发热重载回环。
+   */
+  private async persistToDisk(): Promise<void> {
+    const cache = this.cache;
+    const p = this.notebookPath;
+    if (!cache || !p) return;
+    this.watcher?.markSelfWrite(p);
+    try {
+      await this.deps.supervisor.request('save_file', {
+        path: p,
+        cells: cache.cells.map((c) => ({ id: c.id, code: c.code })),
+      });
+    } finally {
+      this.watcher?.markSelfWrite(p);
+    }
   }
 
   // ---------- kernel ----------
@@ -320,6 +398,21 @@ export class RpcRouter {
 
   private emitDiffs(): void {
     this.deps.broadcast('diff.updated', { diffs: structuredClone(this.diffs) });
+  }
+
+  // ---------- ui sidecar（.novalab/ui.json，P1.8） ----------
+
+  private uiGet(params: Record<string, unknown>): NotebookUiState {
+    return this.ui.get(strParam(params, 'path'));
+  }
+
+  private uiSet(params: Record<string, unknown>): NotebookUiState {
+    const notebookPath = strParam(params, 'path');
+    const patch = params['patch'];
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'ui.set 需要 {path: string, patch: object}');
+    }
+    return this.ui.set(notebookPath, patch as UiPatch);
   }
 
   // ---------- 通知侧效应 ----------
