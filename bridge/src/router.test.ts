@@ -1,12 +1,13 @@
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KernelSupervisor } from './supervisor';
 import { RpcRouter } from './router';
 import { FakeKernel } from './testing/fake-kernel';
 import type {
   DiffUpdatedParams,
+  KernelSchemasParams,
   KernelStatusParams,
   NotebookState,
   RpcResponse,
@@ -33,13 +34,14 @@ let notes: { method: string; params?: unknown }[] = [];
 let router: RpcRouter;
 let reqId = 0;
 
-function setup(): void {
+function setup(seed?: (fake: FakeKernel) => void): void {
   fakes = [];
   notes = [];
   reqId = 0;
   sup = new KernelSupervisor({
     transportFactory: () => {
       const f = new FakeKernel();
+      seed?.(f); // 预置内核态（如带 sideEffect 的夹具 cells，L-2 测试用）
       fakes.push(f);
       return f;
     },
@@ -108,6 +110,27 @@ describe('RpcRouter · notebook/cell', () => {
     expect(state.execCounts).toEqual({ a: 0, b: 0, c: 0 });
     expect(Array.isArray(state.schemas)).toBe(true);
     expect(fakes[0]!.loadedPath).toBe(NB_PATH);
+  });
+
+  it('notebook.open：保留内核上报的 sideEffect（L-2，spec §6.2 契约字段不得丢弃）', async () => {
+    // 夹具：含 to_csv 写副作用的 cell（内核 detect_side_effect 判定 sideEffect=true）
+    setup((f) => {
+      f.cells = [
+        { id: 'w0', code: 'import pandas as pd', execCount: 0, defs: ['pd'], refs: [] },
+        {
+          id: 'w1',
+          code: 'temps.to_csv(out_csv, index=False)',
+          execCount: 0,
+          defs: [],
+          refs: ['temps', 'out_csv'],
+          sideEffect: true,
+        },
+      ];
+    });
+    const state = await openNotebook();
+    expect(state.cells.find((c) => c.id === 'w1')?.sideEffect).toBe(true);
+    // 内核未上报（旧内核/无副作用）→ 归一化为 false，前端 ⚡ 徽章不误亮
+    expect(state.cells.find((c) => c.id === 'w0')?.sideEffect).toBe(false);
   });
 
   it('未 open 时业务方法回 -32001', async () => {
@@ -200,6 +223,31 @@ describe('RpcRouter · kernel', () => {
     const res = await call('kernel.vars');
     const { schemas } = res.result as { schemas: { name: string }[] };
     expect(schemas.map((s) => s.name).sort()).toEqual(['x', 'y']);
+  });
+
+  it('run.done 后自动 introspect 并广播 kernel.schemas（L-3：FixCard schemas 不再恒 0）', async () => {
+    setup();
+    await openNotebook();
+    expect(fakes[0]!.countOf('introspect')).toBe(0);
+    // 内核跑出新变量 df（introspect 快照由 FakeKernel overrideSchemas 模拟）
+    fakes[0]!.overrideSchemas = [
+      { name: 'df', type: 'DataFrame', columns: ['city'] },
+    ];
+    const res = await call('cell.run', { cellId: 'a', cascade: false });
+    expect((res.result as RunReport).ok).toBe(true);
+
+    // introspect 请求已发出，广播异步到达（FakeKernel setTimeout 0）
+    await vi.waitFor(() => {
+      const p = lastParams<KernelSchemasParams>('kernel.schemas');
+      expect(p?.schemas).toEqual([
+        { name: 'df', type: 'DataFrame', columns: ['city'] },
+      ]);
+    });
+    expect(fakes[0]!.countOf('introspect')).toBe(1);
+
+    // bridge 缓存同步刷新（agent.context 读同一份 schemas）
+    const ctx = (await call('agent.context')).result as { schemas: { name: string }[] };
+    expect(ctx.schemas.map((s) => s.name)).toEqual(['df']);
   });
 
   it('kernel.repl：exec_repl + 输出以 run.* 通知回灌（cellId="repl"）', async () => {

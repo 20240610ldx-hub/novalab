@@ -127,11 +127,17 @@ export function saveProviderState(state: ProviderState): void {
 /* ---------------- dev 兜底（.env.local） ---------------- */
 
 export function getDevLanguageModel(): LanguageModel | null {
-  const baseURL = import.meta.env.VITE_NOVALAB_LLM_BASE_URL as string | undefined;
+  const envBaseURL = import.meta.env.VITE_NOVALAB_LLM_BASE_URL as string | undefined;
   const apiKey = import.meta.env.VITE_NOVALAB_LLM_API_KEY as string | undefined;
-  if (!baseURL || !apiKey) return null;
+  if (!envBaseURL || !apiKey) return null;
   const model =
     (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
+  // L-1（CORS）：tokenplan 端点无 Access-Control-Allow-Origin，浏览器直连被
+  // preflight 拦截。DEV（vite）改走同源代理 /llm/v1 → vite.config.ts server.proxy
+  // 转发到 envBaseURL（target 去 /v1、rewrite 去 /llm 前缀）。
+  // 生产/Tauri 构建暂仍直连 envBaseURL —— P4 迁移 bridge 侧 LLM 代理
+  //（feature-matrix L-1 遗留行）；Tauri webview 同样受 CORS 约束，届时一并解决。
+  const baseURL = import.meta.env.DEV ? '/llm/v1' : envBaseURL;
   return createAnthropic({ baseURL, apiKey })(model);
 }
 

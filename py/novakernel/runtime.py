@@ -9,6 +9,9 @@
   成功提交 defs / 失败回滚该 cell 的 defs（其余 globals 就地变更不回滚，spec §12）→
   cascade 时按拓扑序重跑下游（副作用 cell 跳过；失败分支阻断）；
 - exec_repl：直接操作同一 globals，通知 cellId 恒为 "repl"，不参与 DAG 归属；
+  displayhook 语义（L-4）：末语句为裸表达式时对其 eval，并以
+  run.mime {cellId:"repl", mime:"text/plain", data:repr} 回显（repr 失败降级 str；
+  结果为 None 不发）；末语句异常照常走 run.error，不回显；
 - 通知形状（冻结）：run.started {cellId}；run.stdout/run.stderr {cellId,text}；
   run.mime {cellId,mime,data}；run.error {cellId,traceback,frames}；
   run.notify {cellId,kind,path}（kind='file-write'：exec 期间写盘的文件绝对路径，
@@ -19,6 +22,7 @@
 
 from __future__ import annotations
 
+import ast
 import builtins as _builtins_mod
 import contextlib
 import io
@@ -412,7 +416,8 @@ class Runtime:
         an = dag.analyze_cell(REPL_ID, code)
         rec = CellRecord(id=REPL_ID, code=code, defs=an.defs, refs=an.refs)
         t0 = time.perf_counter()
-        res = self._run_cell(rec, attribute=False, emit_done=True)
+        # L-4：displayhook —— 末语句裸表达式 eval 后以 run.mime text/plain 回显
+        res = self._run_cell(rec, attribute=False, emit_done=True, displayhook=True)
         report: dict = {
             "cellId": REPL_ID,
             "ok": res.ok,
@@ -460,7 +465,39 @@ class Runtime:
             })
         return frames
 
-    def _run_cell(self, rec: CellRecord, *, attribute: bool, emit_done: bool) -> _CellRunResult:
+    @staticmethod
+    def _compile_displayhook(code: str, filename: str):
+        """L-4 REPL displayhook 拆分（Jupyter/IPython 语义）。
+
+        AST 解析后若末语句是裸表达式（ast.Expr）→ 返回 (前段 exec 码, 末表达式
+        eval 码)；否则 (整体 exec 码, None)。切片保留 parse 时的原始 lineno，
+        traceback 行号与源码一致。SyntaxError 由调用方统一按既有路径处理。
+        """
+        tree = ast.parse(code, filename, "exec")
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            head = ast.Module(body=tree.body[:-1], type_ignores=[])
+            tail = ast.Expression(body=tree.body[-1].value)
+            return compile(head, filename, "exec"), compile(tail, filename, "eval")
+        return compile(tree, filename, "exec"), None
+
+    def _emit_display_value(self, cell_id: str, value) -> None:
+        """displayhook 回显：run.mime {cellId, mime:'text/plain', data:repr(value)}。
+
+        repr 抛异常（劣质 __repr__）降级 str；两者都失败则静默放弃——
+        回显只是展示层语义，不得把一次成功的执行变成 run.error。
+        """
+        try:
+            text = repr(value)
+        except Exception:  # noqa: BLE001
+            try:
+                text = str(value)
+            except Exception:  # noqa: BLE001
+                return
+        self._emit("run.mime", {"cellId": cell_id, "mime": "text/plain", "data": text})
+
+    def _run_cell(
+        self, rec: CellRecord, *, attribute: bool, emit_done: bool, displayhook: bool = False,
+    ) -> _CellRunResult:
         cell_id = rec.id
         filename = _cell_filename(cell_id)
         self.sources[filename] = rec.code.splitlines()
@@ -468,8 +505,12 @@ class Runtime:
         self._emit("run.started", {"cellId": cell_id})
         t0 = time.perf_counter()
 
+        eval_compiled = None
         try:
-            compiled = compile(rec.code, filename, "exec")
+            if displayhook:
+                compiled, eval_compiled = self._compile_displayhook(rec.code, filename)
+            else:
+                compiled = compile(rec.code, filename, "exec")
         except SyntaxError as e:
             tb_text = "".join(tbmod.format_exception(e)).rstrip()
             frames = [{
@@ -493,9 +534,12 @@ class Runtime:
         err = _NotifyStream(self._emit, "run.stderr", cell_id)
         # 写事件窗口：exec 期间（含异常路径）收集 file-write，退出时发 run.notify
         watcher = _WriteWatcher(cell_id, self._emit)
+        value = _MISSING  # displayhook：末表达式求值结果（_MISSING = 无末表达式）
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), watcher:
                 exec(compiled, self.globals)
+                if eval_compiled is not None:
+                    value = eval(eval_compiled, self.globals)
         except BaseException as e:  # noqa: BLE001 — 内核进程必须存活（spec §12）
             out.flush()
             err.flush()
@@ -516,6 +560,10 @@ class Runtime:
         else:
             out.flush()
             err.flush()
+            # displayhook（L-4）：exec 与末表达式 eval 都成功才回显；None 不发。
+            # 末表达式抛异常走上面的 run.error 路径，同样不回显。
+            if value is not _MISSING and value is not None:
+                self._emit_display_value(cell_id, value)
 
         self._capture_matplotlib(cell_id)
 

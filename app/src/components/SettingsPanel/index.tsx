@@ -96,6 +96,11 @@ export function SettingsPanel() {
         {/* 明文存储警告（常驻显著） */}
         <div className="mb-3 rounded border border-[var(--accent-err)] bg-[var(--diff-del)] p-2 text-[11px] leading-relaxed text-[var(--accent-err)]">
           {STORAGE_WARNING}
+          <p className="mt-1">
+            另注（L-1）：浏览器 dev 下用户自配 provider 仍直连其 baseURL——端点若不回
+            CORS 头（Access-Control-Allow-Origin），请求会被浏览器拦截；可暂用 dev
+            兜底（.env.local，经 vite 同源代理 /llm），P4 迁移 bridge 侧代理后消除。
+          </p>
         </div>
 
         {/* provider 列表 */}

@@ -603,6 +603,13 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           case 'kernel.status':
             set({ kernelState: mapKernelState(String(asRecord(params).state ?? '')) });
             break;
+          case 'kernel.schemas': {
+            // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
+            // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
+            const arr = asRecord(params).schemas;
+            if (Array.isArray(arr)) set({ schemas: arr as VarSchema[] });
+            break;
+          }
           case 'notebook.state':
             s.applyNotebookState(params);
             break;

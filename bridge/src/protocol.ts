@@ -56,6 +56,12 @@ export interface CellInfo {
   execCount: number;
   defs: string[];
   refs: string[];
+  /**
+   * 内核启发式副作用检测（spec §6.2：load_file/set_cells 回传 cells 携带；
+   * L-2 修复：Bridge 缓存/映射必须保留透传——前端 CellHeader/CascadeAskDialog
+   * 的 ⚡ side-effect 徽章数据源）。旧内核/新建 cell 缺省时按 false 处理。
+   */
+  sideEffect?: boolean;
 }
 
 export interface DagEdge {
@@ -158,6 +164,15 @@ export interface RunNotifyParams {
 export interface KernelStatusParams {
   state: KernelState;
   queueDepth: number;
+}
+
+/**
+ * kernel.schemas 通知（L-3 修复）：run.done 后 Bridge 自动 introspect 并广播
+ * 最新变量 schemas——前端 store.schemas 随之刷新（FixCard"traceback + N schemas"
+ * 的附着数据源，此前 schemas 仅在 notebook.open 时更新一次）。
+ */
+export interface KernelSchemasParams {
+  schemas: VarSchema[];
 }
 
 export type DiffAction = 'update' | 'insert_below';

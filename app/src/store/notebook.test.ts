@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyRunEvent,
   applyStaleSet,
@@ -9,6 +9,22 @@ import {
   useNotebook,
 } from './notebook';
 import { createEmptyOutput, type Cell } from '../kernel/types';
+
+// L-3 单测：伪 bridge 客户端——捕获 connectBridge 注册的通知处理器，
+// 测试里手动触发 kernel.schemas 通知（不依赖真实 WS/内核）。
+const { bridgeHandlers } = vi.hoisted(() => ({
+  bridgeHandlers: [] as ((method: string, params: unknown) => void)[],
+}));
+vi.mock('../bridge/client', () => ({
+  bridge: {
+    connect: vi.fn(async () => {}),
+    onNotification: (h: (method: string, params: unknown) => void) => {
+      bridgeHandlers.push(h);
+      return () => {};
+    },
+    rpc: vi.fn(async () => ({})),
+  },
+}));
 
 function makeCell(over: Partial<Cell> = {}): Cell {
   return {
@@ -274,5 +290,25 @@ describe('applyRunEvent run.notify（P2.9 缝合：文件写事件 → output.wr
     expect(cells[0]?.output?.writes.length).toBe(50);
     cells = applyRunEvent(cells, 'run.notify', { cellId: 'w', kind: 'other', path: 'X' });
     expect(cells[0]?.output?.writes.length).toBe(50);
+  });
+});
+
+describe('connectBridge · kernel.schemas 通知（L-3：run.done 后 bridge 自动 introspect 广播）', () => {
+  it('通知写入 store.schemas；schemas 非数组的垃圾载荷不覆盖', async () => {
+    useNotebook.setState({ schemas: [] });
+    await useNotebook.getState().connectBridge();
+    expect(bridgeHandlers.length).toBeGreaterThan(0);
+    const fire = bridgeHandlers[bridgeHandlers.length - 1]!;
+
+    const schemas = [
+      { name: 'survey', type: 'DataFrame', columns: [{ name: 'city', dtype: 'str' }] },
+    ];
+    fire('kernel.schemas', { schemas });
+    expect(useNotebook.getState().schemas).toEqual(schemas);
+
+    fire('kernel.schemas', { schemas: 'oops' });
+    expect(useNotebook.getState().schemas).toEqual(schemas); // 垃圾载荷不覆盖
+    fire('kernel.schemas', {});
+    expect(useNotebook.getState().schemas).toEqual(schemas);
   });
 });

@@ -3,10 +3,10 @@
 > 生成：2026-10-07 · L 线（交互状态画廊）
 > 证据来源：
 > ① 真机截图 —— `scripts/demo-gallery.mjs`（node + playwright chromium headless，bridge/novakernel 均为真进程；viewport 1440×900、暗色、fullPage；主列为内部滚动，内容溢出时脚本临时增高视口拍全后还原）。截图在本目录 `states/`，下表以 `states/xx.png` 相对链接引用；
-> ② 测试 —— py：`uv run --directory py pytest`（101 例）；bridge：`pnpm --filter @novalab/bridge exec vitest run`（145 例）；app：`pnpm --filter @novalab/app exec vitest run`（116 例）；
+> ② 测试 —— py：`uv run --directory py pytest`（104 例）；bridge：`pnpm --filter @novalab/bridge exec vitest run`（123 例）；app：`pnpm --filter @novalab/app exec vitest run`（114 例）；
 > ③ 命令 —— `node scripts/integration-smoke.mjs`（bridge+kernel 端到端）、`node scripts/demo-gallery.mjs`（本画廊，幂等可重跑）。
 > 判据：✅ 已实现（有真机或测试证据）· 🟡 部分实现（主链路可用，子项缺证据/未接线）· ⛔ 未实现（排期见文末专节，不许写成已做）。
-> 计数：主表 40 行 = ✅ 27 · 🟡 8 · ⛔ 5。
+> 计数：主表 40 行 = ✅ 30 · 🟡 5 · ⛔ 5。（2026-10-07 M 线修 L-1~L-4 后：M4/P2.1/P2.5 由 🟡 转 ✅）
 
 ## 1. Must 需求（intent §5 M1–M9）
 
@@ -15,10 +15,10 @@
 | M1 反应式执行内核（AST defs/refs、失效传递闭包、级联、环检测） | intent §5 M1 · spec §5 | ✅ | `node scripts/integration-smoke.mjs`（cell.save→staleSet 含下游）；py/tests/test_dag.py（31 例）· test_runtime.py（24 例）；[states/02-stale.png](states/02-stale.png)（改上游→下游两格 stale 灰徽章） |
 | M2 纯 .py 主存储（`# %% [cell-id]` + PEP723 头） | intent §5 M2 · spec §4 | ✅（marimo 转换器 ⛔ P3.6） | [states/01-open-idle.png](states/01-open-idle.png)；py/tests/test_serialize.py（14 例）+ tests/fixtures/marimo_*.py 宽容导入 |
 | M3 单元格编辑器（CM6、行号、高亮、折叠 output、计数徽章） | intent §5 M3 · spec §10 | ✅ | [states/01-open-idle.png](states/01-open-idle.png)；偏差记录：高亮为逐行正则 overlay 而非 lezer TagSystem（plan P1.4 注） |
-| M4 修错闭环（traceback→FixCard→行内 Diff→Tab 采纳） | intent §5 M4 · spec §9/§12 | 🟡 | UI 全链路真机：[states/03-error-fixcard.png](states/03-error-fixcard.png) + [states/04-diff-staged.png](states/04-diff-staged.png)；app diffLogic.test.ts（21 例）· notebook.test.ts（20 例）；Agent 提议段受 CORS 限制未真机（遗留 L-1） |
+| M4 修错闭环（traceback→FixCard→行内 Diff→Tab 采纳） | intent §5 M4 · spec §9/§12 | ✅ | UI 全链路真机：[states/03-error-fixcard.png](states/03-error-fixcard.png) + [states/04-diff-staged.png](states/04-diff-staged.png)；app diffLogic.test.ts（21 例）· notebook.test.ts；L-1 闭环后 Agent 段真机可跑（[states/11-agent-stream.png](states/11-agent-stream.png)：agent 流式+工具推理段；propose→行内 Diff 全形态未单拍，bridge router.agent.test.ts 17 例覆盖） |
 | M5 隐私边界（schema-only + 4KB 硬截断 + 发送审计） | intent §5 M5 · spec §8 | ✅ | bridge/src/preview.test.ts（7 例，含 1B–1MB fuzz 必 ≤4KB）；app payload.test.ts（12 例）；ContextChip 常驻"0 rows sent"见 [states/03-error-fixcard.png](states/03-error-fixcard.png) |
 | M6 模型解耦（任意 provider；离线降级） | intent §5 M6 · ADR-008 | ✅（keychain 迁移 ⛔ P4） | [states/10-settings.png](states/10-settings.png)；app providers.test.ts（8 例）· openaiCompat.test.ts（6 例） |
-| M7 内核状态栏 + 底部 REPL（元素 6/7） | intent §5 M7 | ✅ | [states/07-repl.png](states/07-repl.png)（[repl] cell 回灌 + 状态栏）；[states/01-open-idle.png](states/01-open-idle.png) |
+| M7 内核状态栏 + 底部 REPL（元素 6/7） | intent §5 M7 | ✅ | [states/07-repl.png](states/07-repl.png)（[repl] cell 回灌 + 裸表达式回显 output 区，L-4 闭环）+ 状态栏；[states/01-open-idle.png](states/01-open-idle.png) |
 | M8 工作区文件管理（树/新建/重命名/删除确认/越界拒绝） | intent §5 M8 | ✅ | [states/09-sidebar-actions.png](states/09-sidebar-actions.png)（菜单新建 notebook→入树）；[states/01-open-idle.png](states/01-open-idle.png)（树+面包屑）；bridge fs.test.ts（12 例，越界拒绝）· app sidebar/helpers.test.ts（13 例） |
 | M9 会话管理（历史/只读/ended 态/截断横幅/cell 计数） | intent §5 M9 | ✅（.ipynb 导出 ⛔ P3 占位） | [states/08-readonly-session.png](states/08-readonly-session.png)（footer 原文+只读编辑器+下拉）；app session.test.ts（13 例）；bridge session-store.test.ts（10 例）· router.session.test.ts（15 例） |
 
@@ -54,11 +54,11 @@
 
 | 能力 | 锚点 | 状态 | 证据 |
 |---|---|---|---|
-| P2.1 AgentPanel 流式 + provider registry + 设置面板 | plan P2.1 | 🟡 | 设置面板/registry/dev 兜底 ✅ [states/10-settings.png](states/10-settings.png) + providers/openaiCompat 测试；浏览器直连流式 ⛔ CORS（遗留 L-1），降级 UX 真机 [states/11-agent-stream-degraded.png](states/11-agent-stream-degraded.png)（错误横幅+重试/打开设置） |
-| P2.2 六工具单源 + Rulebook + propose AST 预检 | plan P2.2 · spec §7 | ✅ | bridge router.agent.test.ts（17 例）· mcp/server.test.ts（10 例）；app tools.test.ts（9 例）；编译预检=router.ts diffStage（真机 propose 段受 L-1 限制） |
+| P2.1 AgentPanel 流式 + provider registry + 设置面板 | plan P2.1 | ✅ | 设置面板/registry/dev 兜底 [states/10-settings.png](states/10-settings.png) + providers/openaiCompat 测试；浏览器流式真机 [states/11-agent-stream.png](states/11-agent-stream.png)（L-1 闭环：dev 走 vite 同源代理 /llm，非降级）；降级 UX 历史证据已移除；用户自配 provider 直连 CORS 与生产代理遗留见 §6/§7 |
+| P2.2 六工具单源 + Rulebook + propose AST 预检 | plan P2.2 · spec §7 | ✅ | bridge router.agent.test.ts（17 例）· mcp/server.test.ts（10 例）；app tools.test.ts（9 例）；编译预检=router.ts diffStage；L-1 闭环后 agent 工具循环真机见 [states/11-agent-stream.png](states/11-agent-stream.png)（propose 全形态未单拍） |
 | P2.3 行内 MergeView + 托盘 + Tab/Esc + edited-staged | plan P2.3 · spec §9 | ✅ | [states/04-diff-staged.png](states/04-diff-staged.png)（红绿 hunk+`1 pending`+✓/× 两级）；app diffLogic.test.ts（21 例，含 trayKeyAction Tab/Esc/EscEsc） |
-| P2.4 stalePolicy（Owner mark-only）+ cascade 开关 | plan P2.4 | ✅（auto 档真机未验证） | [states/05-ask-dialog.png](states/05-ask-dialog.png)（ask 确认窗：下游清单+拓扑序）；app/src/kernel/stalePolicy.ts 冻结；resolveCascadeDecision 单测 diffLogic.test.ts |
-| P2.5 One-click Fix 卡片 + ContextChip 审计 | plan P2.5 · spec §8 | 🟡 | [states/03-error-fixcard.png](states/03-error-fixcard.png)（FixCard 浮现+traceback 尾 3 行；schemas=0 见遗留 L-3）；ContextChip 常驻见各图 |
+| P2.4 stalePolicy（Owner mark-only）+ cascade 开关 | plan P2.4 | ✅（auto 档真机未验证） | [states/05-ask-dialog.png](states/05-ask-dialog.png)（ask 确认窗：下游清单+拓扑序+⚡ side-effect 徽章，L-2 闭环后真机）；app/src/kernel/stalePolicy.ts 冻结；resolveCascadeDecision 单测 diffLogic.test.ts |
+| P2.5 One-click Fix 卡片 + ContextChip 审计 | plan P2.5 · spec §8 | ✅ | [states/03-error-fixcard.png](states/03-error-fixcard.png)（FixCard 浮现+traceback 尾 3 行+`survey: DataFrame` schema chip，按钮"修复（traceback + 1 schemas → Agent）"，L-3 闭环）；[states/11-agent-stream.png](states/11-agent-stream.png)（payload 含 1 条 schema，ContextChip `1 schemas · 1 traceback`）；ContextChip 常驻见各图 |
 | P2.6 MCP stdio server + `novalab://` resources | plan P2.6 · spec §6.3 | ✅ | bridge mcp/server.test.ts（10 例）；docs/mcp-demo.md（Claude Code 实连命令+六工具表）；外部 Agent 真连演示未复现于本画廊 |
 | P2.7 PreviewSerializer 硬截断 + 审计 UI | plan P2.7 · spec §8 | ✅ | bridge preview.test.ts（7 例 fuzz）；ContextChip（[states/03](states/03-error-fixcard.png)/[states/10](states/10-settings.png)） |
 | P2.8 文件与会话管理（M8/M9，J 线） | plan P2.8 | ✅ | [states/08](states/08-readonly-session.png)/[states/09](states/09-sidebar-actions.png)；bridge fs/session-store/session-log/watch/ui-store 测试；app session.test.ts · sidebar/helpers.test.ts |
@@ -90,16 +90,17 @@
 | 亮色主题 + i18n 骨架 | P4.3 | 暗色单主题；UI 中英混排、无 i18n 框架（Q3 裁决 i18n 留 P4） |
 | 首启引导（uv 环境自检/修复向导） | P4.4 | 无 |
 | keychain/加密存储迁移 | P4 / ADR-008 | 现 localStorage 明文 + 设置面板常驻警告（[states/10-settings.png](states/10-settings.png)） |
+| LLM 代理（生产/Tauri CORS，L-1 尾段） | P4 | dev 已走 vite 同源代理 `/llm`（L-1 闭环）；用户自配 provider 在浏览器 dev 仍直连 baseURL（端点缺 CORS 头即被拦，设置面板警告区有提示）；生产/Tauri 构建直连 envBaseURL，待 bridge 侧 LLM 代理 |
 | 公测发布页 + 开源整理 | P4.5 | 无 |
 | wasm 纯前端预览（Could） | 未排期 | 无 |
 | 多人协同 / 云同步 / 非 Python 内核 | Won't | 明确不做（intent §9） |
 
-## 7. 遗留 bug 清单（L 线真机发现；按文件所有权未修）
+## 7. 遗留 bug 清单（L 线真机发现；M 线 2026-10-07 修复）
 
-| # | 现象 | 定位 | 证据 |
+| # | 现象 | 根因 → 修法 | 修复证据 |
 |---|---|---|---|
-| L-1 | 浏览器直连 tokenplan（aliyuncs MaaS anthropic-compat）被 CORS preflight 拦截（无 `Access-Control-Allow-Origin`）；node 侧同请求 HTTP 200。P2.1/P2.5 的流式段在浏览器不可用 | 环境/端点缺 CORS 头；需 bridge 侧 LLM 代理或 vite dev proxy（涉 app/bridge src，待裁决） | [states/11-agent-stream-degraded.png](states/11-agent-stream-degraded.png)（降级错误横幅）；console: `blocked by CORS policy` |
-| L-2 | 内核 `_cells_payload()` 上报 `sideEffect`（detect_side_effect 已接线），但 bridge `CellInfo`/`normalizeCells`（protocol.ts/router.ts）丢弃该字段 → CellHeader 与 CascadeAskDialog 的 `side-effect`/`⚡` 徽章恒不显示（spec §6.2 契约含该字段）；kernel 侧级联保护不受影响 | bridge/src/protocol.ts:53-59、router.ts normalizeCells | [states/05-ask-dialog.png](states/05-ask-dialog.png)（to_csv cell 无 ⚡ 徽章）；画廊运行备注 |
-| L-3 | run 完成后前端不刷新 schemas（未调 `kernel.vars`、run.done 不携 schemas）→ FixCard"traceback+相关 schemas 自动附着"实际只附 traceback（P2.5 验收子项） | app/src/store/notebook.ts（schemas 仅来自 notebook.open） | [states/03-error-fixcard.png](states/03-error-fixcard.png) 按钮原文"修复（traceback + 0 schemas → Agent）" |
-| L-4 | REPL/普通 cell 为纯 exec、无 displayhook：裸表达式（`df.shape`、`df`）不回显值，需 print 才有输出；与 Jupyter/marimo 的表达式回显范式不同 | py/novakernel/runtime.py `_run_cell`（compile "exec"） | [states/07-repl.png](states/07-repl.png)（[repl] cell 无输出区） |
+| L-1 ✅ | 浏览器直连 tokenplan（aliyuncs MaaS anthropic-compat）被 CORS preflight 拦截（无 `Access-Control-Allow-Origin`）；node 侧同请求 HTTP 200 | 端点无 CORS 头 → dev 加 vite 同源代理：`app/vite.config.ts` server.proxy `/llm`（target = loadEnv 的 VITE_NOVALAB_LLM_BASE_URL 去尾 `/v1`，rewrite 去 `/llm` 前缀），`providers.ts` getDevLanguageModel DEV 用 baseURL `/llm/v1`；生产/Tauri 未代理 → §6 新遗留行 | [states/11-agent-stream.png](states/11-agent-stream.png)（Agent 流式非降级：消息流+reasoning 部件）；curl 探针 `/llm/v1/messages` 回上游 401 InvalidApiKey 证转发通 |
+| L-2 ✅ | 内核 `_cells_payload()` 上报 `sideEffect`，但 bridge `CellInfo`/`normalizeCells`（protocol.ts/router.ts）丢弃 → CellHeader/CascadeAskDialog 的 `⚡ side-effect` 徽章恒不显示（违 spec §6.2 契约） | protocol.ts `CellInfo` 补 `sideEffect?: boolean` + router.ts `normalizeCells` 保留透传 | router.test.ts（notebook.open 响应 cells 含 sideEffect=true，夹具 cell 含 to_csv）；画廊备注"05: ⚡ side-effect 徽章已显示"+ [states/05-ask-dialog.png](states/05-ask-dialog.png) 重拍 |
+| L-3 ✅ | run 完成后前端不刷新 schemas → FixCard"traceback+相关 schemas 自动附着"只附 traceback（恒 0 schemas） | bridge router 在 run.done 后自动 introspect 并广播新通知 `kernel.schemas {schemas}`（protocol.ts 增 KernelSchemasParams）；app store connectBridge 增 case 写 store.schemas | [states/03-error-fixcard.png](states/03-error-fixcard.png)（按钮"修复（traceback + 1 schemas → Agent）"+ survey chip）；双端单测（bridge run.done→introspect+广播；app 通知→store.schemas） |
+| L-4 ✅ | REPL 纯 exec 无 displayhook：裸表达式（`df.shape`）不回显值，需 print 才有输出 | py runtime `exec_repl` displayhook：AST 拆分，末语句 Expr → eval 并发 run.mime {cellId:'repl', mime:'text/plain', data:repr}（repr 失败降级 str；None 不发；末句异常走 run.error 不回显） | [states/07-repl.png](states/07-repl.png)（[repl] cell 出现 output 披露区）；test_runtime.py 3 例（回显/赋值不回显/末句异常 run.error） |
 | O-1 | 观察（非 bug）：`# %% [cell-id: …]` 要求 8 位 hex；非 hex id（如 `w1a2b3c4`）按 spec §4 宽容降级为整文件单 cell，静默换 id。画廊夹具首版触发过 | py/novakernel/serialize.py CELL_MARKER_RE | 画廊脚本注释（scripts/demo-gallery.mjs） |

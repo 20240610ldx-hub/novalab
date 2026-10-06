@@ -266,6 +266,43 @@ def test_repl_does_not_steal_cell_attribution():
     assert rt.defined_by["x"] == "a"
 
 
+# --------------------------------------------- repl displayhook（L-4 裸表达式回显）
+
+def test_repl_bare_expression_echoes_repr():
+    # 末语句为裸表达式 → eval 后 run.mime text/plain 回显 repr；多语句只回显末句
+    rt, col = make([("a", "x = 40")])
+    rt.exec_cell("a")
+    rep = rt.exec_repl("y = 1\nx + y + 1")
+    assert rep["ok"] is True
+    assert col.of("run.mime", REPL_ID) == [
+        {"cellId": REPL_ID, "mime": "text/plain", "data": "42"}
+    ]
+    # None 结果不回显（displayhook 语义）
+    rep2 = rt.exec_repl("None")
+    assert rep2["ok"] is True
+    assert len(col.of("run.mime", REPL_ID)) == 1
+
+
+def test_repl_assignment_does_not_echo():
+    rt, col = make([("a", "x = 1")])
+    rt.exec_cell("a")
+    rep = rt.exec_repl("q = x + 1")
+    assert rep["ok"] is True
+    assert rt.globals["q"] == 2
+    assert col.of("run.mime", REPL_ID) == []
+
+
+def test_repl_last_expression_error_goes_run_error_without_echo():
+    # 末语句异常：照常 run.error（traceback 行号指向末句），不回显、不发 run.mime
+    rt, col = make([("a", "x = 1")])
+    rt.exec_cell("a")
+    rep = rt.exec_repl("y = 2\nundefined_name")
+    assert rep["ok"] is False and "NameError" in rep["traceback"]
+    assert col.of("run.error", REPL_ID)
+    assert col.of("run.mime", REPL_ID) == []
+    assert "y" not in rt.globals  # 失败 cell 的 defs 回滚（spec §12），y 不残留
+
+
 # ---------------------------------------------------------------- 通知流
 
 def test_stdout_stderr_capture_notifications():

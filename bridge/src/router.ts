@@ -400,12 +400,24 @@ export class RpcRouter {
   // ---------- kernel ----------
 
   private async kernelVars(): Promise<{ schemas: VarSchema[] }> {
-    const cache = this.requireCache();
+    this.requireCache();
+    const schemas = await this.introspectAndBroadcast();
+    return { schemas };
+  }
+
+  /**
+   * introspect → 刷新缓存 schemas → 广播 kernel.schemas（L-3）→ 返回新值。
+   * 调用点：kernel.vars 显式请求（错误照常抛给 RPC 调用方）；run.done 通知后
+   * 自动触发（调用侧 catch 落 stderr——刷新失败不打断执行主流程）。
+   */
+  private async introspectAndBroadcast(): Promise<VarSchema[]> {
     const res = (await this.deps.supervisor.request('introspect', {})) as {
-      schemas: VarSchema[];
+      schemas?: VarSchema[];
     };
-    cache.schemas = res.schemas ?? [];
-    return { schemas: cache.schemas };
+    const schemas = res.schemas ?? [];
+    if (this.cache) this.cache.schemas = schemas;
+    this.deps.broadcast('kernel.schemas', { schemas: structuredClone(schemas) });
+    return schemas;
   }
 
   private async kernelRepl(params: Record<string, unknown>): Promise<RunReport> {
@@ -633,6 +645,14 @@ export class RpcRouter {
       this.cache.execCounts[p.cellId] = p.execCount;
       const cell = this.cache.cells.find((c) => c.id === p.cellId);
       if (cell) cell.execCount = p.execCount;
+      // L-3：run 完成后自动 introspect 并广播 kernel.schemas——前端 store.schemas
+      // 随每次执行刷新（FixCard 的"traceback + N schemas"附着不再恒 0）。
+      // fire-and-forget：失败（内核重启中/已死）只落 stderr，不打断执行主流程。
+      this.introspectAndBroadcast().catch((err: unknown) => {
+        process.stderr.write(
+          `[bridge] run.done 后自动 introspect 失败: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      });
     }
   }
 
@@ -911,6 +931,9 @@ function normalizeCells(cells: NotebookState['cells']): NotebookState['cells'] {
     execCount: c.execCount ?? 0,
     defs: c.defs ?? [],
     refs: c.refs ?? [],
+    // L-2：内核 load_file/set_cells 回传的 sideEffect（spec §6.2 契约字段）必须保留，
+    // 否则前端 CellHeader/CascadeAskDialog 的 ⚡ 徽章恒不显示。缺省视为 false。
+    sideEffect: c.sideEffect === true,
   }));
 }
 
