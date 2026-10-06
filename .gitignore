@@ -12,3 +12,4 @@ refs/
 .DS_Store
 .tauri/
 .playwright-mcp/
+demos/gallery-created.py
