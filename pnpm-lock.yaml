@@ -31,6 +31,9 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.13
         version: 6.43.13
+      '@novalab/bridge':
+        specifier: workspace:*
+        version: link:../bridge
       '@tauri-apps/api':
         specifier: ^2.12.1
         version: 2.12.1

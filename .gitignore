@@ -11,3 +11,4 @@ refs/
 *.log
 .DS_Store
 .tauri/
+.playwright-mcp/

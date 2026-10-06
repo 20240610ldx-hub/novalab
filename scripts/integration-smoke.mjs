@@ -87,9 +87,14 @@ const dfSchema = vars.schemas.find((s) => s.name === 'df');
 if (!dfSchema?.shape) fail('kernel.vars 缺 df schema');
 console.log(`vars ok: df shape=${dfSchema.shape} columns=${dfSchema.columns?.length}`);
 
-// 反应式语义：改 c1 → c2/c3 应进 staleSet
-const edited = { ...c1, code: c1.code.replace('0.9', '1.9') };
-const saved = await rpc('cell.save', { cellId: c1.id, code: edited.code });
+// 反应式语义：改 c1 → c2/c3 应进 staleSet。
+// cell.save 会落盘（P1.8 起），故用幂等 toggle：当前含 1.9 则写回 0.9，反之亦然，
+// 保证每次运行都产生真实代码变更且 fixture 语义不变。
+const editedCode = c1.code.includes('1.9')
+  ? c1.code.replace('1.9', '0.9')
+  : c1.code.replace('0.9', '1.9');
+if (editedCode === c1.code) fail('demo.py 缺少可 toggle 的 pop 值（0.9/1.9）');
+const saved = await rpc('cell.save', { cellId: c1.id, code: editedCode });
 if (!saved.result?.staleSet?.includes(c2.id)) fail(`cell.save staleSet=${JSON.stringify(saved.result?.staleSet)}`);
 console.log(`reactive ok: staleSet=${saved.result.staleSet.length} cells`);
 
