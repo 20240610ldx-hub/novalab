@@ -220,6 +220,19 @@ proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策�
 
 **附录 A：Claude Science 复刻核对清单**——见 [intent.md §4 表](intent.md)（10 项元素 → 组件映射 → 阶段），验收时逐项对照截图勾核。
 
+**附录 A-2：第二批参考细节（2026-10-06 增补六图）**
+
+| # | 参考图细节 | 我们的对应 | 阶段 |
+|---|---|---|---|
+| 11 | 错误 cell：语言 chip 旁 `error (line N)` 红徽章 + **编辑器内出错源码行红底高亮** | CellHeader 徽章 + CellEditor 行装饰（traceback.frames[0].line） | P2.9（K 线） |
+| 12 | 会话结束态：footer `Python · ended 15:14 — view only; this kernel's namespace no longer exists`；`Ended HH:MM` pill 下拉 = 历史会话列表（N cells · read-only），点击进入只读浏览 | SessionBar + 只读模式（CM6 read-only + 运行禁用） | P2.8（J 线） |
+| 13 | 左 pill 下拉 = 命名会话/Agent 切换器（名称 + cell 数 + 来源标签如 `· Claude Science`） | SessionBar 切换器（当前 + 历史 + 来源标签） | P2.8 |
+| 14 | 截断横幅 `First 500 cells shown — full log in the session notebook's .ipynb download` | 只读会话视图 >500 cell 时横幅 + 导出入口 | P2.8 |
+| 15 | 输出下 `wrote <绝对路径…>` 文件写入通知行 | 内核 sys.addaudithook('open') 写模式钩子 → run.notify → OutputRenderer 通知行 | P2.9（K 线） |
+| 16 | footer 右侧 cell 计数（`19 cells` / `34 cells`） | KernelStatusBar 右侧 | P2.8 |
+| 17 | 富 MIME：matplotlib 多图/中文/对数坐标图 inline | matplotlib 已入 venv；run.mime image/png 链路 P2.9 验证 | P2.9 |
+| 18 | 命名内核 tab（`Python — geo`）ended 后 view-only | 与 S1/P3.1 多 tab 合并：tab 携带 ended 状态 | P3.1 |
+
 ---
 
 ## 11. Session 日志与导出（S2, P3）

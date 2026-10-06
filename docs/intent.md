@@ -91,6 +91,8 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 - **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。
 - **M6 模型解耦**：设置面板填 Anthropic / OpenAI / DeepSeek / 本地 Ollama(vLLM) 的 base_url+key；离线模型可全脱网运行。
 - **M7 内核状态栏 + 底部 REPL**：复刻截图元素 6、7。
+- **M8 工作区文件管理**（2026-10-06 增补，Owner 指出缺基本功能）：左侧可折叠文件树（workspace root 可设、.py 双击打开、新建/重命名/删除带确认、路径越界拒绝）；交互参考 refs/jupyterlab `packages/filebrowser`，视觉 clean-room。
+- **M9 会话管理**（同次增补）：内核生命周期 = 会话；历史会话列表（cell 数/起止时间/read-only）、只读浏览（ended 态 footer + 编辑器只读）、>500 cell 截断横幅 + .ipynb 全量导出入口、footer cell 计数。
 
 ### Should（MVP 后第一批）
 

@@ -40,7 +40,7 @@
 | P1.4 | 前端 CellList/CellHeader/CellEditor(CM6)/OutputDisclosure/OutputRenderer(text+traceback) | 100 cell 虚拟列表 60fps；折叠 output 复刻截图元素 3-5 | P1.3 | ✅ 完成（tsc/vitest 14 例/vite build 全绿；元素 2-7 齐；语法高亮为逐行正则 overlay——pnpm 严格解析下 @lezer/highlight 非直接依赖，P2 可提依赖换 TagSystem） |
 | P1.5 | 反应式 UI 联动：stale 徽章、级联运行流式刷新、编译错行内提示 | intent §8 演示脚本前半段 | P1.4 | ✅ 完成（store reducer + compileErrors 行内提示；stale 传递闭包经集成冒烟验证） |
 | P1.6 | KernelStatusBar + InlineREPL + LivePill（截图元素 2/6/7） | REPL 输出回灌匿名 cell | P1.4 | ✅ 完成（按冻结契约改为单一持久 [repl] cell；dead pill 点击重启） |
-| P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 | ⚠️ 脚手架完成（tauri 2.12 conf / bridge spawn 钩子 / 进程树清理 / README）；cargo check 被宿主环境阻塞：VS 18 壳 + WinSDK 10.0.26100 在、**MSVC VCTools 工具集缺**（无 cl/link.exe；Git Bash 的 /usr/bin/link.exe 是 coreutils 假链接器）；待 Owner 装 BuildTools VCTools；不阻塞 MVP（浏览器先行，ADR-005） |
+| P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 | ✅ 闭环（2026-10-06）：VCTools 补装于 VS18（Owner 执行）、图标集 `tauri icon` 生成、cargo check 绿；宿主两坑归档：Git usr\bin 的 coreutils link.exe 劫持 → 仓库级 rust-lld 免疫（.cargo/config.toml）；stable rustc 拒显式 msvc-lld flavor → 目标默认风味自动配对 |
 | P1.8 | .py 打开/保存/新建 + sidecar `.novalab/` + 崩溃恢复横幅 | 改文件外部→热重载提示 | P1.5 |
 | **D1** | **阶段演示**：intent §8 脚本除 Agent 段外全通（断网） | 录屏存档 `docs/demos/p1.gif` | 全部 |
 
@@ -54,7 +54,9 @@
 | P2.4 | `app/src/kernel/stalePolicy.ts → decideStalePolicy()`——**Owner 裁决：一律 mark-only**（2026-10-06，已实现）；P2 补设置面板开关（auto-cascade/ask）与策略 e2e | 已实现 ✅ + 开关/e2e 待 P2 |
 | P2.5 | One-click Fix 卡片：traceback+相关 schemas 自动附着、ContextChip 审计展开 | intent §8 全脚本通网版 |
 | P2.6 | MCP server (stdio) 对外暴露 + `novalab://` resources；Claude Code 实连演示 | 外部 Agent 提议 → 前端弹审阅 |
-| P2.7 | PreviewSerializer 硬截断 + 发送审计 UI | >4KB  fuzz 必截单测 |
+| P2.7 | PreviewSerializer 硬截断 + 发送审计 UI | >4KB  fuzz 必截单测 | ✅ bridge 侧完成（I 线）；审计 chip 随 G2 线 |
+| P2.8 | **文件与会话管理**（M8/M9，第四波 J 线）：左侧文件树 + bridge fs.*（越界拒绝）+ 会话历史/只读浏览/ended 态/截断横幅/cell 计数；交互参考 refs/jupyterlab filebrowser | 双包绿 + 手测开/建/改/删文件与只读会话 | 进行中 |
+| P2.9 | **错误 UX 与写事件**（附录 A-2 #11/15/17，第四波 K 线）：error(line N) 徽章 + 编辑器红行高亮；内核 addaudithook('open') 写钩子 → run.notify → `wrote …` 通知行；matplotlib inline 验证 | py/app 双绿 + 真机截图 | 进行中 |
 | **D2** | 阶段演示：报错→Fix→Diff→Tab→级联绿 全闭环 | `docs/demos/p2.gif` |
 
 ## 4. 阶段 3 · 上下文深潜与多内核（W8–W10）
@@ -80,6 +82,7 @@ P4.1 CI/CD：tauri-action 双平台产物 + 签名占位；P4.2 App View 模式�
 | `refs/marimo` | `_ast/compiler.py`、`_ast/visitor.py`（defs/refs 提取边角）；`_runtime/runner`、`_runtime/graph`（失效/级联/glitch-free）；`_server/api` + `websockets`（协议形态，S1 用）；`examples/`（serialize fixtures 来源） | 路线 A/B 共同的知识源；**读思路，抄测试用例形状，不抄代码**（Q4 许可证落定前） |
 | `refs/codemirror-merge` | `src/merge.ts`、examples/inline | MergeView 内嵌模式、hunk API、装饰器样式 hook（P2.3） |
 | `refs/vercel-ai` | `examples/ai-sdk-*`、`packages/ai/src/mcp` | useChat 流式、tool zod 单源、MCP client/server 装配（P2.1/P2.6） |
+| `refs/jupyterlab` | `packages/filebrowser/src/{listing.tsx,model.ts}`、`packages/docmanager` | 文件浏览器交互范式（双击打开、面包屑、选择与删除确认语义），P2.8 clean-room 参考 |
 
 ## 7. 风险登记（继承方案书 + 新增）
 
