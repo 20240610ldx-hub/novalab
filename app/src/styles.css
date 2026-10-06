@@ -13,6 +13,7 @@
   --accent-stale: #6b6b73;
   --diff-add: #1f3b2a;
   --diff-del: #3b1f24;
+  --sel-bg: #26364e; /* CM6 选区 */
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -28,3 +29,27 @@ body {
   font-family: var(--font-mono);
   font-size: 13px;
 }
+
+/* ---- CellEditor 语法着色 tokens（暗色，见 components/CellEditor.tsx overlay） ---- */
+.nl-com {
+  color: var(--accent-stale);
+  font-style: italic;
+} /* comment */
+.nl-str {
+  color: #98c379;
+} /* string */
+.nl-num {
+  color: var(--accent-run);
+} /* number */
+.nl-kw {
+  color: #c678dd;
+} /* keyword / self */
+.nl-fn {
+  color: #61afef;
+} /* function def & call */
+.nl-cls {
+  color: #e5c07b;
+} /* class name */
+.nl-bi {
+  color: #56b6c2;
+} /* builtin */
