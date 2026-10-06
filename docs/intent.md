@@ -85,7 +85,7 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 ### Must（MVP 没有就不发布）
 
 - **M1 反应式执行内核**：单赋值 DAG；编辑 cell 后下游传递闭包标 stale；运行支持级联重跑模式；循环依赖编译期报错。
-- **M2 纯 .py 主存储**：marimo 兼容格式（`# %%` cell 块 + 头部配置注释），git 友好、零 JSON 冲突。
+- **M2 纯 .py 主存储**：自定 `# %% [cell-id]` cell 块格式 + 头部配置注释，git 友好、零 JSON 冲突；marimo 互操作 = 单向宽容导入 + 转换器导出（P3.6；S1 侦察修正：marimo 原生为 @app.cell 装饰器式、文件内无 id，与本格式互不直读）。
 - **M3 单元格编辑器**：CodeMirror 6 多实例、行号、Python 高亮、块内横滚、可折叠 output、执行计数徽章。
 - **M4 修错闭环**：traceback 自动捕获 → Agent One-click Fix 卡片 → 行内红绿 Diff → `Tab` 采纳（自动触发运行）/ `Esc` 撤销；Agent 写入永远 staged，禁止静默改文件。
 - **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。
@@ -117,7 +117,7 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 - 选项 C：ipykernel + 外挂 DAG 层。失：有状态内核与反应式语义根本冲突，仅留作生态兼容参考，否。
 - **暂定结论**：plan 中设 3 天 spike（S2）+ Go/No-Go 门 G1：B 的原型若在一个 sprint 内达到"级联正确 + 失效正确"，走 B；否则整体切 A（marimo 为 Apache-2.0，协议级集成或 vendor 均合规）。两条路线共用同一 `KernelAdapter` 接口，前端无感。
 
-### ADR-002 文档模型：**单文件 = 单内核 = marimo 格式 .py；Tab = 打开的文件**
+### ADR-002 文档模型：**单文件 = 单内核 = 自定 .py 格式；Tab = 打开的文件**
 截图里的"内核标签页"在 P1/P2 用"多文件多进程"实现（每个 tab 一个 .py + 一个内核进程），语义干净。Session 汇总视图（segments）不改主存储，基于 sidecar 追加式事件日志 `.novalab/session.jsonl`（每次 run/diff/agent 动作一条），P3 再渲染成模态。
 
 ### ADR-003 Agent 栈：**Vercel AI SDK（前端流式）+ 本地 Bridge 双形态暴露工具**

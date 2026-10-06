@@ -79,7 +79,7 @@ Notebook Agent/
 
 ## 4. 文档模型与文件格式（M2）
 
-主存储 = **marimo 兼容子集**的纯 .py：
+主存储 = **自定 cell marker 格式**的纯 .py（原声称"marimo 兼容子集"，S1 侦察后修正）：
 
 ```python
 # /// script
@@ -103,6 +103,8 @@ df.groupby("county").sum()
 - 文件头 PEP 723 script 块 + `# [novalab]` 配置行（未知键忽略，前向兼容）。
 - **UI 状态（折叠、滚动、segment 命名）不进 .py**，存 sidecar `.novalab/ui.json`；执行事件存 `.novalab/session.jsonl`（ADR-002）。
 - 解析器对"手写的不规范 .py"宽容降级：无 marker 的单文件 = 按空行启发式切分或整体单 cell（导入 marimo 文件时同理）。
+
+**互操作修正（S1 侦察，2026-10-06，证据见 docs/spike-s1-memo.md）**：真 marimo .py 为 `@app.cell` 装饰器式、文件内无 cell id（运行时 4 字母重发），不能直读我们的 `# %% [cell-id]` 格式；marimo → NovaLab 为单向宽容导入（整文件单 cell 或启发式切分），NovaLab → marimo 经转换器（plan P3.6，2–4 人日，jupytext 作参考实现）。"兼容"卖点降级为"纯 .py、git 友好、可转换"。
 
 ---
 
@@ -145,8 +147,16 @@ introspect（M5 数据源）：对 globals 每名字产出
 | `session.tail` | req/res | 最近 N 条事件（SessionView, P3） |
 | `export.ipynb` | req | `{path, target}` |
 
-### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines，同 §6.1 语义子集）
-kernel 进程只说"执行语"：`exec_cell / exec_repl / introspect / ping / shutdown`；不含文件与 diff 概念。
+### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines；P1.3 集成后冻结）
+kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
+- `ping` → `{pong, version}`；**内核单线程同步，exec 期间无法应答；supervisor 仅 idle 时健康探测**
+- `load_file {path}` → NotebookState `{cells:[{id,code,defs,refs,sideEffect}], dagEdges, schemas, staleSet, execCounts}`
+- `save_file {path, cells}` → `{ok}`
+- `set_cells {cells:[{id,code}]}` → `{cells(重算含 defs/refs/sideEffect), edges, staleSet, compileError?}`
+- `exec_cell {cellId, cascade}` / `exec_repl {code}` → RunReport `{cellId, ok, cascaded, durationMs, traceback?}`
+- `introspect {}` → `{schemas}`；`shutdown` → `{ok}`
+通知：`run.started {cellId}` / `run.stdout {cellId,text}` / `run.stderr {cellId,text}` / `run.mime {cellId,mime,data}` / `run.error {cellId,traceback,frames}` / `run.done {cellId,execCount,cascaded,durationMs,defs,refs}`；repl 的 cellId 恒为 `"repl"`。
+错误码：`-32000` 内核内部、`-32001` 未打开 notebook。
 
 ### 6.3 外部 Agent ↔ Bridge（MCP over stdio，ADR-003）
 工具集见 §7；resource：`novalab://notebook/dag`、`novalab://cell/{id}`。外部 Agent 的 `propose_code_change` 同样只产生 staged diff（前端弹审阅），**不存在特权写入通道**。

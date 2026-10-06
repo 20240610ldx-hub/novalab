@@ -16,6 +16,8 @@
 | 首个Owner代码贡献点 | ✅ Owner 裁决 mark-only（2026-10-06），`stalePolicy.ts` 已实现；P2 补开关 UI |
 | Owner 开放问题裁决 | 2026-10-06：Q1–Q6 采纳 intent 倾向；Q7 = cc-switch tokenplan（值待 Owner 填 `app/.env.local`）✅ |
 | 骨架类型检查 | `app` / `bridge` tsc --noEmit 双绿（ai v7 / zod v4 / TS 7 生态）✅ |
+| S1 侦察 | ✅ docs/spike-s1-memo.md + docs/adr/001-kernel-route.md（proposed）：路线 A 12–20 人日 + 每 minor 2–4 人日维护税，倾向"A 可行但不划算"；重大修正：marimo 格式与本格式互不直读，转换器立 P3.6 |
+| G1 门 | ✅ 2026-10-06 裁决**路线 B**：S2 86 例 pytest 全绿 + integration-smoke.mjs 端到端绿；ADR-001 accepted；路线 A 保留为结构性缺陷兜底 |
 
 ---
 
@@ -33,11 +35,11 @@
 | id | 任务 | 交付物 / 验收 | 依赖 |
 |---|---|---|---|
 | P1.1 | 骨架落地：workspace、vite+tailwind v4、tsconfig strict、eslint | `pnpm dev` 起空壳三栏 | — |
-| P1.2 | `py/novakernel`：dag + runtime + introspect + serialize（marimo 子集读写）+ server 消息循环；pytest ≥60 例 | S2 扩展版全绿；`fixtures/` 往返无损 | G1 |
-| P1.3 | `bridge`：WS JSON-RPC router + KernelSupervisor（spawn/health/restart）+ 端口自愈；**冻结 KernelAdapter 接口** | 契约测试过；kill kernel 后一键恢复 | P1.2 |
-| P1.4 | 前端 CellList/CellHeader/CellEditor(CM6)/OutputDisclosure/OutputRenderer(text+traceback) | 100 cell 虚拟列表 60fps；折叠 output 复刻截图元素 3-5 | P1.3 |
-| P1.5 | 反应式 UI 联动：stale 徽章、级联运行流式刷新、编译错行内提示 | intent §8 演示脚本前半段 | P1.4 |
-| P1.6 | KernelStatusBar + InlineREPL + LivePill（截图元素 2/6/7） | REPL 输出回灌匿名 cell | P1.4 |
+| P1.2 | `py/novakernel`：dag + runtime + introspect + serialize（marimo 子集读写）+ server 消息循环；pytest ≥60 例 | S2 扩展版全绿；`fixtures/` 往返无损 | G1 | ✅ 完成（86 例绿；serialize 按 S1 修正降级为宽容导入；matplotlib 已入 data extras） |
+| P1.3 | `bridge`：WS JSON-RPC router + KernelSupervisor（spawn/health/restart）+ 端口自愈；**冻结 KernelAdapter 接口** | 契约测试过；kill kernel 后一键恢复 | P1.2 | ✅ 完成（39 例 vitest 绿；契约冻结入 spec §6.2；偏离：session kind 增 'save'、preview 位于 src/preview.ts、diff.accept/kernel.restart 响应形状定稿——待集成时回写 spec §6.1/§8/§11） |
+| P1.4 | 前端 CellList/CellHeader/CellEditor(CM6)/OutputDisclosure/OutputRenderer(text+traceback) | 100 cell 虚拟列表 60fps；折叠 output 复刻截图元素 3-5 | P1.3 | ✅ 完成（tsc/vitest 14 例/vite build 全绿；元素 2-7 齐；语法高亮为逐行正则 overlay——pnpm 严格解析下 @lezer/highlight 非直接依赖，P2 可提依赖换 TagSystem） |
+| P1.5 | 反应式 UI 联动：stale 徽章、级联运行流式刷新、编译错行内提示 | intent §8 演示脚本前半段 | P1.4 | ✅ 完成（store reducer + compileErrors 行内提示；stale 传递闭包经集成冒烟验证） |
+| P1.6 | KernelStatusBar + InlineREPL + LivePill（截图元素 2/6/7） | REPL 输出回灌匿名 cell | P1.4 | ✅ 完成（按冻结契约改为单一持久 [repl] cell；dead pill 点击重启） |
 | P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 |
 | P1.8 | .py 打开/保存/新建 + sidecar `.novalab/` + 崩溃恢复横幅 | 改文件外部→热重载提示 | P1.5 |
 | **D1** | **阶段演示**：intent §8 脚本除 Agent 段外全通（断网） | 录屏存档 `docs/demos/p1.gif` | 全部 |
@@ -62,6 +64,7 @@ P3.2 变量 inspector（状态栏拖出，S3）；
 P3.3 交互控件 mo 风格子集（slider/table → 绑定即重跑，S4）；
 P3.4 SessionModal + segments + .ipynb 导出/一次性导入（S2，截图元素 8/9）；
 P3.5 schema 嗅探扩展：numpy/scipy/geopandas 类型表；
+P3.6 marimo ↔ NovaLab .py 双向转换器（2–4 人日，S1 侦察估计；jupytext 参考实现，refs/marimo/examples 作 golden；起因：marimo 原生 @app.cell 式与本格式互不直读）；
 **D3** 演示：双内核同屏 + session 模态 + 导出 ipynb 在 JupyterLab 打开无误。
 
 ## 5. 阶段 4 · 产品化（W11–W12）
