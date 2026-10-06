@@ -1,0 +1,7 @@
+# Windows MSVC 目标的链接器免疫配置。
+# 背景：宿主系统 PATH 中 C:\Program Files\Git\usr\bin 居前，其 coreutils
+# link.exe 会shadow rustc 的 link.exe 查找（"link: extra operand" 错误）。
+# 不动系统 PATH，改用具名 rust-lld（rustc 自带、多 flavor 驱动），
+# 按目标自动走 msvc-lld 风味。版本升级无关；见 src-tauri/README P4 备注。
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
