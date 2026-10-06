@@ -1,0 +1,27 @@
+[package]
+name = "novalab"
+version = "0.0.1"
+description = "NovaLab desktop shell (Tauri v2, devUrl mode — see docs/spec.md §1/§2)"
+edition = "2021"
+rust-version = "1.82"
+
+# P1.7 is desktop-only (Windows dev machine); "staticlib"/"cdylib" crate types
+# are only needed for Tauri mobile targets — add them in P4 if mobile is ever
+# on the roadmap.
+[lib]
+name = "novalab_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Sensible defaults for P4 packaging; harmless in dev.
+codegen-units = 1
+lto = true
+strip = true

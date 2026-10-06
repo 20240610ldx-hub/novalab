@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NovaLab",
+  "version": "0.0.1",
+  "identifier": "dev.novalab.app",
+  "build": {
+    "devUrl": "http://localhost:5199",
+    "frontendDist": "../dist",
+    "beforeDevCommand": null,
+    "beforeBuildCommand": null
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NovaLab",
+        "width": 1280,
+        "height": 800,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": []
+  }
+}
