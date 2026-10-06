@@ -3,6 +3,9 @@
  *
  * 装配：KernelSupervisor（StdioKernelTransport 工厂，spawn uv/py 内核）
  * + RpcRouter（方法路由）+ broadcast（通知发给所有已连接客户端）。
+ *
+ * `--mcp [notebook.py]`：不起 WS，只起 stdio MCP server（spec §6.3，外部 Agent 接入）。
+ * stdout 专属 MCP 协议帧 —— 该模式下所有日志走 stderr。
  */
 
 import path from 'node:path';
@@ -12,6 +15,7 @@ import { ERR_PARSE, type RpcRequest } from './protocol';
 import { RpcRouter } from './router';
 import { KernelSupervisor, StdioKernelTransport } from './supervisor';
 import { createChokidarEventSource } from './watch';
+import { startMcpServer } from './mcp/server';
 
 const BASE_PORT = 7788;
 const MAX_PORT_TRIES = 10;
@@ -93,4 +97,31 @@ function shutdown(): void {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-start(BASE_PORT);
+// ---------- 模式分支：--mcp = stdio MCP server（不起 WS）；默认 = WS 服务 ----------
+
+const mcpFlagIdx = process.argv.indexOf('--mcp');
+if (mcpFlagIdx >= 0) {
+  // 可选位置参数：--mcp 之后第一个非 flag 参数视为要打开的 notebook 路径
+  const nbPath = process.argv
+    .slice(mcpFlagIdx + 1)
+    .find((a) => !a.startsWith('-'));
+  void (async () => {
+    await startMcpServer(router);
+    process.stderr.write('[bridge] MCP stdio server 已启动\n');
+    if (nbPath) {
+      const res = await router.handle({
+        jsonrpc: '2.0',
+        id: 0,
+        method: 'notebook.open',
+        params: { path: nbPath },
+      });
+      if (res.error) {
+        process.stderr.write(`[bridge] notebook.open 失败: ${res.error.message}\n`);
+      } else {
+        process.stderr.write(`[bridge] notebook 已打开: ${nbPath}\n`);
+      }
+    }
+  })();
+} else {
+  start(BASE_PORT);
+}

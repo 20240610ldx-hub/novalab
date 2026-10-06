@@ -272,8 +272,9 @@ describe('RpcRouter · diff 暂存队列', () => {
     expect(out.run).toMatchObject({ cellId: 'b', ok: true });
 
     const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    expect(setCells).toHaveLength(1);
-    const cells = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
+    // P2.7：diff.stage 编译预检（试探 + 回滚）2 次 + diff.accept 保存 1 次
+    expect(setCells).toHaveLength(3);
+    const cells = (setCells[2]!.params as { cells: { id: string; code: string }[] }).cells;
     expect(cells.find((c) => c.id === 'b')!.code).toBe('y = x + 2');
 
     const exec = fakes[0]!.requests.filter((r) => r.method === 'exec_cell');
@@ -297,7 +298,8 @@ describe('RpcRouter · diff 暂存队列', () => {
     expect(newId).toMatch(/^[0-9a-f]{8}$/);
 
     const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    const cells = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
+    // 最后一次 = diff.accept 的保存（前面是 stage 预检的试探 + 回滚）
+    const cells = (setCells.at(-1)!.params as { cells: { id: string; code: string }[] }).cells;
     expect(cells).toHaveLength(4);
     expect(cells[0]!.id).toBe('a');
     expect(cells[1]).toEqual({ id: newId, code: 'z = x * 10' });

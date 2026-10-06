@@ -15,6 +15,7 @@ import {
   ERR_METHOD_NOT_FOUND,
   ERR_NO_NOTEBOOK,
   type CompileError,
+  type DagEdge,
   type DiffAction,
   type NotebookState,
   type RpcRequest,
@@ -30,6 +31,55 @@ import { KernelError, KernelSupervisor } from './supervisor';
 import { SessionLogger, type SessionEventKind } from './session-log';
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
+import { serializePreview, TRUNCATION_SUFFIX } from './preview';
+
+/**
+ * agent.cellOutput 每字段的截断上限（spec §7：8KB）。
+ * 累积时即截（bound RSS），读取时对截断过的字段追加 TRUNCATION_SUFFIX。
+ */
+export const OUTPUT_CHAR_LIMIT = 8192;
+
+/** 每 cell 最近一次 run 的输出缓冲（从内核 run.* 通知流累积）。 */
+interface OutputBuffer {
+  stdout: string;
+  stderr: string;
+  stdoutTrunc: boolean;
+  stderrTrunc: boolean;
+  traceback?: string;
+  mimeKeys: string[];
+}
+
+/** agent.cellOutput / get_cell_output 结果形状（spec §7）。 */
+export interface CellOutputSnapshot {
+  stdout: string;
+  stderr: string;
+  traceback: string | null;
+  mimeKeys: string[];
+}
+
+/** agent.listCells 条目（spec §7 list_cells）。 */
+export interface AgentCellSummary {
+  id: string;
+  execCount: number;
+  status: 'stale' | 'error' | 'ok' | 'idle';
+  firstLine: string;
+  defs: string[];
+  refs: string[];
+}
+
+/** agent.context 结果（spec §7 get_notebook_context；schemas 过 preview 截断出口）。 */
+export interface AgentContext {
+  dagEdges: DagEdge[];
+  schemas: VarSchema[];
+  focusCellId: string | null;
+  staleSet: string[];
+}
+
+/** diff.stage 结果：正常入队 {diffId}，或编译预检拒绝 {rejected, reason}。 */
+export type StageResult = { diffId: string } | { rejected: true; reason: CompileError };
+
+/** diff.stage 编译预检用的临时 cell id（试探后随即回滚，不进缓存）。 */
+const PRECHECK_CELL_ID = '__diff_precheck__';
 
 /** 带 JSON-RPC 错误码的路由级异常。 */
 export class RpcFault extends Error {
@@ -67,6 +117,8 @@ export class RpcRouter {
   private logger?: SessionLogger;
   private diffs: StagedDiff[] = [];
   private diffSeq = 0;
+  /** 每 cell 最近一次 run 的输出缓存（agent.cellOutput / get_cell_output 用）。 */
+  private outputs = new Map<string, OutputBuffer>();
   private readonly clock: () => Date;
   private readonly ui: UiStore;
   private readonly watcher?: NotebookWatcher;
@@ -105,6 +157,14 @@ export class RpcRouter {
     }
   }
 
+  /**
+   * in-process 方法入口（P2.6）：与 WS dispatch 同一路由，
+   * 供 bridge/src/mcp/tools.ts 的 execute 实现调用（错误直接抛 RpcFault，不包 JSON-RPC 信封）。
+   */
+  invoke(method: string, params?: unknown): Promise<unknown> {
+    return this.dispatch(method, params);
+  }
+
   // ---------- dispatch ----------
 
   private async dispatch(method: string, rawParams: unknown): Promise<unknown> {
@@ -130,6 +190,14 @@ export class RpcRouter {
         return this.diffAccept(params);
       case 'diff.reject':
         return this.diffReject(params);
+      case 'agent.context':
+        return this.agentContext();
+      case 'agent.listCells':
+        return this.agentListCells();
+      case 'agent.cellCode':
+        return this.agentCellCode(params);
+      case 'agent.cellOutput':
+        return this.agentCellOutput(params);
       case 'ui.get':
         return this.uiGet(params);
       case 'ui.set':
@@ -154,6 +222,7 @@ export class RpcRouter {
     this.logger = new SessionLogger(path.dirname(p), this.clock);
     this.diffs = [];
     this.diffSeq = 0;
+    this.outputs.clear();
     // P1.8 热重载：watch 新路径（内部先 unwatch 旧路径）
     this.watcher?.watch(p);
     return this.snapshot();
@@ -304,7 +373,15 @@ export class RpcRouter {
 
   // ---------- diff（内存暂存队列，UI 在 P2） ----------
 
-  private diffStage(params: Record<string, unknown>): { diffId: string } {
+  /**
+   * diff.stage：入队前做编译预检（spec §7 Reactive Rulebook 的机器侧保险）。
+   * 把"应用该 diff 后的全量 cells"发给内核 set_cells 试探（纯静态分析，不执行）：
+   * - compileError → 不入队，返回 {rejected:true, reason}，让模型自纠；
+   * - 试探后无论成败都再 set_cells 回滚为原 cells。两次额外往返的成本可接受：
+   *   set_cells 无执行开销，而拦下一个多重定义/环能让前端少弹一次无效审阅。
+   * 预检不触碰 this.cache / 不落盘（直接 supervisor.request，绕开 applyCellsToKernel）。
+   */
+  private async diffStage(params: Record<string, unknown>): Promise<StageResult> {
     const cache = this.requireCache();
     const targetCellId = strParam(params, 'targetCellId');
     const action = params['action'];
@@ -315,6 +392,18 @@ export class RpcRouter {
     if (!cache.cells.some((c) => c.id === targetCellId)) {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown targetCellId: ${targetCellId}`);
     }
+
+    // —— 编译预检：候选 cells 试探 + 无条件回滚 ——
+    const original = cache.cells.map((c) => ({ id: c.id, code: c.code }));
+    const candidate = buildCandidateCells(cache.cells, targetCellId, action as DiffAction, newCode);
+    const probe = (await this.deps.supervisor.request('set_cells', {
+      cells: candidate,
+    })) as SetCellsResult;
+    await this.deps.supervisor.request('set_cells', { cells: original });
+    if (probe.compileError) {
+      return { rejected: true, reason: probe.compileError };
+    }
+
     const rationale = typeof params['rationale'] === 'string' ? params['rationale'] : undefined;
     const diff: StagedDiff = {
       diffId: `diff-${++this.diffSeq}`,
@@ -400,6 +489,69 @@ export class RpcRouter {
     this.deps.broadcast('diff.updated', { diffs: structuredClone(this.diffs) });
   }
 
+  // ---------- agent.*（P2.6/P2.7：前端 in-process 工具与 MCP server 共用，spec §7） ----------
+
+  /** get_notebook_context：DAG 边 + schemas（过 preview 截断出口，spec §8）+ staleSet；无原始数据。 */
+  private agentContext(): AgentContext {
+    const c = this.requireCache();
+    return {
+      dagEdges: structuredClone(c.dagEdges),
+      // 隐私边界（spec §8）：schemas 出进程前必过 PreviewSerializer 4KB 硬截断
+      schemas: serializePreview(c.schemas) as VarSchema[],
+      focusCellId: null,
+      staleSet: [...c.staleSet],
+    };
+  }
+
+  /** list_cells：全部 cell 的摘要（不含源码正文，只有首行）。 */
+  private agentListCells(): AgentCellSummary[] {
+    const c = this.requireCache();
+    const stale = new Set(c.staleSet);
+    return c.cells.map((cell) => {
+      const firstLine = (cell.code.split('\n')[0] ?? '').trim();
+      return {
+        id: cell.id,
+        execCount: cell.execCount,
+        status: this.cellStatus(cell.id, cell.execCount, stale.has(cell.id)),
+        firstLine: firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine,
+        defs: [...cell.defs],
+        refs: [...cell.refs],
+      };
+    });
+  }
+
+  private cellStatus(id: string, execCount: number, isStale: boolean): AgentCellSummary['status'] {
+    if (isStale) return 'stale';
+    if (this.outputs.get(id)?.traceback !== undefined) return 'error';
+    if (execCount > 0) return 'ok';
+    return 'idle';
+  }
+
+  /** get_cell_code：源码原文（spec §7 白名单"代码文本"，不截断）。 */
+  private agentCellCode(params: Record<string, unknown>): { cellId: string; code: string } {
+    const cache = this.requireCache();
+    const cellId = strParam(params, 'cellId');
+    const cell = cache.cells.find((c) => c.id === cellId);
+    if (!cell) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
+    return { cellId, code: cell.code };
+  }
+
+  /** get_cell_output：最近一次 run 的 stdout/stderr/traceback/mimeKeys，各字段截断 8KB。 */
+  private agentCellOutput(params: Record<string, unknown>): CellOutputSnapshot {
+    const cache = this.requireCache();
+    const cellId = strParam(params, 'cellId');
+    if (cellId !== 'repl' && !cache.cells.some((c) => c.id === cellId)) {
+      throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
+    }
+    const buf = this.outputs.get(cellId);
+    return {
+      stdout: capOutput(buf?.stdout ?? '', buf?.stdoutTrunc ?? false),
+      stderr: capOutput(buf?.stderr ?? '', buf?.stderrTrunc ?? false),
+      traceback: buf?.traceback !== undefined ? capOutput(buf.traceback, false) : null,
+      mimeKeys: buf ? [...buf.mimeKeys] : [],
+    };
+  }
+
   // ---------- ui sidecar（.novalab/ui.json，P1.8） ----------
 
   private uiGet(params: Record<string, unknown>): NotebookUiState {
@@ -418,6 +570,7 @@ export class RpcRouter {
   // ---------- 通知侧效应 ----------
 
   private onKernelNotification(method: string, params: unknown): void {
+    this.accumulateOutput(method, params);
     if (!this.cache) return;
     if (method === 'run.done') {
       const p = params as RunDoneParams;
@@ -425,6 +578,66 @@ export class RpcRouter {
       const cell = this.cache.cells.find((c) => c.id === p.cellId);
       if (cell) cell.execCount = p.execCount;
     }
+  }
+
+  /**
+   * 从内核 run.* 通知流累积每 cell 的"最近一次输出"（agent.cellOutput 数据源）。
+   * run.started 重置缓冲；stdout/stderr/mime/error 增量写入；累积时即按 8KB 截断（bound RSS）。
+   * 不依赖 this.cache —— repl（cellId="repl"）的输出也要能读。
+   */
+  private accumulateOutput(method: string, params: unknown): void {
+    const p = params as Record<string, unknown>;
+    const cellId = typeof p['cellId'] === 'string' ? p['cellId'] : undefined;
+    if (!cellId) return;
+    switch (method) {
+      case 'run.started':
+        this.outputs.set(cellId, {
+          stdout: '',
+          stderr: '',
+          stdoutTrunc: false,
+          stderrTrunc: false,
+          mimeKeys: [],
+        });
+        return;
+      case 'run.stdout':
+      case 'run.stderr': {
+        const buf = this.ensureOutputBuffer(cellId);
+        const text = typeof p['text'] === 'string' ? p['text'] : '';
+        if (method === 'run.stdout') {
+          const r = appendCapped(buf.stdout, text);
+          buf.stdout = r.value;
+          buf.stdoutTrunc = buf.stdoutTrunc || r.truncated;
+        } else {
+          const r = appendCapped(buf.stderr, text);
+          buf.stderr = r.value;
+          buf.stderrTrunc = buf.stderrTrunc || r.truncated;
+        }
+        return;
+      }
+      case 'run.mime': {
+        const buf = this.ensureOutputBuffer(cellId);
+        const mime = typeof p['mime'] === 'string' ? p['mime'] : undefined;
+        if (mime && !buf.mimeKeys.includes(mime)) buf.mimeKeys.push(mime);
+        return;
+      }
+      case 'run.error': {
+        const buf = this.ensureOutputBuffer(cellId);
+        const tb = typeof p['traceback'] === 'string' ? p['traceback'] : String(p['traceback'] ?? '');
+        buf.traceback = tb.length > OUTPUT_CHAR_LIMIT ? tb.slice(0, OUTPUT_CHAR_LIMIT) + TRUNCATION_SUFFIX : tb;
+        return;
+      }
+      default:
+        return; // run.done 等：缓冲保留为"最近一次"，无需动作
+    }
+  }
+
+  private ensureOutputBuffer(cellId: string): OutputBuffer {
+    let buf = this.outputs.get(cellId);
+    if (!buf) {
+      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [] };
+      this.outputs.set(cellId, buf);
+    }
+    return buf;
   }
 
   private log(kind: SessionEventKind, cellId?: string, payloadRef?: string): void {
@@ -438,6 +651,41 @@ export class RpcRouter {
 }
 
 // ---------- helpers ----------
+
+/** 8KB 截断读取：截过则追加 TRUNCATION_SUFFIX（spec §7 get_cell_output）。 */
+function capOutput(s: string, truncated: boolean): string {
+  return truncated ? s + TRUNCATION_SUFFIX : s;
+}
+
+/** 累积写入并按 OUTPUT_CHAR_LIMIT 封顶，返回是否发生截断。 */
+function appendCapped(current: string, text: string): { value: string; truncated: boolean } {
+  const next = current + text;
+  if (next.length > OUTPUT_CHAR_LIMIT) {
+    return { value: next.slice(0, OUTPUT_CHAR_LIMIT), truncated: true };
+  }
+  return { value: next, truncated: false };
+}
+
+/** diff.stage 编译预检：构造"应用该 diff 后的全量 cells"（insert_below 用临时 id）。 */
+function buildCandidateCells(
+  cells: NotebookState['cells'],
+  targetCellId: string,
+  action: DiffAction,
+  newCode: string,
+): { id: string; code: string }[] {
+  const out: { id: string; code: string }[] = [];
+  for (const c of cells) {
+    if (action === 'update' && c.id === targetCellId) {
+      out.push({ id: c.id, code: newCode });
+    } else {
+      out.push({ id: c.id, code: c.code });
+    }
+    if (action === 'insert_below' && c.id === targetCellId) {
+      out.push({ id: PRECHECK_CELL_ID, code: newCode });
+    }
+  }
+  return out;
+}
 
 function strParam(params: Record<string, unknown>, key: string): string {
   const v = params[key];
