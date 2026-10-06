@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   applyRunEvent,
   applyStaleSet,
@@ -6,6 +6,7 @@ import {
   normalizeCells,
   normalizeDiffs,
   upsertReplCell,
+  useNotebook,
 } from './notebook';
 import { createEmptyOutput, type Cell } from '../kernel/types';
 
@@ -181,5 +182,82 @@ describe('normalizeDiffs（diff.updated status→state 映射）', () => {
   it('非数组/缺省 diffs 返回空数组', () => {
     expect(normalizeDiffs({})).toEqual([]);
     expect(normalizeDiffs(null)).toEqual([]);
+  });
+});
+
+describe('uiCollapsed sidecar（P1.8：hydrateUi / 折叠 action / 热重载保留）', () => {
+  beforeEach(() => {
+    // 重置为初始状态（notebookPath=null → 折叠/激活变更不会触发 bridge 持久化）
+    useNotebook.setState({
+      cells: [],
+      dagEdges: [],
+      staleSet: [],
+      schemas: [],
+      diffs: [],
+      activeCellId: null,
+      notebookPath: null,
+      compileErrors: {},
+      uiCollapsed: {},
+    });
+  });
+
+  it('hydrateUi 水合折叠集合与 activeCellId，垃圾值被过滤', () => {
+    useNotebook.getState().hydrateUi({
+      collapsed: { a: true, b: false, junk: 'yes', n: 1 },
+      activeCellId: 'b',
+    });
+    const s = useNotebook.getState();
+    expect(s.uiCollapsed).toEqual({ a: true, b: false });
+    expect(s.activeCellId).toBe('b');
+  });
+
+  it('hydrateUi 损坏/缺省载荷 → 空折叠集合，不抛、不覆盖 activeCellId', () => {
+    useNotebook.setState({ activeCellId: 'keep-me', uiCollapsed: { old: true } });
+    useNotebook.getState().hydrateUi(null);
+    expect(useNotebook.getState().uiCollapsed).toEqual({});
+    expect(useNotebook.getState().activeCellId).toBe('keep-me'); // null 不覆盖
+    useNotebook.getState().hydrateUi({ collapsed: 'oops', activeCellId: 42 });
+    expect(useNotebook.getState().uiCollapsed).toEqual({});
+    expect(useNotebook.getState().activeCellId).toBe('keep-me');
+  });
+
+  it('setCellCollapsed 合并写 uiCollapsed（OutputDisclosure 切换的 store action）', () => {
+    useNotebook.getState().setCellCollapsed('a', true);
+    useNotebook.getState().setCellCollapsed('b', false);
+    useNotebook.getState().setCellCollapsed('a', false);
+    expect(useNotebook.getState().uiCollapsed).toEqual({ a: false, b: false });
+  });
+
+  it('热重载全量 notebook.state 不冲掉 uiCollapsed，仍存在的 activeCellId 保留', () => {
+    useNotebook.setState({ uiCollapsed: { a: true }, activeCellId: 'b' });
+    useNotebook.getState().applyNotebookState({
+      cells: [
+        { id: 'a', code: 'x = 1' },
+        { id: 'b', code: 'y = x + 1' },
+      ],
+      dagEdges: [{ from: 'a', to: 'b' }],
+      schemas: [],
+      staleSet: [],
+      execCounts: { a: 0, b: 0 },
+    });
+    const s = useNotebook.getState();
+    expect(s.uiCollapsed).toEqual({ a: true }); // 折叠集合原样
+    expect(s.activeCellId).toBe('b'); // 不被重置为首 cell
+  });
+
+  it('activeCellId 已不在新 cells 中 → 回退首 cell；[repl] cell 照旧保留', () => {
+    const repl: Cell = { ...makeCell({ id: 'repl', kind: 'repl' }), output: createEmptyOutput() };
+    useNotebook.setState({ cells: [repl], activeCellId: 'ghost', uiCollapsed: { ghost: true } });
+    useNotebook.getState().applyNotebookState({
+      cells: [{ id: 'n1', code: 'v = 1' }],
+      dagEdges: [],
+      schemas: [],
+      staleSet: [],
+      execCounts: { n1: 0 },
+    });
+    const s = useNotebook.getState();
+    expect(s.activeCellId).toBe('n1');
+    expect(s.cells.map((c) => c.id)).toEqual(['n1', 'repl']); // 持久 [repl] cell 保留
+    expect(s.uiCollapsed).toEqual({ ghost: true }); // uiCollapsed 不随 cells 清理
   });
 });

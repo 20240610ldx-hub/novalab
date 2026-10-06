@@ -235,6 +235,11 @@ interface NotebookStore {
   bridgeConnected: boolean;
   /** cell.save 返回的编译错（cellId → message），P1.5 行内提示的数据源。 */
   compileErrors: Record<string, string>;
+  /**
+   * output 折叠状态（P1.8，sidecar `.novalab/ui.json` 水合）。
+   * 独立于 cells 存放：热重载的全量 notebook.state 不会冲掉它。
+   */
+  uiCollapsed: Record<string, boolean>;
 
   setState: (patch: Partial<Omit<NotebookStore, 'setState' | 'setActive'>>) => void;
   setActive: (cellId: string | null) => void;
@@ -242,6 +247,10 @@ interface NotebookStore {
   connectBridge: () => Promise<void>;
   openNotebook: (path: string) => Promise<void>;
   applyNotebookState: (payload: unknown) => void;
+  /** ui.get 响应水合折叠集合与 activeCellId（损坏载荷回退空对象，不抛）。 */
+  hydrateUi: (payload: unknown) => void;
+  /** OutputDisclosure 折叠切换：写 uiCollapsed + 500ms debounce 持久化 ui.set。 */
+  setCellCollapsed: (cellId: string, collapsed: boolean) => void;
   setCellCode: (cellId: string, code: string) => void;
   saveCell: (cellId: string, code: string) => Promise<void>;
   runCell: (cellId: string) => Promise<void>;
@@ -251,6 +260,30 @@ interface NotebookStore {
 
 /** 连接 promise 记忆化：StrictMode 双挂载/多处调用只建一条 WS、只订阅一次通知。 */
 let connectPromise: Promise<void> | null = null;
+
+/** UI 状态持久化（ui.set）的 debounce 窗口：折叠切换/激活 cell 共用一条通道。 */
+export const UI_PERSIST_DEBOUNCE_MS = 500;
+let uiPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 调度一次 ui.set（500ms debounce 合并连发）：把当前 uiCollapsed + activeCellId
+ * 整包写给 bridge sidecar。未打开 notebook 时无事发生（纯本地状态变更不持久化）。
+ */
+function scheduleUiPersist(get: () => NotebookStore): void {
+  if (!get().notebookPath) return;
+  if (uiPersistTimer) clearTimeout(uiPersistTimer);
+  uiPersistTimer = setTimeout(() => {
+    uiPersistTimer = null;
+    const s = get();
+    if (!s.notebookPath) return;
+    bridge
+      .rpc('ui.set', {
+        path: s.notebookPath,
+        patch: { collapsed: s.uiCollapsed, activeCellId: s.activeCellId },
+      })
+      .catch((err: unknown) => console.error('ui.set 失败:', err));
+  }, UI_PERSIST_DEBOUNCE_MS);
+}
 
 /**
  * 持久 REPL cell 的固定 id（bridge 冻结契约：run.* 通知的 cellId 恒为 "repl"）。
@@ -270,9 +303,13 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   notebookPath: null,
   bridgeConnected: false,
   compileErrors: {},
+  uiCollapsed: {},
 
   setState: (patch) => set(patch),
-  setActive: (cellId) => set({ activeCellId: cellId }),
+  setActive: (cellId) => {
+    set({ activeCellId: cellId });
+    scheduleUiPersist(get); // P1.8：activeCell 走 sidecar 持久化通道（500ms debounce）
+  },
 
   /** 连接 bridge 并订阅通知（run.* / kernel.status / notebook.state）。 */
   connectBridge: () => {
@@ -318,6 +355,13 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       const res = await bridge.rpc<NotebookStatePayload>('notebook.open', { path });
       set({ notebookPath: path });
       get().applyNotebookState(res);
+      // P1.8：水合 UI sidecar（折叠集合 + activeCellId）；失败不阻塞打开主流程
+      try {
+        const ui = await bridge.rpc('ui.get', { path });
+        get().hydrateUi(ui);
+      } catch (err) {
+        console.error('ui.get 失败:', err);
+      }
     } catch (err) {
       console.error('notebook.open 失败:', err);
       set({ bridgeConnected: false });
@@ -331,13 +375,40 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     const prevRepl = get().cells.find((c) => c.id === REPL_CELL_ID);
     const next =
       prevRepl && !cells.some((c) => c.id === REPL_CELL_ID) ? [...cells, prevRepl] : cells;
+    // 热重载/重启的全量 state 不冲掉用户当前激活的 cell（仍存在则保留；
+    // uiCollapsed 是独立键，set 天然不触碰）
+    const prevActive = get().activeCellId;
+    const activeCellId =
+      prevActive !== null && next.some((c) => c.id === prevActive)
+        ? prevActive
+        : (next[0]?.id ?? prevActive);
     set({
       cells: next,
       dagEdges: p.dagEdges ?? [],
       staleSet: p.staleSet ?? [],
       schemas: p.schemas ?? [],
-      activeCellId: cells[0]?.id ?? get().activeCellId,
+      activeCellId,
     });
+  },
+
+  hydrateUi: (payload) => {
+    const p = asRecord(payload);
+    const rawCollapsed = asRecord(p.collapsed);
+    const collapsed: Record<string, boolean> = {};
+    for (const [cellId, v] of Object.entries(rawCollapsed)) {
+      if (typeof v === 'boolean') collapsed[cellId] = v;
+    }
+    // activeCellId 仅在 sidecar 存有有效值时覆盖（applyNotebookState 已选了默认）
+    const active = typeof p.activeCellId === 'string' ? p.activeCellId : null;
+    set({
+      uiCollapsed: collapsed,
+      ...(active !== null ? { activeCellId: active } : {}),
+    });
+  },
+
+  setCellCollapsed: (cellId, collapsed) => {
+    set({ uiCollapsed: { ...get().uiCollapsed, [cellId]: collapsed } });
+    scheduleUiPersist(get);
   },
 
   setCellCode: (cellId, code) => {
