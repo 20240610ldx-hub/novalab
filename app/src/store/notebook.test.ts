@@ -261,3 +261,18 @@ describe('uiCollapsed sidecar（P1.8：hydrateUi / 折叠 action / 热重载保�
     expect(s.uiCollapsed).toEqual({ ghost: true }); // uiCollapsed 不随 cells 清理
   });
 });
+
+describe('applyRunEvent run.notify（P2.9 缝合：文件写事件 → output.writes）', () => {
+  it('file-write 追加、同路径去重、封顶 50、非 file-write 忽略', () => {
+    let cells: Cell[] = [{ ...makeCell({ id: 'w' }), output: createEmptyOutput() }];
+    cells = applyRunEvent(cells, 'run.notify', { cellId: 'w', kind: 'file-write', path: 'P1' });
+    cells = applyRunEvent(cells, 'run.notify', { cellId: 'w', kind: 'file-write', path: 'P1' });
+    expect(cells[0]?.output?.writes).toEqual(['P1']);
+    for (let i = 0; i < 60; i++) {
+      cells = applyRunEvent(cells, 'run.notify', { cellId: 'w', kind: 'file-write', path: `F${i}` });
+    }
+    expect(cells[0]?.output?.writes.length).toBe(50);
+    cells = applyRunEvent(cells, 'run.notify', { cellId: 'w', kind: 'other', path: 'X' });
+    expect(cells[0]?.output?.writes.length).toBe(50);
+  });
+});

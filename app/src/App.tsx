@@ -3,13 +3,16 @@ import { useNotebook } from './store/notebook';
 import { CellList } from './components/CellList';
 import { KernelStatusBar } from './components/KernelStatusBar';
 import { InlineREPL } from './components/InlineREPL';
-import { LivePill } from './components/LivePill';
+import { SessionBar, SessionStatusPill } from './components/SessionBar';
+import { Sidebar } from './components/sidebar';
 import { AgentPanel } from './components/AgentPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 
 /**
- * 主列（header / CellList / KernelStatusBar / InlineREPL）+ 右 AgentPanel（P2.1/P2.5）。
- * 复刻清单见 docs/spec.md 附录 A（元素 2-7 于 P1.4/P1.6 落地）。
+ * 左缘 Sidebar（P2.8 工作区文件树/最近打开）+ 主列（header / CellList /
+ * KernelStatusBar / InlineREPL）+ 右 AgentPanel（P2.1/P2.5）。
+ * header 左 pill = SessionBar 会话切换器、右 pill = SessionStatusPill（live/Ended，
+ * P2.8 替换原 LivePill 位置）。复刻清单见 docs/spec.md 附录 A（元素 2-7 于 P1.4/P1.6 落地）。
  * 启动：bridge.connect() → 失败显示降级横幅；?path= 存在则 notebook.open。
  * 快捷键：Ctrl/Cmd+Enter 运行 active cell。
  */
@@ -59,15 +62,15 @@ export function App() {
     void useNotebook.getState().openNotebook(path);
   };
 
-  const fileName = notebookPath ? notebookPath.split(/[\\/]/).pop() : null;
-
   return (
     <div className="flex h-full">
+      {/* P2.8：工作区 sidebar（icon rail + 文件树 / 最近打开） */}
+      <Sidebar />
+
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
-          <span className="rounded-full bg-[var(--panel)] px-3 py-1">
-            {fileName ? `${fileName} · python` : 'NovaLab'}
-          </span>
+          {/* P2.8：左 pill = 会话切换器（当前 + 历史，A-2 #13） */}
+          <SessionBar />
 
           {/* 无 ?path= 时的打开入口 */}
           {!notebookPath && (
@@ -92,9 +95,9 @@ export function App() {
             </span>
           )}
 
-          {/* 元素 2：右上 live pill */}
+          {/* 元素 2 位（P2.8）：右上 pill = live / Ended HH:MM + 会话下拉（A-2 #12） */}
           <span className="ml-auto">
-            <LivePill />
+            <SessionStatusPill />
           </span>
         </header>
 

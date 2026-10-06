@@ -141,6 +141,20 @@ export interface RunDoneParams {
   durationMs: number;
 }
 
+/**
+ * run.notify：内核结构化副作用通知（P2.9）。目前唯一 kind 是 'file-write'——
+ * exec 窗口内以写方式打开的文件（绝对路径，内核已去重、单次 exec ≤50 条）；
+ * kind 保持开放字符串以便后续扩展（如 network-request）。
+ */
+export type RunNotifyKind = 'file-write';
+
+export interface RunNotifyParams {
+  cellId: string;
+  kind: RunNotifyKind | (string & NonNullable<unknown>);
+  /** kind='file-write' 时为写入文件的绝对路径。 */
+  path?: string;
+}
+
 export interface KernelStatusParams {
   state: KernelState;
   queueDepth: number;
@@ -163,6 +177,86 @@ export interface DiffUpdatedParams {
   diffs: StagedDiff[];
 }
 
+// ---------- fs.*（P2.8 工作区文件管理，intent M8 / spec 附录 A-2） ----------
+
+/** fs.list 条目（目录在前、各自按名排序，bridge/src/fs.ts 负责排序）。 */
+export interface FsEntry {
+  name: string;
+  kind: 'dir' | 'file';
+  /** 文件字节数；目录恒 0。 */
+  size: number;
+  /** ISO-8601 修改时间。 */
+  mtime: string;
+}
+
+/** fs.setRoot / fs.root 响应。 */
+export interface FsRootResult {
+  root: string | null;
+}
+
+// ---------- session.*（P2.8 会话管理，intent M9 / spec §11 / A-2 #12-14） ----------
+
+/** `.novalab/sessions/index.json` 条目：一个内核生命周期的元数据。 */
+export interface SessionMeta {
+  id: string;
+  startedAt: string;
+  /** 未结束（live）时缺省。 */
+  endedAt?: string;
+  cellCount: number;
+  source: 'local' | 'agent';
+}
+
+/** 会话快照 cell（`<sessionId>.snapshot.json`）：全量 cell + 输出缓冲摘要。 */
+export interface SessionSnapshotCell {
+  id: string;
+  code: string;
+  execCount: number;
+  defs: string[];
+  refs: string[];
+  /** 最近一次 run 的输出摘要（stdout/stderr 已在累积期 8KB 截断；mime 只留键名；writes 为 P2.9 文件写入通知路径）。 */
+  output: {
+    stdout: string;
+    stderr: string;
+    traceback: string | null;
+    mimeKeys: string[];
+    writes: string[];
+  };
+}
+
+/** 会话结束快照全文。 */
+export interface SessionSnapshot {
+  sessionId: string;
+  notebookPath: string;
+  startedAt: string;
+  endedAt: string;
+  endReason?: SessionEndReason;
+  cells: SessionSnapshotCell[];
+}
+
+/** session.open 响应：只读投影（live 会话 endedAt 为 null）。 */
+export interface SessionOpenResult {
+  sessionId: string;
+  startedAt: string;
+  endedAt: string | null;
+  cells: SessionSnapshotCell[];
+  readOnly: true;
+}
+
+/** 会话结束原因（session.ended 通知）。 */
+export type SessionEndReason = 'restart' | 'crash' | 'switch' | 'shutdown';
+
+export interface SessionStartedParams {
+  sessionId: string;
+  startedAt: string;
+  notebookPath: string;
+}
+
+export interface SessionEndedParams {
+  sessionId: string;
+  endedAt: string;
+  reason: SessionEndReason;
+}
+
 // ---------- 内核 stdio wire 契约（§6.2，与 py 工作线共同冻结） ----------
 
 /**
@@ -178,6 +272,7 @@ export interface DiffUpdatedParams {
  *
  * 内核通知（stdout 无 id 行）：run.stdout/run.stderr {cellId,text}、
  * run.mime {cellId,mime,data}、run.error {cellId,traceback,frames}、
+ * run.notify {cellId,kind,path}（kind='file-write'，P2.9 写事件）、
  * run.done {cellId,execCount,cascaded,durationMs}、run.started {cellId}（可选）。
  */
 export type KernelMethod =

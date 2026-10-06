@@ -1,16 +1,19 @@
 import { useState, type KeyboardEvent } from 'react';
 import { useNotebook } from '../store/notebook';
+import { useSession } from '../store/session';
 
 /**
  * 底部内联 REPL（截图元素 7）：`>>> run code in this kernel…`
  * Enter → kernel.repl；输出以匿名 cell（[repl] 徽章）插入列表尾（store.runRepl）。
  * 直达内核，不参与 DAG、不标 stale。
+ * P2.8：历史会话只读模式 → 输入禁用（该内核命名空间已不存在）。
  */
 export function InlineREPL() {
   const [code, setCode] = useState('');
   const runRepl = useNotebook((s) => s.runRepl);
   const kernelState = useNotebook((s) => s.kernelState);
-  const disabled = kernelState === 'dead' || kernelState === 'connecting';
+  const readOnly = useSession((s) => s.readOnly);
+  const disabled = readOnly || kernelState === 'dead' || kernelState === 'connecting';
 
   const submit = () => {
     const trimmed = code.trim();
@@ -34,7 +37,7 @@ export function InlineREPL() {
         onChange={(e) => setCode(e.target.value)}
         onKeyDown={onKeyDown}
         disabled={disabled}
-        placeholder="run code in this kernel…"
+        placeholder={readOnly ? 'view only — this kernel\'s namespace no longer exists' : 'run code in this kernel…'}
         spellCheck={false}
         className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text)] placeholder-[var(--muted)] outline-none disabled:cursor-not-allowed disabled:opacity-50"
       />

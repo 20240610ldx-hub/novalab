@@ -86,6 +86,8 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
   execDelayMs = 0;
   /** 脚本化失败：exec 该 cell 时回 run.error + ok:false。 */
   failCell?: { cellId: string; traceback: string };
+  /** 脚本化写事件（P2.9）：exec 该 cell 时对每个 path 发 run.notify file-write。 */
+  notifyWrites?: { cellId: string; paths: string[] };
   /** 脚本化编译错：下一次 set_cells 返回 compileError。 */
   nextCompileError?: { message: string; cellIds: string[] };
   /** 不回 ping（测 supervisor 超时判死）。 */
@@ -241,6 +243,11 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
       cellId,
       text: isRepl ? `repl: ${replCode ?? ''}\n` : `fake output for ${cellId}\n`,
     });
+    if (this.notifyWrites && this.notifyWrites.cellId === cellId) {
+      for (const p of this.notifyWrites.paths) {
+        this.notify('run.notify', { cellId, kind: 'file-write', path: p });
+      }
+    }
 
     const cascaded: string[] = [];
     if (cascade && !isRepl) {

@@ -1,4 +1,5 @@
-import type { Cell } from '../kernel/types';
+import { lastCellFrameLine, type Cell } from '../kernel/types';
+import { useSession } from '../store/session';
 
 interface CellHeaderProps {
   cell: Cell;
@@ -10,10 +11,16 @@ interface CellHeaderProps {
 /**
  * cell 头（截图元素 3 + 增量徽章）：
  * [execCount] 执行计数徽章（repl 匿名 cell 显示 [repl]）· python 语言 chip ·
+ * error (line N) 红徽章（P2.9，N = traceback 最后一个用户帧行号）·
  * stale 灰徽章 · side-effect amber 徽章（默认不级联）· hover 浮现运行按钮 ▶。
  */
 export function CellHeader({ cell, onRun, compileError }: CellHeaderProps) {
   const running = cell.status === 'running';
+  // P2.8：历史会话只读 → 运行钮禁用（禁用矩阵见 store/session.capabilityMatrix）
+  const readOnly = useSession((s) => s.readOnly);
+  // P2.9：出错行号取自最近一次 traceback 的最后一个 <cell …> 帧；无用户帧退化为 "error"
+  const errorLine =
+    cell.status === 'error' ? lastCellFrameLine(cell.output?.traceback?.frames) : null;
   return (
     <>
     <div className="group flex items-center gap-2 px-3 pt-2 text-[var(--muted)] select-none">
@@ -33,6 +40,16 @@ export function CellHeader({ cell, onRun, compileError }: CellHeaderProps) {
       <span className="rounded-full border border-[var(--border)] px-2 py-px text-[11px]">
         python
       </span>
+
+      {/* error (line N) 红徽章（P2.9，参考图：语言 chip 旁） */}
+      {cell.status === 'error' && (
+        <span
+          className="rounded bg-[var(--diff-del)] px-1.5 py-0.5 text-[11px] text-[var(--accent-err)]"
+          title="最近一次运行失败"
+        >
+          {errorLine !== null ? `error (line ${errorLine})` : 'error'}
+        </span>
+      )}
 
       {/* stale 徽章 */}
       {cell.status === 'stale' && (
@@ -65,8 +82,8 @@ export function CellHeader({ cell, onRun, compileError }: CellHeaderProps) {
             e.stopPropagation();
             onRun(cell.id);
           }}
-          disabled={running}
-          title="Run cell (Ctrl/Cmd+Enter)"
+          disabled={running || readOnly}
+          title={readOnly ? "read-only session — this kernel's namespace no longer exists" : 'Run cell (Ctrl/Cmd+Enter)'}
           className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-[var(--accent-run)] opacity-0 transition-opacity group-hover:opacity-100 hover:border-[var(--accent-run)] disabled:cursor-default disabled:opacity-40"
         >
           ▶

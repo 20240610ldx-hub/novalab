@@ -17,18 +17,26 @@ import {
   type CompileError,
   type DagEdge,
   type DiffAction,
+  type FsEntry,
+  type FsRootResult,
   type NotebookState,
   type RpcRequest,
   type RpcResponse,
   type RunDoneParams,
   type RunReport,
   type SaveResult,
+  type SessionEndReason,
+  type SessionMeta,
+  type SessionOpenResult,
+  type SessionSnapshotCell,
   type SetCellsResult,
   type StagedDiff,
   type VarSchema,
 } from './protocol';
 import { KernelError, KernelSupervisor } from './supervisor';
-import { SessionLogger, type SessionEventKind } from './session-log';
+import type { SessionEventKind } from './session-log';
+import { FsError, FsManager } from './fs';
+import { SessionStore, type ActiveSession } from './session-store';
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
@@ -39,6 +47,13 @@ import { serializePreview, TRUNCATION_SUFFIX } from './preview';
  */
 export const OUTPUT_CHAR_LIMIT = 8192;
 
+/**
+ * agent.cellOutput 缓存的 file-write 路径条数上限（P2.9）。
+ * 内核侧同路径已去重、单次 exec 也限 50 条；bridge 侧再兜底一层，
+ * 8KB 字符截断对路径列表不适用，改用条数封顶（bound RSS）。
+ */
+export const WRITES_PATH_LIMIT = 50;
+
 /** 每 cell 最近一次 run 的输出缓冲（从内核 run.* 通知流累积）。 */
 interface OutputBuffer {
   stdout: string;
@@ -47,6 +62,8 @@ interface OutputBuffer {
   stderrTrunc: boolean;
   traceback?: string;
   mimeKeys: string[];
+  /** run.notify kind='file-write' 的路径（写入顺序，去重，≤WRITES_PATH_LIMIT）。 */
+  writes: string[];
 }
 
 /** agent.cellOutput / get_cell_output 结果形状（spec §7）。 */
@@ -55,6 +72,7 @@ export interface CellOutputSnapshot {
   stderr: string;
   traceback: string | null;
   mimeKeys: string[];
+  writes: string[];
 }
 
 /** agent.listCells 条目（spec §7 list_cells）。 */
@@ -107,6 +125,10 @@ export interface RouterDeps {
   watcherSuppressMs?: number;
   /** UI sidecar 存储（默认新建 UiStore；单测注入以控制 debounce/flush）。 */
   uiStore?: UiStore;
+  /** 工作区文件系统（默认新建 FsManager；单测注入）。 */
+  fs?: FsManager;
+  /** 会话存储（默认新建 SessionStore；单测注入以控制时钟）。 */
+  sessionStore?: SessionStore;
 }
 
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
@@ -114,18 +136,23 @@ const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
 export class RpcRouter {
   private cache?: NotebookState;
   private notebookPath?: string;
-  private logger?: SessionLogger;
+  /** 当前内核生命周期的会话句柄（P2.8：事件按 sessionId 落 .novalab/sessions/）。 */
+  private session?: ActiveSession;
   private diffs: StagedDiff[] = [];
   private diffSeq = 0;
   /** 每 cell 最近一次 run 的输出缓存（agent.cellOutput / get_cell_output 用）。 */
   private outputs = new Map<string, OutputBuffer>();
   private readonly clock: () => Date;
   private readonly ui: UiStore;
+  private readonly fs: FsManager;
+  private readonly sessions: SessionStore;
   private readonly watcher?: NotebookWatcher;
 
   constructor(private readonly deps: RouterDeps) {
     this.clock = deps.clock ?? (() => new Date());
     this.ui = deps.uiStore ?? new UiStore();
+    this.fs = deps.fs ?? new FsManager();
+    this.sessions = deps.sessionStore ?? new SessionStore(this.clock);
     if (deps.watcherFactory) {
       const factory = deps.watcherFactory;
       this.watcher = new NotebookWatcher({
@@ -140,10 +167,13 @@ export class RpcRouter {
       this.onKernelNotification(n.method, n.params);
       deps.broadcast(n.method, n.params);
     });
+    // P2.8：内核进程死亡 = 当前会话 ended（新会话在 restart 成功后开启）
+    deps.supervisor.on('crash', () => this.endSession('crash'));
   }
 
-  /** 进程退场：停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
+  /** 进程退场：会话快照落盘、停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
   dispose(): void {
+    this.endSession('shutdown');
     this.watcher?.close();
     this.ui.flush();
   }
@@ -202,6 +232,24 @@ export class RpcRouter {
         return this.uiGet(params);
       case 'ui.set':
         return this.uiSet(params);
+      case 'fs.setRoot':
+        return this.fsSetRoot(params);
+      case 'fs.root':
+        return this.fsRoot();
+      case 'fs.list':
+        return this.fsList(params);
+      case 'fs.mkdir':
+        return this.fsMkdir(params);
+      case 'fs.rename':
+        return this.fsRename(params);
+      case 'fs.remove':
+        return this.fsRemove(params);
+      case 'fs.writeFile':
+        return this.fsWriteFile(params);
+      case 'session.list':
+        return this.sessionList(params);
+      case 'session.open':
+        return this.sessionOpen(params);
       case 'export.ipynb':
         throw new RpcFault(ERR_INVALID_REQUEST, 'P3 feature');
       default:
@@ -217,14 +265,18 @@ export class RpcRouter {
       throw new RpcFault(ERR_INVALID_PARAMS, 'notebook.open 需要 {path: string}');
     }
     const state = await this.deps.supervisor.start(p);
+    // P2.8：换 notebook = 旧会话 ended（旧 cache/outputs 仍在 → 快照完整），再开新会话
+    this.endSession('switch');
     this.cache = normalizeState(state);
     this.notebookPath = p;
-    this.logger = new SessionLogger(path.dirname(p), this.clock);
+    // 默认工作区 root = 最近一次 notebook.open 的 dirname（fs.setRoot 可改）
+    this.fs.setRootDefault(path.dirname(p));
     this.diffs = [];
     this.diffSeq = 0;
     this.outputs.clear();
     // P1.8 热重载：watch 新路径（内部先 unwatch 旧路径）
     this.watcher?.watch(p);
+    this.beginSession(p);
     return this.snapshot();
   }
 
@@ -366,8 +418,11 @@ export class RpcRouter {
 
   private async kernelRestart(): Promise<NotebookState> {
     this.requireCache();
+    // P2.8：restart = 当前会话 ended（写快照）+ 新内核生命周期开新会话
+    this.endSession('restart');
     const state = await this.deps.supervisor.restart();
     this.cache = normalizeState(state);
+    if (this.notebookPath) this.beginSession(this.notebookPath);
     return this.snapshot();
   }
 
@@ -536,7 +591,7 @@ export class RpcRouter {
     return { cellId, code: cell.code };
   }
 
-  /** get_cell_output：最近一次 run 的 stdout/stderr/traceback/mimeKeys，各字段截断 8KB。 */
+  /** get_cell_output：最近一次 run 的 stdout/stderr/traceback/mimeKeys/writes，字符字段截断 8KB、路径列表限 50 条。 */
   private agentCellOutput(params: Record<string, unknown>): CellOutputSnapshot {
     const cache = this.requireCache();
     const cellId = strParam(params, 'cellId');
@@ -549,6 +604,7 @@ export class RpcRouter {
       stderr: capOutput(buf?.stderr ?? '', buf?.stderrTrunc ?? false),
       traceback: buf?.traceback !== undefined ? capOutput(buf.traceback, false) : null,
       mimeKeys: buf ? [...buf.mimeKeys] : [],
+      writes: buf ? [...buf.writes] : [],
     };
   }
 
@@ -597,6 +653,7 @@ export class RpcRouter {
           stdoutTrunc: false,
           stderrTrunc: false,
           mimeKeys: [],
+          writes: [],
         });
         return;
       case 'run.stdout':
@@ -626,6 +683,17 @@ export class RpcRouter {
         buf.traceback = tb.length > OUTPUT_CHAR_LIMIT ? tb.slice(0, OUTPUT_CHAR_LIMIT) + TRUNCATION_SUFFIX : tb;
         return;
       }
+      case 'run.notify': {
+        // P2.9 写事件：kind='file-write' 的 path 进缓存（agent.cellOutput.writes）。
+        // 透传前端由构造函数里的 broadcast 统一完成，这里只做累积。
+        if (p['kind'] !== 'file-write') return;
+        const path = p['path'];
+        if (typeof path !== 'string' || path === '') return;
+        const buf = this.ensureOutputBuffer(cellId);
+        if (buf.writes.length >= WRITES_PATH_LIMIT || buf.writes.includes(path)) return;
+        buf.writes.push(path);
+        return;
+      }
       default:
         return; // run.done 等：缓冲保留为"最近一次"，无需动作
     }
@@ -634,19 +702,160 @@ export class RpcRouter {
   private ensureOutputBuffer(cellId: string): OutputBuffer {
     let buf = this.outputs.get(cellId);
     if (!buf) {
-      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [] };
+      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], writes: [] };
       this.outputs.set(cellId, buf);
     }
     return buf;
   }
 
   private log(kind: SessionEventKind, cellId?: string, payloadRef?: string): void {
-    this.logger?.append({
+    this.session?.append({
       kind,
       actor: 'user',
       ...(cellId !== undefined ? { cellId } : {}),
       ...(payloadRef !== undefined ? { payloadRef } : {}),
     });
+  }
+
+  // ---------- 会话生命周期（P2.8，intent M9） ----------
+
+  /** 开新会话（内核生命周期起点）：index 追加 live 条目 + 广播 session.started。 */
+  private beginSession(notebookPath: string): void {
+    const session = this.sessions.begin({
+      notebookDir: path.dirname(notebookPath),
+      notebookPath,
+      cellCount: this.cache?.cells.length ?? 0,
+    });
+    this.session = session;
+    this.deps.broadcast('session.started', {
+      sessionId: session.id,
+      startedAt: session.startedAt,
+      notebookPath,
+    });
+  }
+
+  /**
+   * 结束当前会话：snapshot.json（cells 全量 + 输出缓冲摘要）+ index.endedAt
+   * + 广播 session.ended。无活跃会话时 no-op。落盘失败只记 stderr（审计降级不崩主流程）。
+   */
+  private endSession(reason: SessionEndReason): void {
+    const session = this.session;
+    if (!session) return;
+    this.session = undefined;
+    try {
+      const meta = this.sessions.end(session, this.snapshotCells(), reason);
+      this.deps.broadcast('session.ended', {
+        sessionId: session.id,
+        endedAt: meta.endedAt ?? this.clock().toISOString(),
+        reason,
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[bridge] 会话快照落盘失败（${session.id}）: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  /** 当前 cache 的快照 cells（输出摘要取自 outputs 缓存，字段已在累积期 8KB 截断）。 */
+  private snapshotCells(): SessionSnapshotCell[] {
+    return (this.cache?.cells ?? []).map((c) => {
+      const buf = this.outputs.get(c.id);
+      return {
+        id: c.id,
+        code: c.code,
+        execCount: c.execCount ?? 0,
+        defs: [...c.defs],
+        refs: [...c.refs],
+        output: {
+          stdout: capOutput(buf?.stdout ?? '', buf?.stdoutTrunc ?? false),
+          stderr: capOutput(buf?.stderr ?? '', buf?.stderrTrunc ?? false),
+          traceback: buf?.traceback ?? null,
+          mimeKeys: buf ? [...buf.mimeKeys] : [],
+          writes: buf ? [...buf.writes] : [],
+        },
+      };
+    });
+  }
+
+  // ---------- fs.*（P2.8，工作区 root 监狱在 FsManager） ----------
+
+  private fsSetRoot(params: Record<string, unknown>): FsRootResult {
+    return { root: this.fs.setRoot(strParam(params, 'dir')) };
+  }
+
+  private fsRoot(): FsRootResult {
+    return { root: this.fs.getRoot() };
+  }
+
+  private fsList(params: Record<string, unknown>): FsEntry[] {
+    const dir = typeof params['dir'] === 'string' ? params['dir'] : '';
+    return this.fs.list(dir);
+  }
+
+  private fsMkdir(params: Record<string, unknown>): { path: string } {
+    return this.fs.mkdir(strParam(params, 'dir'));
+  }
+
+  private fsRename(params: Record<string, unknown>): { path: string } {
+    return this.fs.rename(strParam(params, 'from'), strParam(params, 'to'));
+  }
+
+  private fsRemove(params: Record<string, unknown>): { removed: string } {
+    return this.fs.remove(strParam(params, 'path'));
+  }
+
+  private fsWriteFile(params: Record<string, unknown>): { path: string } {
+    return this.fs.writeFile(strParam(params, 'path'), strParam(params, 'content'));
+  }
+
+  // ---------- session.*（P2.8） ----------
+
+  /** session.list：index.json 全量；live 条目的 cellCount 以当前缓存为准。 */
+  private sessionList(params: Record<string, unknown>): SessionMeta[] {
+    const nb =
+      typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
+        ? params['notebookPath']
+        : this.notebookPath;
+    if (!nb) {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'session.list 需要 {notebookPath}（当前无已打开 notebook）');
+    }
+    const metas = this.sessions.list(path.dirname(nb));
+    const liveId = this.session?.id;
+    if (liveId && this.cache) {
+      const live = metas.find((m) => m.id === liveId);
+      if (live) live.cellCount = this.cache.cells.length;
+    }
+    return metas;
+  }
+
+  /** session.open：历史会话 = snapshot 只读投影；live id = 内存缓存现做投影（endedAt:null）。 */
+  private sessionOpen(params: Record<string, unknown>): SessionOpenResult {
+    const sessionId = strParam(params, 'sessionId');
+    const nb =
+      typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
+        ? params['notebookPath']
+        : this.notebookPath;
+    if (!nb) {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'session.open 需要 {notebookPath}（当前无已打开 notebook）');
+    }
+    if (this.session && this.session.id === sessionId) {
+      return {
+        sessionId,
+        startedAt: this.session.startedAt,
+        endedAt: null,
+        cells: this.snapshotCells(),
+        readOnly: true,
+      };
+    }
+    const found = this.sessions.open(path.dirname(nb), sessionId);
+    if (!found) throw new RpcFault(ERR_INVALID_PARAMS, `unknown sessionId: ${sessionId}`);
+    return {
+      sessionId,
+      startedAt: found.snapshot.startedAt,
+      endedAt: found.snapshot.endedAt,
+      cells: found.snapshot.cells,
+      readOnly: true,
+    };
   }
 }
 
@@ -722,6 +931,7 @@ function normalizeState(state: NotebookState): NotebookState {
 
 export function toRpcError(err: unknown): { code: number; message: string } {
   if (err instanceof RpcFault) return { code: err.code, message: err.message };
+  if (err instanceof FsError) return { code: err.code, message: err.message };
   if (err instanceof KernelError) return { code: err.code || ERR_KERNEL, message: err.message };
   const message = err instanceof Error ? err.message : String(err);
   return { code: ERR_INTERNAL, message };

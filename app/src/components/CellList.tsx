@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNotebook } from '../store/notebook';
-import { isOutputEmpty, type Cell } from '../kernel/types';
+import { isOutputEmpty, lastCellFrameLine, type Cell } from '../kernel/types';
 import { CellHeader } from './CellHeader';
 import { CellEditor } from './CellEditor';
 import { DiffOverlay } from './diff/InlineDiff';
@@ -48,7 +48,13 @@ function CellView({
       <CellHeader cell={cell} onRun={onRun} compileError={compileError} />
 
       {mounted ? (
-        <CellEditor value={cell.code} onChange={(code) => onCodeChange(cell.id, code)} />
+        <CellEditor
+          value={cell.code}
+          onChange={(code) => onCodeChange(cell.id, code)}
+          errorLine={
+            cell.status === 'error' ? lastCellFrameLine(cell.output?.traceback?.frames) : null
+          }
+        />
       ) : (
         // 静态占位：与编辑器同字体/行高，保证滚动几何接近、切回时无跳变
         <pre className="whitespace-pre overflow-x-auto border-l border-[var(--border)] px-3 py-[6px] text-[13px] leading-[1.65] text-[var(--text)]">

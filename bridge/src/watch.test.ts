@@ -149,7 +149,8 @@ describe('NotebookWatcher · debounce / 自写跳过 / unwatch', () => {
 // ---------- router 集成（FakeKernel + 假事件源，缩短窗口用真实计时器） ----------
 
 const NB_PATH = path.join(mkdtempSync(path.join(tmpdir(), 'novalab-watch-router-')), 'demo.py');
-const SESSION_FILE = path.join(path.dirname(NB_PATH), '.novalab', 'session.jsonl');
+// P2.8：session 事件按内核生命周期分文件（.novalab/sessions/<id>.jsonl + index.json）
+const SESSIONS_DIR = path.join(path.dirname(NB_PATH), '.novalab', 'sessions');
 
 interface SessionEventLike {
   ts: string;
@@ -158,9 +159,19 @@ interface SessionEventLike {
   payloadRef?: string;
 }
 
+/** index 顺序最后一个（= 最新）会话的事件流。 */
 function sessionEvents(): SessionEventLike[] {
-  if (!existsSync(SESSION_FILE)) return [];
-  return readFileSync(SESSION_FILE, 'utf8')
+  let index: { id: string }[];
+  try {
+    index = JSON.parse(readFileSync(path.join(SESSIONS_DIR, 'index.json'), 'utf8')) as { id: string }[];
+  } catch {
+    return [];
+  }
+  const last = index.at(-1);
+  if (!last) return [];
+  const file = path.join(SESSIONS_DIR, `${last.id}.jsonl`);
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
     .split('\n')
     .filter((l) => l.trim() !== '')
     .map((l) => JSON.parse(l) as SessionEventLike);

@@ -11,6 +11,8 @@
 - exec_repl：直接操作同一 globals，通知 cellId 恒为 "repl"，不参与 DAG 归属；
 - 通知形状（冻结）：run.started {cellId}；run.stdout/run.stderr {cellId,text}；
   run.mime {cellId,mime,data}；run.error {cellId,traceback,frames}；
+  run.notify {cellId,kind,path}（kind='file-write'：exec 期间写盘的文件绝对路径，
+  同路径去重、单次 exec 至多 WRITE_NOTIFY_LIMIT 条）；
   run.done {cellId,execCount,cascaded,durationMs,defs,refs}。
   触发 cell 的 run.done 在级联完成后发出（cascaded 为实际执行成功的下游 id）。
 """
@@ -21,6 +23,7 @@ import builtins as _builtins_mod
 import contextlib
 import io
 import linecache
+import os
 import sys
 import time
 import traceback as tbmod
@@ -114,6 +117,111 @@ class _NotifyStream(io.TextIOBase):
 
 def _cell_filename(cell_id: str) -> str:
     return f"<cell {cell_id}>"
+
+
+# ---------------------------------------------------------------- write 审计
+# CPython 的 sys.addaudithook 注册的钩子无法卸载，故采用「进程级单例钩子 +
+# exec 窗口槽位」：钩子只在 _ACTIVE_WATCHER 槽位非空（= 某次 exec 进行中）时
+# 处理 open 事件；槽位在 _run_cell 的 exec 开始时置入、结束时（含异常路径）
+# 清空——语义上等价于「钩子仅在本次 exec 期间生效」。
+
+# builtins.open / io.open 的 mode 为字符串：含 w/a/x/+ 即写意图
+_WRITE_MODE_CHARS = frozenset("wax+")
+# os.open 路径：mode 是 int 权限位，写意图看 flags
+_WRITE_FLAG_MASK = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+# 单次 exec 的 file-write 通知上限（防循环写临时文件造成通知风暴）
+WRITE_NOTIFY_LIMIT = 50
+
+_ACTIVE_WATCHER: "_WriteWatcher | None" = None
+_AUDIT_INSTALLED = False
+
+
+def _audit_hook(event: str, args: tuple) -> None:
+    # 钩子内异常会传播进触发事件的调用点（破坏所有 open），必须整体吞掉
+    if event == "open" and _ACTIVE_WATCHER is not None:
+        try:
+            _ACTIVE_WATCHER.on_open(args)
+        except Exception:  # noqa: BLE001 — 审计钩子绝不向宿主进程抛错
+            pass
+
+
+class _WriteWatcher:
+    """收集一次 exec 窗口内以写方式打开的文件路径，结束后发 run.notify。
+
+    - 审计事件 open (path, mode, flags)：mode 为 str 时看 w/a/x/+；为 int
+      （os.open）时看 flags 写位——只读打开不发；
+    - pandas to_csv/to_excel、matplotlib savefig 底层都走 open，自动覆盖；
+    - import 触发的字节码缓存写（__pycache__/*.pyc）是解释器噪音，过滤；
+    - 同路径去重（normcase+abspath 比较），发出的 path 规整为绝对路径，
+      至多 WRITE_NOTIFY_LIMIT 条。
+    """
+
+    __slots__ = ("cell_id", "emit", "paths", "_seen", "_prev")
+
+    def __init__(self, cell_id: str, emit) -> None:
+        self.cell_id = cell_id
+        self.emit = emit
+        self.paths: list[str] = []
+        self._seen: set[str] = set()
+        self._prev: _WriteWatcher | None = None
+
+    def __enter__(self) -> "_WriteWatcher":
+        global _ACTIVE_WATCHER, _AUDIT_INSTALLED
+        if not _AUDIT_INSTALLED:
+            _AUDIT_INSTALLED = True
+            sys.addaudithook(_audit_hook)
+        self._prev = _ACTIVE_WATCHER
+        _ACTIVE_WATCHER = self
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        global _ACTIVE_WATCHER
+        _ACTIVE_WATCHER = self._prev
+        self.flush()
+        return False  # 不吞 exec 的异常
+
+    def on_open(self, args: tuple) -> None:
+        mode = args[1] if len(args) > 1 else None
+        if isinstance(mode, str):
+            if not _WRITE_MODE_CHARS.intersection(mode):
+                return
+        else:
+            flags = args[2] if len(args) > 2 else 0
+            try:
+                if not int(flags) & _WRITE_FLAG_MASK:
+                    return
+            except (TypeError, ValueError):
+                return
+        p = _path_to_str(args[0] if args else None)
+        if p is None or p.endswith(".pyc") or "__pycache__" in p:
+            return
+        key = os.path.normcase(os.path.abspath(p))
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        if len(self.paths) < WRITE_NOTIFY_LIMIT:
+            self.paths.append(os.path.abspath(p))
+
+    def flush(self) -> None:
+        for p in self.paths:
+            self.emit("run.notify", {
+                "cellId": self.cell_id, "kind": "file-write", "path": p,
+            })
+        self.paths = []
+
+
+def _path_to_str(path) -> str | None:
+    """审计事件的 path 可能是 str/bytes/PathLike/int(fd)；fd 无法恢复路径名。"""
+    if isinstance(path, str):
+        return path
+    if isinstance(path, bytes):
+        return os.fsdecode(path)
+    if isinstance(path, int):
+        return None
+    try:
+        return os.fspath(path)
+    except TypeError:
+        return None
 
 
 class _CellRunResult:
@@ -383,8 +491,10 @@ class Runtime:
 
         out = _NotifyStream(self._emit, "run.stdout", cell_id)
         err = _NotifyStream(self._emit, "run.stderr", cell_id)
+        # 写事件窗口：exec 期间（含异常路径）收集 file-write，退出时发 run.notify
+        watcher = _WriteWatcher(cell_id, self._emit)
         try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), watcher:
                 exec(compiled, self.globals)
         except BaseException as e:  # noqa: BLE001 — 内核进程必须存活（spec §12）
             out.flush()

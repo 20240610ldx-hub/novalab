@@ -21,16 +21,18 @@ export interface TracebackInfo {
 /** MIME bundle：mime-type → 文本或 base64（image/png 等二进制走 base64）。 */
 export type MimeBundle = Record<string, string | string[]>;
 
-/** 一次运行累积的输出缓冲（run.stdout/stderr/mime/error 通知增量填充）。 */
+/** 一次运行累积的输出缓冲（run.stdout/stderr/mime/error/notify 通知增量填充）。 */
 export interface CellOutput {
   stdout: string;
   stderr: string;
   mime: MimeBundle;
   traceback: TracebackInfo | null;
+  /** run.notify kind='file-write' 的落盘路径（写入顺序，bridge/内核已去重，≤50 条，P2.9）。 */
+  writes: string[];
 }
 
 export function createEmptyOutput(): CellOutput {
-  return { stdout: '', stderr: '', mime: {}, traceback: null };
+  return { stdout: '', stderr: '', mime: {}, traceback: null, writes: [] };
 }
 
 export function isOutputEmpty(o: CellOutput | null): boolean {
@@ -39,8 +41,25 @@ export function isOutputEmpty(o: CellOutput | null): boolean {
     o.stdout === '' &&
     o.stderr === '' &&
     o.traceback === null &&
-    Object.keys(o.mime).length === 0
+    Object.keys(o.mime).length === 0 &&
+    (o.writes?.length ?? 0) === 0
   );
+}
+
+/**
+ * traceback 中最后一个属于 cell 自身代码的帧的行号（P2.9 error (line N) 徽章 /
+ * 编辑器出错行装饰共用）。用户帧 = file 以 "<cell " 开头（内核 _cell_filename
+ * 契约）；stdlib / site-packages 帧被跳过。无用户帧 → null（徽章退化为 "error"）。
+ */
+export function lastCellFrameLine(frames: readonly TracebackFrame[] | undefined): number | null {
+  if (!frames) return null;
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const f = frames[i]!;
+    if (f.file.startsWith('<cell ') && Number.isFinite(f.line) && f.line >= 1) {
+      return f.line;
+    }
+  }
+  return null;
 }
 
 export interface Cell {
@@ -122,6 +141,16 @@ export interface CellSaveResult {
 export interface KernelStatusPayload {
   state: 'idle' | 'busy' | 'restarting' | 'dead';
   queueDepth?: number;
+}
+
+/**
+ * run.notify 通知载荷（P2.9）：内核结构化副作用事件。kind='file-write' 时
+ * path 为写入文件的绝对路径（reducer 追加进 CellOutput.writes，去重限 50 条）。
+ */
+export interface RunNotifyPayload {
+  cellId: string;
+  kind: 'file-write' | (string & NonNullable<unknown>);
+  path?: string;
 }
 
 /** kernel.repl 的响应（输出同时以 run.* 通知流式推送，其 cellId 恒为 "repl"）。 */

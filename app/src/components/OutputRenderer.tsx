@@ -37,14 +37,36 @@ function UnknownMimeKeys({ bundle }: { bundle: MimeBundle }) {
 }
 
 /**
+ * 文件写通知行（P2.9，参考图：输出下 `wrote <绝对路径>`）：
+ * muted 等宽、每行一条、容器横向滚动（长路径不折行不撑破面板）。
+ */
+function WriteNotifications({ writes }: { writes: string[] }) {
+  if (writes.length === 0) return null;
+  return (
+    <div
+      className="overflow-x-auto px-3 py-1.5 text-[12px] text-[var(--muted)]"
+      style={{ fontFamily: 'var(--font-mono)' }}
+    >
+      {writes.map((p, i) => (
+        <div key={`${p}#${i}`} className="whitespace-pre">
+          wrote {p}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * MIME bundle 渲染（截图元素 5 的内容区，spec §10）：
  * traceback → 红底面板 + frames（file:line fn srcLine 等宽）；
  * stderr → 红字 pre；stdout → pre；text/plain → pre；image/png → base64 img；
- * 未知 mime → 灰字 key 列表。
+ * 未知 mime → 灰字 key 列表；末尾 wrote 通知行（P2.9 run.notify file-write）。
  */
 export function OutputRenderer({ output }: { output: CellOutput }) {
   const { stdout, stderr, traceback, mime } = output;
   const mimeKeys = Object.keys(mime).filter((k) => KNOWN_MIME.has(k));
+  // 防御：旧快照/桥接载荷可能缺 writes 字段（reducer 保证新输出必有）
+  const writes = output.writes ?? [];
 
   return (
     <div className="border-t border-[var(--border)] text-[12.5px]">
@@ -87,6 +109,8 @@ export function OutputRenderer({ output }: { output: CellOutput }) {
       ))}
 
       <UnknownMimeKeys bundle={mime} />
+
+      <WriteNotifications writes={writes} />
     </div>
   );
 }

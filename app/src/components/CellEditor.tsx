@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { EditorState, RangeSetBuilder, Transaction } from '@codemirror/state';
+import { useEffect, useMemo, useRef } from 'react';
+import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction } from '@codemirror/state';
 import {
   Decoration,
   EditorView,
@@ -11,6 +11,7 @@ import {
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { python } from '@codemirror/lang-python';
+import { useSession } from '../store/session';
 
 /* ------------------------------------------------------------------ */
 /* 轻量 Python 着色 overlay                                            */
@@ -153,6 +154,50 @@ const pyHighlight = ViewPlugin.fromClass(
 );
 
 /* ------------------------------------------------------------------ */
+/* 出错行红底装饰（P2.9，参考图：编辑器内出错行 --diff-del 底色）          */
+/*                                                                     */
+/* 装饰跟随「最近一次 traceback 的行号」：cell error 时由调用方传入        */
+/* errorLine（CellHeader 徽章同源的 lastCellFrameLine 派生）。            */
+/* 代码一旦编辑（本地键入或远端同步的 docChanged）即整体清除，**不**用      */
+/* tr.mapping 追踪行号漂移——stale/running 语义下行号已不可信，等下一次     */
+/* 运行产生新 traceback 再重新定位（见 spec §12 失败分支说明）。           */
+/* ------------------------------------------------------------------ */
+
+/** 设置/清除出错行（1-based；null 或越界 → 清除）。 */
+export const setErrorLine = StateEffect.define<number | null>();
+
+export const errorLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    // 代码已编辑 → 清除（不追踪行号漂移，注释见上）
+    if (tr.docChanged) deco = Decoration.none;
+    for (const e of tr.effects) {
+      if (!e.is(setErrorLine)) continue;
+      const line = e.value;
+      if (line === null || !Number.isFinite(line) || line < 1 || line > tr.state.doc.lines) {
+        deco = Decoration.none;
+        continue;
+      }
+      const l = tr.state.doc.line(Math.floor(line));
+      deco = Decoration.set([errorLineDecoration.range(l.from)]);
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+const errorLineDecoration = Decoration.line({ class: 'cm-error-line' });
+
+/* ------------------------------------------------------------------ */
+/* 只读模式（P2.8，A-2 #12）：历史会话 view-only → CM6 readOnly +        */
+/* editable=false，经 Compartment 动态重配置（live ↔ 历史切换即时生效）。  */
+/* ------------------------------------------------------------------ */
+
+function readOnlyExtensions(readOnly: boolean) {
+  return [EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)];
+}
+
+/* ------------------------------------------------------------------ */
 /* 暗色主题（贴合 styles.css tokens，spec §10）                         */
 /* ------------------------------------------------------------------ */
 
@@ -177,6 +222,8 @@ const darkTheme = EditorView.theme(
     },
     '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.025)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text)' },
+    // P2.9 出错行红底（--diff-del 系，贴参考图）；行装饰类落在 .cm-line 上
+    '.cm-line.cm-error-line': { backgroundColor: 'var(--diff-del)' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': {
       backgroundColor: 'var(--sel-bg)',
@@ -193,17 +240,26 @@ interface CellEditorProps {
   value: string;
   /** 用户每次编辑同步回 store（cell.save 的 debounce 在调用方 Cell 层做）。 */
   onChange: (code: string) => void;
+  /**
+   * 出错行红底装饰（P2.9，1-based）：仅当 cell.status==='error' 时由调用方传入
+   * lastCellFrameLine(cell.output.traceback.frames)；stale/running/idle 传 null
+   * 清除。本组件内 docChanged（代码已编辑）也会清除装饰。
+   */
+  errorLine?: number | null;
 }
 
 /**
  * CM6 单元格编辑器：python()、行号、暗色主题、高度随内容自适应、块内横滚。
  * 只在 CellList 视口窗口内挂载（窗口化策略见 CellList.tsx）。
  */
-export function CellEditor({ value, onChange }: CellEditorProps) {
+export function CellEditor({ value, onChange, errorLine = null }: CellEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  // P2.8：会话只读（历史视图）→ 编辑器不可写
+  const readOnly = useSession((s) => s.readOnly);
+  const roComp = useMemo(() => new Compartment(), []);
 
   // 创建/销毁 EditorView（依赖数组为空：值同步走下面的 effect）
   useEffect(() => {
@@ -216,7 +272,9 @@ export function CellEditor({ value, onChange }: CellEditorProps) {
         keymap.of([...defaultKeymap, ...historyKeymap]),
         python(),
         pyHighlight,
+        errorLineField,
         darkTheme,
+        roComp.of(readOnlyExtensions(useSession.getState().readOnly)),
         EditorView.updateListener.of((u) => {
           if (!u.docChanged) return;
           // 外部同步（store → editor）的 dispatch 带 remote 注解，不回流 onChange
@@ -234,6 +292,11 @@ export function CellEditor({ value, onChange }: CellEditorProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // P2.8：只读切换（选历史会话 / 回 live）→ 重配置 compartment
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: roComp.reconfigure(readOnlyExtensions(readOnly)) });
+  }, [readOnly, roComp]);
+
   // 受控同步：store 的 cell.code 变化（如 agent diff 采纳、REPL 外部改写）→ 替换文档
   useEffect(() => {
     const view = viewRef.current;
@@ -246,6 +309,13 @@ export function CellEditor({ value, onChange }: CellEditorProps) {
       });
     }
   }, [value]);
+
+  // P2.9：errorLine prop → 装饰状态（null = 清除；docChanged 清除逻辑在 errorLineField 内）
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: setErrorLine.of(errorLine ?? null) });
+  }, [errorLine]);
 
   return <div ref={hostRef} className="min-w-0 text-[var(--text)]" />;
 }

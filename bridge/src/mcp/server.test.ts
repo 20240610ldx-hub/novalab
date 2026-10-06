@@ -72,7 +72,7 @@ describe('MCP server · 注册面', () => {
         ],
         [
           "get_cell_output",
-          "获取指定 cell 最近一次运行的 {stdout, stderr, traceback, mimeKeys}，各字段截断 8KB",
+          "获取指定 cell 最近一次运行的 {stdout, stderr, traceback, mimeKeys, writes}，各字段截断 8KB；writes 为该次运行检测到写模式打开的文件路径列表（上限 50）",
         ],
         [
           "propose_code_change",

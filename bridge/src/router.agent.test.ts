@@ -10,6 +10,7 @@ import { KernelSupervisor } from './supervisor';
 import {
   RpcRouter,
   OUTPUT_CHAR_LIMIT,
+  WRITES_PATH_LIMIT,
   type AgentCellSummary,
   type AgentContext,
   type CellOutputSnapshot,
@@ -151,7 +152,7 @@ describe('agent.cellOutput', () => {
     setup();
     await openNotebook();
     const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
-    expect(out).toEqual({ stdout: '', stderr: '', traceback: null, mimeKeys: [] });
+    expect(out).toEqual({ stdout: '', stderr: '', traceback: null, mimeKeys: [], writes: [] });
   });
 
   it('从 run.* 通知流累积最近一次 stdout / traceback', async () => {
@@ -187,6 +188,51 @@ describe('agent.cellOutput', () => {
     await call('kernel.repl', { code: 'print(1)' });
     const out = (await call('agent.cellOutput', { cellId: 'repl' })).result as CellOutputSnapshot;
     expect(out.stdout).toBe('repl: print(1)\n');
+  });
+
+  it('run.notify file-write 透传前端并累积进 writes（P2.9）', async () => {
+    setup();
+    await openNotebook();
+    fakes[0]!.notifyWrites = { cellId: 'a', paths: ['/tmp/out.csv', '/tmp/plot.png'] };
+    await call('cell.run', { cellId: 'a' });
+
+    // 透传：broadcast 原样转发 run.notify
+    const forwarded = notes.filter((n) => n.method === 'run.notify');
+    expect(forwarded).toHaveLength(2);
+    expect(forwarded[0]!.params).toEqual({ cellId: 'a', kind: 'file-write', path: '/tmp/out.csv' });
+
+    // 累积：agent.cellOutput 带上 writes
+    const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
+    expect(out.writes).toEqual(['/tmp/out.csv', '/tmp/plot.png']);
+  });
+
+  it('writes 去重且封顶 50 条；重跑（run.started）清空', async () => {
+    setup();
+    await openNotebook();
+    const many = Array.from({ length: WRITES_PATH_LIMIT + 20 }, (_, i) => `/tmp/f${i}.dat`);
+    fakes[0]!.notifyWrites = { cellId: 'b', paths: [...many, '/tmp/dup.csv', '/tmp/dup.csv'] };
+    await call('cell.run', { cellId: 'b' });
+    const out = (await call('agent.cellOutput', { cellId: 'b' })).result as CellOutputSnapshot;
+    expect(out.writes).toHaveLength(WRITES_PATH_LIMIT);
+
+    fakes[0]!.notifyWrites = { cellId: 'b', paths: ['/tmp/only.csv'] };
+    await call('cell.run', { cellId: 'b' });
+    const next = (await call('agent.cellOutput', { cellId: 'b' })).result as CellOutputSnapshot;
+    expect(next.writes).toEqual(['/tmp/only.csv']);
+  });
+
+  it('非 file-write kind / 缺 path 不进 writes，但仍透传', async () => {
+    setup();
+    await openNotebook();
+    sup!.emit('notification', {
+      method: 'run.notify',
+      params: { cellId: 'a', kind: 'network-request', url: 'http://x' },
+    });
+    sup!.emit('notification', { method: 'run.notify', params: { cellId: 'a', kind: 'file-write' } });
+    const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
+    expect(out.writes).toEqual([]);
+    // 透传与 kind 无关：router 对内核通知一律 broadcast
+    expect(countNotes('run.notify')).toBe(2);
   });
 });
 

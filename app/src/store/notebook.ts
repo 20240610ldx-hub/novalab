@@ -131,6 +131,19 @@ export function applyRunEvent(cells: readonly Cell[], method: string, params: un
       );
     }
 
+    case 'run.notify': {
+      // P2.9（K 线）：文件写事件 {cellId, kind:'file-write', path} → output.writes 追加（去重、封顶 50）
+      if (p.kind !== 'file-write' || typeof p.path !== 'string') return cells as Cell[];
+      const path = p.path;
+      return patchCell(cells, cellId, (c) =>
+        withOutput(c, (o) =>
+          o.writes.includes(path) || o.writes.length >= 50
+            ? o
+            : { ...o, writes: [...o.writes, path] },
+        ),
+      );
+    }
+
     case 'run.done':
       return patchCell(cells, cellId, (c) => ({
         ...c,
@@ -572,6 +585,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           case 'run.stderr':
           case 'run.mime':
           case 'run.error':
+          case 'run.notify':
             set({ cells: applyRunEvent(s.cells, method, params) });
             break;
           case 'run.done': {
