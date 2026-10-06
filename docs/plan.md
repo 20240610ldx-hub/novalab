@@ -40,7 +40,7 @@
 | P1.4 | 前端 CellList/CellHeader/CellEditor(CM6)/OutputDisclosure/OutputRenderer(text+traceback) | 100 cell 虚拟列表 60fps；折叠 output 复刻截图元素 3-5 | P1.3 | ✅ 完成（tsc/vitest 14 例/vite build 全绿；元素 2-7 齐；语法高亮为逐行正则 overlay——pnpm 严格解析下 @lezer/highlight 非直接依赖，P2 可提依赖换 TagSystem） |
 | P1.5 | 反应式 UI 联动：stale 徽章、级联运行流式刷新、编译错行内提示 | intent §8 演示脚本前半段 | P1.4 | ✅ 完成（store reducer + compileErrors 行内提示；stale 传递闭包经集成冒烟验证） |
 | P1.6 | KernelStatusBar + InlineREPL + LivePill（截图元素 2/6/7） | REPL 输出回灌匿名 cell | P1.4 | ✅ 完成（按冻结契约改为单一持久 [repl] cell；dead pill 点击重启） |
-| P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 |
+| P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 | ⚠️ 脚手架完成（tauri 2.12 conf / bridge spawn 钩子 / 进程树清理 / README）；cargo check 被宿主环境阻塞：VS 18 壳 + WinSDK 10.0.26100 在、**MSVC VCTools 工具集缺**（无 cl/link.exe；Git Bash 的 /usr/bin/link.exe 是 coreutils 假链接器）；待 Owner 装 BuildTools VCTools；不阻塞 MVP（浏览器先行，ADR-005） |
 | P1.8 | .py 打开/保存/新建 + sidecar `.novalab/` + 崩溃恢复横幅 | 改文件外部→热重载提示 | P1.5 |
 | **D1** | **阶段演示**：intent §8 脚本除 Agent 段外全通（断网） | 录屏存档 `docs/demos/p1.gif` | 全部 |
 
