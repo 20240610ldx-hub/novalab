@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { bridge } from '../bridge/client';
+import { decideStalePolicy, type StaleContext, type StaleDecision } from '../kernel/stalePolicy';
 import {
   createEmptyOutput,
   type Cell,
@@ -194,8 +195,9 @@ export function mapKernelState(state: KernelStatusPayload['state'] | string): Ke
 
 /**
  * diff.updated 通知载荷 {diffs:[...]} → 前端 StagedDiff[]。
- * bridge 冻结契约：每个 diff 的字段名是 `status`（proposed|accepted|rejected），
- * 映射到前端的 `state`；'edited-staged' 为纯前端态，bridge 不会产生。
+ * bridge 冻结契约：每个 diff 的 id 字段名是 `diffId`（protocol.ts StagedDiff），
+ * 状态字段是 `status`（proposed|accepted|rejected），映射到前端的 `state`；
+ * 'edited-staged' 为纯前端态，bridge 不会产生。兼容 `id` 别名以防契约演进。
  */
 export function normalizeDiffs(payload: unknown): StagedDiff[] {
   const arr = asRecord(payload).diffs;
@@ -206,7 +208,7 @@ export function normalizeDiffs(payload: unknown): StagedDiff[] {
     const state: StagedDiff['state'] =
       raw === 'accepted' || raw === 'rejected' || raw === 'edited-staged' ? raw : 'proposed';
     return {
-      id: String(r.id ?? ''),
+      id: String(r.diffId ?? r.id ?? ''),
       targetCellId: String(r.targetCellId ?? ''),
       action: r.action === 'insert_below' ? 'insert_below' : 'update',
       newCode: String(r.newCode ?? ''),
@@ -215,6 +217,172 @@ export function normalizeDiffs(payload: unknown): StagedDiff[] {
       state,
     };
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* P2.3 Diff 审阅 UX + 级联策略（spec §9；纯函数导出供单测）            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 本地 diff 标记：bridge 的 diff.stage 不收 origin 字段（冻结契约），
+ * 'user' origin 与 'edited-staged'（spec §9：用户手改后重新进入 proposed，
+ * 标注 user-edited）只能前端本地记录，key = bridge 分配的 diffId。
+ */
+export interface DiffMark {
+  origin?: 'agent' | 'user';
+  state?: 'edited-staged';
+}
+export type DiffMarks = Record<string, DiffMark>;
+
+/** pending 审阅队列：proposed / edited-staged（后者语义仍是待审，只是标注 user-edited）。 */
+export function pendingDiffs(diffs: readonly StagedDiff[]): StagedDiff[] {
+  return diffs.filter((d) => d.state === 'proposed' || d.state === 'edited-staged');
+}
+
+/**
+ * diff.updated 载荷与本地 marks 合并：
+ * - bridge 通知是收敛真源——status='accepted'/'rejected' 无条件覆盖本地乐观态与 marks；
+ * - marks 只把 proposed 提升为 edited-staged 并标注 origin='user'；
+ * - 不在载荷中的 id 的 mark 被剪除（diff 已终结），防止映射无限增长。
+ */
+export function mergeDiffMarks(
+  incoming: readonly StagedDiff[],
+  marks: DiffMarks,
+): { diffs: StagedDiff[]; marks: DiffMarks } {
+  const nextMarks: DiffMarks = {};
+  const diffs = incoming.map((d) => {
+    const m = marks[d.id];
+    if (!m || (d.state !== 'proposed' && d.state !== 'edited-staged')) return d;
+    nextMarks[d.id] = m;
+    return {
+      ...d,
+      origin: m.origin ?? d.origin,
+      state: m.state === 'edited-staged' ? ('edited-staged' as const) : d.state,
+    };
+  });
+  return { diffs, marks: nextMarks };
+}
+
+/**
+ * cellId 在 DAG 上的全部传递下游（不含自身），按 cells 文档序返回——
+ * .py 文件的 cell 顺序即拓扑序，故文档序可直接作为级联重跑顺序。
+ */
+export function downstreamCells(
+  cellId: string,
+  edges: readonly DagEdge[],
+  cells: readonly Cell[],
+): Cell[] {
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    const list = adj.get(e.from);
+    if (list) list.push(e.to);
+    else adj.set(e.from, [e.to]);
+  }
+  const seen = new Set<string>([cellId]);
+  const queue = [cellId];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const nxt of adj.get(cur) ?? []) {
+      if (!seen.has(nxt)) {
+        seen.add(nxt);
+        queue.push(nxt);
+      }
+    }
+  }
+  seen.delete(cellId);
+  return cells.filter((c) => seen.has(c.id));
+}
+
+/** KernelStatusBar 的级联策略开关取值；'policy' = 交给 decideStalePolicy（Owner 裁决）。 */
+export type CascadeOverride = 'policy' | 'auto' | 'mark-only' | 'ask';
+
+/**
+ * 生效级联决策 = override ?? decideStalePolicy(ctx)。
+ * 'policy'（默认）不是覆盖，退化为 stalePolicy.ts 的裁决（当前恒 mark-only，
+ * 该文件冻结、只读调用）；其余三档直通映射。
+ */
+export function resolveCascadeDecision(
+  override: CascadeOverride,
+  ctx: StaleContext,
+): StaleDecision {
+  switch (override) {
+    case 'auto':
+      return 'auto-cascade';
+    case 'mark-only':
+      return 'mark-only';
+    case 'ask':
+      return 'ask';
+    case 'policy':
+    default:
+      return decideStalePolicy(ctx);
+  }
+}
+
+/** 托盘快捷键动作。 */
+export type TrayKeyAction = 'accept-head' | 'reject-head' | 'reject-all' | null;
+
+/** Esc Esc 双击判定窗口（ms，spec §9：Esc Esc 全拒）。 */
+export const TRAY_ESC_DOUBLE_MS = 300;
+
+/**
+ * 托盘键盘纯逻辑（spec §9 多 diff 队列）：
+ *   Tab = 采纳队首；Esc = 拒绝队首；300ms 内第二次 Esc = 全拒。
+ * 返回动作与更新后的 lastEscAt（调用方存 ref）。其他键不动作、不重置双击窗口
+ * （窗口只由时间流逝失效，避免中间按键吞掉合法的 Esc Esc）。
+ */
+export function trayKeyAction(
+  key: string,
+  opts: { now: number; lastEscAt: number | null; doubleMs?: number },
+): { action: TrayKeyAction; nextEscAt: number | null } {
+  const doubleMs = opts.doubleMs ?? TRAY_ESC_DOUBLE_MS;
+  if (key === 'Tab') return { action: 'accept-head', nextEscAt: opts.lastEscAt };
+  if (key === 'Escape') {
+    const isDouble = opts.lastEscAt !== null && opts.now - opts.lastEscAt <= doubleMs;
+    return isDouble
+      ? { action: 'reject-all', nextEscAt: null }
+      : { action: 'reject-head', nextEscAt: opts.now };
+  }
+  return { action: null, nextEscAt: opts.lastEscAt };
+}
+
+/** @codemirror/merge 的 Chunk 位置四元组（结构子集，方便单测）。 */
+export interface ChunkPos {
+  fromA: number;
+  toA: number;
+  fromB: number;
+  toB: number;
+}
+
+/**
+ * hunk 级 ×（回退该 hunk）：把 B 文档（新码）中 chunk 覆盖的区间替换回
+ * A 文档（原码）的对应文本，返回 CM6 change spec。toA 可能越过 A 文档末尾
+ * （merge 契约：末行 chunk），钳制到文档长度。
+ */
+export function chunkRevertChange(
+  original: string,
+  chunk: ChunkPos,
+): { from: number; to: number; insert: string } {
+  const toA = Math.min(chunk.toA, original.length);
+  const fromA = Math.min(chunk.fromA, toA);
+  return { from: chunk.fromB, to: chunk.toB, insert: original.slice(fromA, toA) };
+}
+
+/** diff.accept 响应（bridge router.ts diffAccept 返回体；compileError 为 {message, cellIds}）。 */
+export interface DiffAcceptResult {
+  diffId: string;
+  dagEdges?: DagEdge[];
+  staleSet?: string[];
+  compileError?: { message?: string; cellIds?: string[] } | string;
+  run?: { cellId?: string; ok?: boolean; durationMs?: number };
+}
+
+/** 'ask' 档的确认弹窗请求（CascadeAskDialog 渲染；resolve 由弹窗按钮触发）。 */
+export interface CascadeAskRequest {
+  triggeredBy: 'user-run' | 'diff-accepted';
+  sourceCellId: string;
+  /** 将被级联重跑的下游 cells 快照（含 sideEffect 徽章数据）。 */
+  downstream: Cell[];
+  resolve: (run: boolean) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -240,6 +408,14 @@ interface NotebookStore {
    * 独立于 cells 存放：热重载的全量 notebook.state 不会冲掉它。
    */
   uiCollapsed: Record<string, boolean>;
+  /** P2.3 diff 切片：本地 origin/edited-staged 标记（bridge 契约无这些字段）。 */
+  diffMarks: DiffMarks;
+  /** P2.4 级联策略开关（KernelStatusBar select；默认 'policy' = decideStalePolicy 裁决）。 */
+  cascadeOverride: CascadeOverride;
+  /** cellId → 最近一次 run.done 的 durationMs（decideStalePolicy 的 lastRunMs 输入）。 */
+  lastRunMs: Record<string, number>;
+  /** 'ask' 档待确认的级联请求；null = 无弹窗。 */
+  cascadeAsk: CascadeAskRequest | null;
 
   setState: (patch: Partial<Omit<NotebookStore, 'setState' | 'setActive'>>) => void;
   setActive: (cellId: string | null) => void;
@@ -256,6 +432,18 @@ interface NotebookStore {
   runCell: (cellId: string) => Promise<void>;
   runRepl: (code: string) => Promise<void>;
   restartKernel: () => Promise<void>;
+
+  setCascadeOverride: (v: CascadeOverride) => void;
+  /** Accept → bridge diff.accept（bridge 会 save+run cascade:false 并回 diff.updated）。 */
+  acceptDiff: (diffId: string) => Promise<void>;
+  /** Reject → bridge diff.reject。 */
+  rejectDiff: (diffId: string) => Promise<void>;
+  /** Esc Esc 全拒：pending 队列整批 diff.reject。 */
+  rejectAllPending: () => Promise<void>;
+  /** 用户在 diff 视图内编辑 newCode → 重新 diff.stage（origin 'user' + edited-staged 本地标记）。 */
+  reStageDiff: (diffId: string, newCode: string) => Promise<void>;
+  /** 'ask' 弹窗裁决：run=true → 级联重跑下游。 */
+  resolveCascadeAsk: (run: boolean) => void;
 }
 
 /** 连接 promise 记忆化：StrictMode 双挂载/多处调用只建一条 WS、只订阅一次通知。 */
@@ -291,6 +479,56 @@ function scheduleUiPersist(get: () => NotebookStore): void {
  */
 export const REPL_CELL_ID = 'repl';
 
+/* ---- P2.3/P2.4 内部助手（非 store action，参数化 set 以便纯逻辑测试） ---- */
+
+type StoreSet = (partial: Partial<NotebookStore>) => void;
+
+/** 'ask' 档：打开 CascadeAskDialog，等用户裁决；resolve(true)=级联重跑。 */
+function askCascade(
+  set: StoreSet,
+  req: Omit<CascadeAskRequest, 'resolve'>,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => set({ cascadeAsk: { ...req, resolve } }));
+}
+
+/**
+ * 级联重跑下游（前端驱动）：bridge 的 cell.run/diff.accept 冻结为 cascade:false
+ * （Owner 裁决 mark-only），'auto'/'ask→run' 档由前端按拓扑序逐格 cell.run。
+ * 某一格失败即中止后续——避免在错误状态上继续连锁执行。
+ */
+async function cascadeRun(cellIds: readonly string[]): Promise<void> {
+  for (const id of cellIds) {
+    try {
+      await bridge.rpc('cell.run', { cellId: id, cascade: false });
+    } catch (err) {
+      console.error('cascade cell.run 失败（中止后续下游）:', id, err);
+      break;
+    }
+  }
+}
+
+/** 乐观状态回滚：rpc 失败时把 accepted/rejected 还原，让队列可重试。 */
+function revertDiffState(
+  diffs: readonly StagedDiff[],
+  diffId: string,
+  back: StagedDiff['state'],
+): StagedDiff[] {
+  return diffs.map((d) => (d.id === diffId ? { ...d, state: back } : d));
+}
+
+/** bridge CompileError（{message, cellIds}）/字符串两种形态 → 行内提示文本。 */
+function compileErrorText(e: DiffAcceptResult['compileError']): string {
+  if (typeof e === 'string') return e;
+  return String(e?.message ?? 'compile error');
+}
+function compileErrorCellIds(
+  e: DiffAcceptResult['compileError'],
+  fallback: string,
+): string[] {
+  if (typeof e === 'string' || !e) return [fallback];
+  return e.cellIds && e.cellIds.length > 0 ? e.cellIds : [fallback];
+}
+
 /** 全局状态：cell 列表、DAG、stale 集合、diff 队列、内核状态（spec §10）。 */
 export const useNotebook = create<NotebookStore>((set, get) => ({
   cells: [],
@@ -304,6 +542,10 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   bridgeConnected: false,
   compileErrors: {},
   uiCollapsed: {},
+  diffMarks: {},
+  cascadeOverride: 'policy',
+  lastRunMs: {},
+  cascadeAsk: null,
 
   setState: (patch) => set(patch),
   setActive: (cellId) => {
@@ -329,20 +571,33 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           case 'run.stdout':
           case 'run.stderr':
           case 'run.mime':
-          case 'run.done':
           case 'run.error':
             set({ cells: applyRunEvent(s.cells, method, params) });
             break;
+          case 'run.done': {
+            // 除 cells reducer 外，记录 durationMs（级联决策的 lastRunMs 输入，P2.4）
+            const p = asRecord(params);
+            const ms = Number(p.durationMs);
+            set({
+              cells: applyRunEvent(s.cells, method, params),
+              ...(typeof p.cellId === 'string' && p.cellId !== '' && Number.isFinite(ms)
+                ? { lastRunMs: { ...get().lastRunMs, [p.cellId]: ms } }
+                : {}),
+            });
+            break;
+          }
           case 'kernel.status':
             set({ kernelState: mapKernelState(String(asRecord(params).state ?? '')) });
             break;
           case 'notebook.state':
             s.applyNotebookState(params);
             break;
-          case 'diff.updated':
-            // P2 Diff UI 的数据源；P1 仅摄入 store（status→state 映射），不渲染
-            set({ diffs: normalizeDiffs(params) });
+          case 'diff.updated': {
+            // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
+            const merged = mergeDiffMarks(normalizeDiffs(params), get().diffMarks);
+            set({ diffs: merged.diffs, diffMarks: merged.marks });
             break;
+          }
         }
       });
       set({ bridgeConnected: true });
@@ -434,11 +689,33 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     }
   },
 
+  /**
+   * 运行 cell（P2.4 级联接线）：cascade 参数 = cascadeOverride ?? decideStalePolicy。
+   * 'ask' 档先弹 CascadeAskDialog（下游清单 + 侧效应徽章）等裁决；无下游时
+   * 恒 cascade:false（决策没有意义，也不弹窗）。
+   */
   runCell: async (cellId) => {
+    const s = get();
+    const downstream = downstreamCells(cellId, s.dagEdges, s.cells);
+    let cascade = false;
+    if (downstream.length > 0) {
+      const decision = resolveCascadeDecision(s.cascadeOverride, {
+        downstream,
+        lastRunMs: s.lastRunMs[cellId] ?? 0,
+        triggeredBy: 'user-run',
+      });
+      if (decision === 'auto-cascade') cascade = true;
+      else if (decision === 'ask') cascade = await askCascade(set, {
+        triggeredBy: 'user-run',
+        sourceCellId: cellId,
+        downstream,
+      });
+      // 'mark-only' → cascade:false：bridge 运行后重算 staleSet，applyStaleSet 标灰下游
+    }
     // 乐观置 running；真实流式更新由 run.* 通知驱动
     set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: 'running' })) });
     try {
-      await bridge.rpc('cell.run', { cellId, cascade: false });
+      await bridge.rpc('cell.run', { cellId, cascade });
     } catch (err) {
       console.error('cell.run 失败:', err);
       set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: 'error' })) });
@@ -493,6 +770,163 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     } catch (err) {
       console.error('kernel.restart 失败:', err);
       set({ kernelState: 'dead' });
+    }
+  },
+
+  /* ---------------- P2.3 diff 审阅切片（spec §9 状态机） ---------------- */
+
+  setCascadeOverride: (v) => set({ cascadeOverride: v }),
+
+  resolveCascadeAsk: (run) => {
+    const ask = get().cascadeAsk;
+    set({ cascadeAsk: null });
+    ask?.resolve(run);
+  },
+
+  /**
+   * Accept（proposed/edited-staged → accepted）：
+   * 1. 乐观置 accepted（立即离开 pending 队列）；
+   * 2. bridge diff.accept = cell.save + cell.run cascade:false（冻结契约），
+   *    随后广播 diff.updated——通知到达时整体收敛（mergeDiffMarks，bridge 为准）；
+   * 3. 响应携带 dagEdges/staleSet/compileError/run：本地同步 DAG 与 stale 标记；
+   * 4. P2.4：本 cell 运行后的下游级联由前端按 resolveCascadeDecision 补跑
+   *    （bridge 侧恒 cascade:false，不接受 cascade 参数）。
+   * rpc 失败 → 回滚乐观态，diff 回到队列可重试。
+   */
+  acceptDiff: async (diffId) => {
+    const prev = get().diffs.find((d) => d.id === diffId);
+    if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
+    set({ diffs: revertDiffState(get().diffs, diffId, 'accepted') });
+    try {
+      const res = await bridge.rpc<DiffAcceptResult>('diff.accept', { diffId });
+      const s = get();
+      const dagEdges = res?.dagEdges ?? s.dagEdges;
+      const staleSet = res?.staleSet ?? s.staleSet;
+      const compileErrors = { ...s.compileErrors };
+      let cells = s.cells;
+
+      // insert_below：bridge 不推全量 notebook.state，本地插入占位 cell
+      //（run.* 通知会流式灌输出；后续任何 notebook.state 全量推送会覆盖校准）
+      const newCellId =
+        prev.action === 'insert_below' && typeof res?.run?.cellId === 'string'
+          ? res.run.cellId
+          : null;
+      if (newCellId && !cells.some((c) => c.id === newCellId)) {
+        const idx = cells.findIndex((c) => c.id === prev.targetCellId);
+        const fresh: Cell = {
+          id: newCellId,
+          code: prev.newCode,
+          execCount: null,
+          status: 'running',
+          defs: [],
+          refs: [],
+          sideEffect: false,
+          kind: 'code',
+          output: createEmptyOutput(),
+        };
+        cells =
+          idx >= 0
+            ? [...cells.slice(0, idx + 1), fresh, ...cells.slice(idx + 1)]
+            : [...cells, fresh];
+      } else if (prev.action === 'update') {
+        // update：bridge 已 save+run，本地同步 newCode（不等热重载）
+        cells = patchCell(cells, prev.targetCellId, (c) => ({ ...c, code: prev.newCode }));
+      }
+
+      if (res?.compileError) {
+        for (const cid of compileErrorCellIds(res.compileError, prev.targetCellId)) {
+          compileErrors[cid] = compileErrorText(res.compileError);
+        }
+      }
+      set({ cells: applyStaleSet(cells, staleSet), dagEdges, staleSet, compileErrors });
+      if (res?.compileError) return; // 编译错不进运行队列（spec §12），也不谈级联
+
+      // P2.4 级联决策：下游 = DAG 传递闭包 ∩ 新 staleSet（只重跑真正失效的）
+      const runCellId = newCellId ?? prev.targetCellId;
+      const downstream = downstreamCells(runCellId, dagEdges, get().cells).filter((c) =>
+        staleSet.includes(c.id),
+      );
+      if (downstream.length === 0) return;
+      const s2 = get();
+      const decision = resolveCascadeDecision(s2.cascadeOverride, {
+        downstream,
+        lastRunMs: s2.lastRunMs[runCellId] ?? 0,
+        triggeredBy: 'diff-accepted',
+      });
+      if (decision === 'auto-cascade') {
+        await cascadeRun(downstream.map((c) => c.id));
+      } else if (decision === 'ask') {
+        const run = await askCascade(set, {
+          triggeredBy: 'diff-accepted',
+          sourceCellId: runCellId,
+          downstream,
+        });
+        if (run) await cascadeRun(downstream.map((c) => c.id));
+      }
+      // 'mark-only' → 什么都不做：applyStaleSet 已把下游标灰（Owner 裁决默认）
+    } catch (err) {
+      console.error('diff.accept 失败:', err);
+      set({ diffs: revertDiffState(get().diffs, diffId, prev.state) });
+    }
+  },
+
+  /** Reject（proposed/edited-staged → rejected）：乐观出队 + bridge diff.reject。 */
+  rejectDiff: async (diffId) => {
+    const prev = get().diffs.find((d) => d.id === diffId);
+    if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
+    set({ diffs: revertDiffState(get().diffs, diffId, 'rejected') });
+    try {
+      await bridge.rpc('diff.reject', { diffId });
+    } catch (err) {
+      console.error('diff.reject 失败:', err);
+      set({ diffs: revertDiffState(get().diffs, diffId, prev.state) });
+    }
+  },
+
+  /** Esc Esc 全拒：整批乐观出队 + 并发 diff.reject（单个失败只回滚由 bridge 通知收敛）。 */
+  rejectAllPending: async () => {
+    const queue = pendingDiffs(get().diffs);
+    if (queue.length === 0) return;
+    set({
+      diffs: get().diffs.map((d) =>
+        d.state === 'proposed' || d.state === 'edited-staged' ? { ...d, state: 'rejected' as const } : d,
+      ),
+    });
+    await Promise.all(
+      queue.map((d) =>
+        bridge.rpc('diff.reject', { diffId: d.id }).catch((err: unknown) => {
+          console.error('diff.reject（全拒）失败:', d.id, err);
+        }),
+      ),
+    );
+  },
+
+  /**
+   * 用户在 diff 视图内编辑 newCode（含 hunk 级 × 回退）→ 重新 diff.stage：
+   * bridge 契约会分配新 diffId 并广播 diff.updated；本地对新 id 打
+   * {origin:'user', state:'edited-staged'} 标记，被替换的旧 diff 以 reject 退队。
+   * 状态机（spec §9）：edited-staged 重新进入 proposed 队列，标注 user-edited。
+   */
+  reStageDiff: async (diffId, newCode) => {
+    const old = get().diffs.find((d) => d.id === diffId);
+    if (!old || (old.state !== 'proposed' && old.state !== 'edited-staged')) return;
+    if (old.newCode === newCode) return;
+    try {
+      const res = await bridge.rpc<{ diffId?: string }>('diff.stage', {
+        targetCellId: old.targetCellId,
+        action: old.action,
+        newCode,
+        ...(old.rationale !== undefined ? { rationale: old.rationale } : {}),
+      });
+      const newId = typeof res?.diffId === 'string' ? res.diffId : '';
+      if (newId) {
+        set({ diffMarks: { ...get().diffMarks, [newId]: { origin: 'user', state: 'edited-staged' } } });
+      }
+      await bridge.rpc('diff.reject', { diffId }).catch((err: unknown) => {
+        console.error('diff.reject（旧 diff 退队）失败:', err);
+      });
+    } catch (err) {
+      console.error('diff.stage（user edit）失败:', err);
     }
   },
 }));

@@ -3,6 +3,7 @@ import { useNotebook } from '../store/notebook';
 import { isOutputEmpty, type Cell } from '../kernel/types';
 import { CellHeader } from './CellHeader';
 import { CellEditor } from './CellEditor';
+import { DiffOverlay } from './diff/InlineDiff';
 import { OutputDisclosure } from './OutputDisclosure';
 import { OutputRenderer } from './OutputRenderer';
 
@@ -54,6 +55,9 @@ function CellView({
           {cell.code}
         </pre>
       )}
+
+      {/* P2.3 DiffOverlay 挂载点：目标为本 cell 的 pending diff 行内审阅 UI（无则 null） */}
+      <DiffOverlay cellId={cell.id} />
 
       {hasOutput && cell.output && (
         <OutputDisclosure
