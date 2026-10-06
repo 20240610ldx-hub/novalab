@@ -4,15 +4,16 @@ import { CellList } from './components/CellList';
 import { KernelStatusBar } from './components/KernelStatusBar';
 import { InlineREPL } from './components/InlineREPL';
 import { LivePill } from './components/LivePill';
+import { AgentPanel } from './components/AgentPanel';
+import { SettingsPanel } from './components/SettingsPanel';
 
 /**
- * 主列（header / CellList / KernelStatusBar / InlineREPL）+ 右 AgentPanel 占位。
+ * 主列（header / CellList / KernelStatusBar / InlineREPL）+ 右 AgentPanel（P2.1/P2.5）。
  * 复刻清单见 docs/spec.md 附录 A（元素 2-7 于 P1.4/P1.6 落地）。
  * 启动：bridge.connect() → 失败显示降级横幅；?path= 存在则 notebook.open。
  * 快捷键：Ctrl/Cmd+Enter 运行 active cell。
  */
 export function App() {
-  const kernelState = useNotebook((s) => s.kernelState);
   const bridgeConnected = useNotebook((s) => s.bridgeConnected);
   const notebookPath = useNotebook((s) => s.notebookPath);
   const [attempted, setAttempted] = useState(false);
@@ -117,13 +118,11 @@ export function App() {
         </footer>
       </main>
 
-      <aside className="w-80 shrink-0 border-l border-[var(--border)] p-3 text-[var(--muted)]">
-        <p className="mb-2 text-[var(--text)]">Agent</p>
-        <p>
-          context chip · 流式对话 · One-click Fix 卡片 —— P2 阶段落地（spec §7/§9）。
-          {kernelState === 'dead' && ' （kernel dead：点右上 pill 重启）'}
-        </p>
+      {/* P2.1/P2.5：Agent 面板（context chip · 流式对话 · One-click Fix）+ 设置入口 */}
+      <aside className="flex w-96 shrink-0 flex-col border-l border-[var(--border)]">
+        <AgentPanel />
       </aside>
+      <SettingsPanel />
     </div>
   );
 }
