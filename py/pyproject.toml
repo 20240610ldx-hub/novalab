@@ -9,7 +9,7 @@ dependencies = ["websockets>=12"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
-data = ["pandas>=2"]
+data = ["pandas>=2", "matplotlib>=3.8"]
 spike = ["marimo>=0.14"]
 
 [tool.pytest.ini_options]
