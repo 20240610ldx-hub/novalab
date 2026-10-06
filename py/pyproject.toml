@@ -1,0 +1,16 @@
+# novakernel：NovaLab 反应式 Python 内核（ADR-001 路线 B 原型）
+# uv 虚拟项目（无 build-system）：依赖由 uv sync 管理，运行时以 cwd=py 直接 import。
+[project]
+name = "novakernel"
+version = "0.0.1"
+description = "NovaLab reactive Python kernel: AST DAG + topological exec + introspection"
+requires-python = ">=3.11"
+dependencies = ["websockets>=12"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+data = ["pandas>=2"]
+spike = ["marimo>=0.14"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

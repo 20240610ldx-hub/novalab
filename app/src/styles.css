@@ -1,0 +1,30 @@
+/* NovaLab design tokens — clean-room 复刻 Claude Science 气质（spec §10, ADR-004） */
+@import 'tailwindcss';
+
+:root {
+  --bg: #0b0b0c;
+  --panel: #141416;
+  --border: #26262a;
+  --text: #e6e6e9;
+  --muted: #8b8b93;
+  --accent-run: #d19a3d;
+  --accent-ok: #4caf7d;
+  --accent-err: #e05252;
+  --accent-stale: #6b6b73;
+  --diff-add: #1f3b2a;
+  --diff-del: #3b1f24;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}

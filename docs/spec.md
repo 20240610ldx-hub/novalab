@@ -1,0 +1,241 @@
+# NovaLab 技术规格（Spec）
+
+> 状态：v0.1 · 2026-10-06 · 上游文档：[intent.md](intent.md) · 下游：[plan.md](plan.md)
+> 约定：本文所有协议消息、工具 schema、语义规则均为**规范（normative）**；组件命名为建议。
+
+---
+
+## 1. 架构总览
+
+```
++---------------------------------------------------------------------------+
+|  Tauri 桌面壳 (Rust, P1-W2 接入 / P4 打包)                                  |
+|  窗口 · 文件系统对话框 · keychain ·  spawn Bridge 子进程                     |
++-------------------------------------+-------------------------------------+
+                                      | spawn + env
+                                      v
++---------------------------------------------------------------------------+
+|  React 19 前端 (app/)  —— 浏览器先行，Tauri WebView 复用同一构建             |
+|  ├─ CellList / CellEditor(CodeMirror6 + @codemirror/merge 行内 Diff)       |
+|  ├─ OutputRenderer (text/html/img/table/traceback)                        |
+|  ├─ KernelStatusBar + InlineREPL + LivePill                               |
+|  ├─ AgentPanel (Vercel AI SDK useChat 流式 + One-click Fix 卡片)           |
+|  └─ Zustand store: cells / dag / staleSet / diffs / kernelStatus          |
++-------------------------------------+-------------------------------------+
+                                      | WebSocket · JSON-RPC 2.0 (ws://127.0.0.1:7788)
+                                      v
++---------------------------------------------------------------------------+
+|  Bridge (bridge/, node TS 独立进程)                                        |
+|  ├─ RPC router（前端指令 → 内核/文件系统）                                  |
+|  ├─ KernelSupervisor（spawn/health/restart py 内核子进程，1 文件 = 1 进程）  |
+|  ├─ SessionLogger（.novalab/session.jsonl 追加式事件日志）                  |
+|  ├─ PreviewSerializer（隐私硬截断出口：schema / head(1)）                   |
+|  └─ MCP Server (stdio)：对外暴露同一工具集给外部 Agent                      |
++-------------------------------------+-------------------------------------+
+                                      | stdin/stdout JSON-lines 或 loopback WS
+                                      v
++---------------------------------------------------------------------------+
+|  novakernel (py/, Python 子进程)  —— ADR-001 路线 B；KernelAdapter 可切 A    |
+|  ├─ dag.py        AST defs/refs 提取 · 拓扑排序 · 环检测                    |
+|  ├─ runtime.py    共享 globals 按拓扑 exec · 失效传播 · 级联重跑             |
+|  ├─ introspect.py 变量 schema 嗅探 (type/shape/columns/dtypes/head(1))     |
+|  ├─ serialize.py  marimo 兼容 .py 读写                                      |
+|  └─ server.py     消息循环 · stdout/stderr/MIME 捕获 · matplotlib inline    |
++---------------------------------------------------------------------------+
+```
+
+**进程不变量**：前端永不直接碰 Python；内核永不直接碰磁盘用户文件以外的东西；**所有出进程数据（给 LLM 的）必须经过 Bridge 的 PreviewSerializer**（ADR-006 的硬保证）。
+
+---
+
+## 2. 启动序列
+
+1. Tauri（或 dev 脚本）spawn `bridge`（node），监听 `127.0.0.1:7788`（端口冲突自动 +1）。
+2. 前端连接 WS，发 `notebook.open {path}`。
+3. Bridge 读 .py → `serialize.parse` → cells[] → spawn novakernel 子进程（uv 管理的 `.venv`，见 plan 环境清单）→ 按拓扑序**静默回放**全部 cell（恢复状态）或按配置冷启动。
+4. Bridge 回 `notebook.state {cells, dag, schemas, staleSet:[]}`；前端渲染，LivePill 转 `live`。
+
+崩溃恢复：kernel 死 → LivePill `dead` + 横幅"内核已退出，重启将按 .py 拓扑回放恢复状态"→ 一键 restart（状态可重建是反应式模型的免费红利）。
+
+---
+
+## 3. 仓库布局（ADR-007）
+
+```
+Notebook Agent/
+├─ docs/            intent.md · spec.md · plan.md · adr/
+├─ refs/            marimo/ · codemirror-merge/ · vercel-ai/   (只读参考, gitignore)
+├─ app/             React 前端 (pnpm workspace pkg @novalab/app)
+│  └─ src/{components,kernel,agent,bridge,store,styles}
+├─ bridge/          node TS 进程 (@novalab/bridge)
+│  └─ src/{main,protocol,rpc,kernel-supervisor,session-log,preview,mcp}
+├─ py/              novakernel Python 包 (uv)
+│  ├─ novakernel/{dag,runtime,introspect,serialize,server}.py
+│  └─ tests/
+└─ pnpm-workspace.yaml
+```
+
+---
+
+## 4. 文档模型与文件格式（M2）
+
+主存储 = **marimo 兼容子集**的纯 .py：
+
+```python
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pandas", "matplotlib"]
+# ///
+# [novalab] width=compact | app_view=false | kernel_python="3.13"
+
+import marimo_compatible_cell_marker  # 不：实际格式如下
+
+# %% [cell-id: 8f3a2c]
+import pandas as pd
+df = pd.read_csv("data.csv")
+
+# %% [cell-id: b19d04]
+df.groupby("county").sum()
+```
+
+规则：
+- 每 cell 一个 `# %% [cell-id: <8hex>]` 块；id 稳定、git-merge 友好（冲突粒度 = cell）。
+- 文件头 PEP 723 script 块 + `# [novalab]` 配置行（未知键忽略，前向兼容）。
+- **UI 状态（折叠、滚动、segment 命名）不进 .py**，存 sidecar `.novalab/ui.json`；执行事件存 `.novalab/session.jsonl`（ADR-002）。
+- 解析器对"手写的不规范 .py"宽容降级：无 marker 的单文件 = 按空行启发式切分或整体单 cell（导入 marimo 文件时同理）。
+
+---
+
+## 5. 反应式内核语义（M1，规范）
+
+定义（per kernel 进程）：
+- `defs(c)` = cell c 顶层绑定/导入/`del` 的名字集合（AST：Assign/AnnAssign/AugAssign/For/With/Import/FunctionDef/ClassDef/match-as）。
+- `refs(c)` = 顶层读取的名字 − 本 cell 局部先绑定的名字（保守近似：comprehension/lambda 作用域按 Python 语义处理）。
+- 边：`c1 → c2` 当 `refs(c2) ∩ defs(c1) ≠ ∅`。**多重定义同一名字 = 编译错误**（marimo 规则；Agent Reactive Rulebook 同源约束）。
+- 环检测：Kahn 拓扑排序失败 → 报错并高亮环上 cell，拒绝运行。
+
+失效与执行：
+- 编辑 c：`staleSet := 传递闭包(下游(c))`，UI 灰色 `stale` 徽章；**不自动运行**（科研场景副作用昂贵：API 调用、写文件）。
+- 运行 c：exec c → 成功后按 `StalePolicy`（见 §9 钩子）处理 `下游(c) ∩ staleSet`：`auto-cascade`（拓扑序重跑，流式推送每格结果）| `mark-only`。**Owner 裁决（2026-10-06）：默认 `mark-only`**（`app/src/kernel/stalePolicy.ts` 已实现）；auto-cascade / ask 作为 P2 设置面板开关保留。
+- exec 模型：单一共享 `globals` dict；运行 c 前**删除 c 的旧 defs 中不再被新代码定义的名字**，并重算下游——避免"改名后旧变量幽灵存活"（Jupyter 经典病）。
+- 删除 c：其 defs 从 globals 移除 → 下游 stale + Bridge 提示"以下名字将未定义：…"。
+- 副作用 cell（检测到 `open(...,'w')` / `requests.post` / `to_csv` 等启发式名单）默认**不进入 auto-cascade**，标 `side-effect` 徽章需手动确认（防重跑刷爆配额/重复写文件）。
+
+introspect（M5 数据源）：对 globals 每名字产出
+`{name, type, shape?, columns?+dtypes?, len?, preview: head(1).to_dict() | repr 截断 200 字符}`；
+仅存内核内存，**仅经 Bridge PreviewSerializer 出进程**。
+
+---
+
+## 6. 通信协议
+
+### 6.1 前端 ↔ Bridge（WS, JSON-RPC 2.0）
+
+| method | 方向 | payload 摘要 |
+|---|---|---|
+| `notebook.open` | req | `{path}` |
+| `notebook.state` | res | `{cells, dagEdges, schemas, staleSet, execCounts}` |
+| `cell.save` | req | `{cellId, code}` → 重算 DAG → res `{dagEdges, staleSet, compileError?}` |
+| `cell.run` | req | `{cellId, cascade: bool?}` |
+| `run.started / run.stdout / run.stderr / run.mime / run.done / run.error` | notif | 流式；`run.done{cellId, execCount, cascaded:[ids], durationMs}`；`run.error{cellId, traceback, frames:[{file,line,fn,srcLine}]}` |
+| `kernel.status` | notif | `{state: idle|busy|restarting|dead, queueDepth}` |
+| `kernel.vars` | req/res | schemas 全量（本地 UI 用，不经截断——本地可信） |
+| `kernel.repl` | req | `{code}` → 输出回灌为匿名 cell（`[repl]` 徽章） |
+| `diff.stage/accept/reject` | req | 见 §9 |
+| `session.tail` | req/res | 最近 N 条事件（SessionView, P3） |
+| `export.ipynb` | req | `{path, target}` |
+
+### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines，同 §6.1 语义子集）
+kernel 进程只说"执行语"：`exec_cell / exec_repl / introspect / ping / shutdown`；不含文件与 diff 概念。
+
+### 6.3 外部 Agent ↔ Bridge（MCP over stdio，ADR-003）
+工具集见 §7；resource：`novalab://notebook/dag`、`novalab://cell/{id}`。外部 Agent 的 `propose_code_change` 同样只产生 staged diff（前端弹审阅），**不存在特权写入通道**。
+
+---
+
+## 7. Agent 工具集（规范 schema）
+
+方案书 4 核心 + 2 只读辅助。zod schema 单一来源在 `bridge/src/mcp/tools.ts`，前端 in-process 工具与 MCP server 共用同一 execute 实现。
+
+1. `get_notebook_context()` → `{dagEdges, schemas, focusCellId, staleSet}`（**无原始数据**）。
+2. `get_cell_output(cellId)` → 最近一次 `{stdout, stderr, traceback, mimeKeys}`（截断 8KB）。
+3. `propose_code_change(targetCellId, action: update|insert_below, newCode, rationale)` → staged diff id；**禁止直接覆盖**（system prompt + 工具层双保险）。
+4. `execute_cell(cellId, cascade?)` → run 报告（含 cascaded ids 与每格成败）。
+5. `list_cells()` → `[{id, execCount, status, firstLine, defs, refs}]`。
+6. `get_cell_code(cellId)` → 源码原文。
+
+Agent system prompt 注入 **Reactive Rulebook**（intent 风险章）：单赋值、禁重定义已有全局名、倾向函数式与新名字；Bridge 在 `propose_code_change` 入口做轻量 AST 校验（多重定义 → 拒绝并回 reason，让模型自纠）。
+
+---
+
+## 8. 隐私边界（M5 / ADR-006）
+
+出进程白名单（唯一出口 `bridge/src/preview/serializer.ts`）：代码文本、traceback、DAG 边、schema 元信息、`head(1)`/repr≤200 字符预览、用户显式 attach 的文本。
+黑名单硬截断：任何 >4KB 的字符串字段、DataFrame 全量、二进制、文件内容（除非用户显式 attach）。
+UI：AgentPanel 顶部常驻 chip `context: 3 schemas · 1 traceback · 0 rows sent`，点击展开本次请求实际 payload 预览（可审计）。
+
+---
+
+## 9. Diff 审阅 UX 状态机（M4）
+
+```
+proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策略 run
+   │                                        (auto-cascade 见下)
+   ├─(Esc / Reject)──> rejected (留痕于 session.jsonl, 供 Agent 学习拒绝率)
+   └─(用户手改 diff 内任一行)──> edited-staged (重新进入 proposed, 标注 user-edited)
+```
+- 渲染：CodeMirror `@codemirror/merge` 的 `MergeView` 内嵌模式——原码灰底、新码绿底、删除行红底条纹；逐 hunk `✓/×` 与整格采纳两级粒度。
+- **策略钩子（留给Owner的首个代码贡献点）**：`app/src/kernel/stalePolicy.ts → decideStalePolicy(ctx)` 决定 accepted 后与上游重跑后的下游处理（auto-cascade / mark-only / 副作用 cell 询问）。trade-off 见文件内注释。
+- 多 diff 队列：Agent 一次提议多格 → 顶部 diff 托盘 `3 pending`，`Tab` 顺序推进，`Esc Esc` 全拒。
+
+---
+
+## 10. 前端组件树与视觉规格
+
+```
+<App>
+├─ <TabBar>            文件/内核 tab + <LivePill state>
+├─ <CellList virtualized>
+│   └─ <Cell>
+│       ├─ <CellHeader> [execCount] lang-chip stale-badge side-effect-badge ⋯menu
+│       ├─ <CellEditor> CM6 (+ <InlineDiffOverlay> when staged)
+│       └─ <OutputDisclosure> ▶ output → <OutputRenderer mime-bundle>
+├─ <KernelStatusBar>   "Python kernel · shared with the agent" | drag-handle | idle
+├─ <InlineREPL>        >>> run code in this kernel…
+└─ <AgentPanel right>  <ContextChip/> <ChatStream/> <FixCard traceback+schema+Apply/>
+    └─ <SessionModal>  (P3) segments 折叠分组 + export .ipynb
+```
+
+视觉 tokens（clean-room，ADR-004）：暗色底 `#0b0b0c` 系、面板 `#141416`、边框 1px `#26262a`、等宽 `JetBrains Mono / ui-monospace`、正文 UI sans；圆角 6-8px；无阴影渐变；状态色：run=amber、ok=green、err=red、stale=grey、diff-add=`#1f3b2a`/diff-del=`#3b1f24`。亮色主题 P4。
+
+**附录 A：Claude Science 复刻核对清单**——见 [intent.md §4 表](intent.md)（10 项元素 → 组件映射 → 阶段），验收时逐项对照截图勾核。
+
+---
+
+## 11. Session 日志与导出（S2, P3）
+
+`.novalab/session.jsonl` 事件：`{ts, kind: run|error|diff_proposed|diff_accepted|diff_rejected|repl|agent_msg, actor: user|agent, cellId, payloadRef}`。
+SessionModal = 该日志 + 当前 cells 的只读投影（segments = 按 >30min 间隔或显式命名切分）。
+导出 .ipynb：cells→nbformat 4.5（output 取最近一次 MIME bundle）；导入 .ipynb：一次性转换生成 .py（输出丢弃、`%magic` 降级为注释警告）。
+
+---
+
+## 12. 错误处理
+
+- 内核编译错（DAG 环/多重定义）：保存即报，cell 红框 + 原因行内提示，不进运行队列。
+- 运行期异常：traceback 结构化（frames 带 srcLine）→ 存 cell + 触发 FixCard；内核进程存活（exec 隔离在 try/except，globals 不回滚但失败 cell 的 defs 不更新）。
+- 内核进程死：§2 崩溃恢复；session.jsonl 保证审计连续。
+- Bridge 死：Tauri watchdog 重启 + 前端重连带 session resume id。
+- LLM  provider 错/离线：AgentPanel 降级横幅；**notebook 全部本地功能不受影响**（M6 脱网承诺）。
+
+---
+
+## 13. 非功能需求
+
+冷启动<3s（Tauri+bridge+kernel spawn+回放 100 cell）；cell 附加开销<50ms；100 cell 60fps（虚拟化列表，CM6 视口外实例销毁重建）；bridge RSS<150MB；kernel RSS 不设限（用户数据）；WS 消息批量化（stdout 流 16ms coalesce）。
+
+## 14. 测试策略
+
+- py：pytest——dag 提取黄金集（含 comprehension/walrus/match 边角）、失效传递性、幽灵变量删除、serialize 往返（marimo 文件互操作样本放 `py/tests/fixtures/`，取自 refs/marimo 示例）。
+- bridge：vitest——protocol 契约（TS/py 共享 JSON fixtures）、PreviewSerializer 截断断言（>4KB 必截）、MCP 工具 schema 快照。
+- app：vitest+RTL——Diff 状态机（Tab/Esc/edited-staged）、stale 徽章派生；playwright e2e——intent §8 演示脚本全自动跑通。

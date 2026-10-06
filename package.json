@@ -1,0 +1,10 @@
+{
+  "name": "novalab",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "dev:app": "pnpm --filter @novalab/app dev",
+    "dev:bridge": "pnpm --filter @novalab/bridge dev",
+    "kernel": "uv run --directory py python -m novakernel.server"
+  }
+}
