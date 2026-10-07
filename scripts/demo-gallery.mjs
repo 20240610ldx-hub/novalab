@@ -342,6 +342,8 @@ async function openNotebook(page, file) {
   await page.addInitScript(() => {
     try {
       localStorage.setItem('novalab.view', 'notebook');
+      // CI/新鲜 profile 无 onboarded flag → 首启引导模态拦截一切点击（ubuntu CI 14 态超时根因）
+      localStorage.setItem('novalab.onboarded', '1');
     } catch {
       /* 忽略 */
     }
@@ -537,7 +539,12 @@ state('01', '01-open-idle', async (ctx) => {
   await page.locator('button[title="Notebook 视图"]').click();
   await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
   // A-3 #19：JetBrains Mono 真正加载（fontsource 打包，document.fonts 断言）
-  const fontOk = await page.evaluate(() => document.fonts.check('13px "JetBrains Mono"'));
+  const fontOk = await page.evaluate(async () => {
+    // 冷启动竞态：check 前显式 load + ready（Q 线本地过是暖缓存运气，CI 必红）
+    await document.fonts.load('13px "JetBrains Mono"');
+    await document.fonts.ready;
+    return document.fonts.check('13px "JetBrains Mono"');
+  });
   if (!fontOk) throw new Error('JetBrains Mono 未生效（document.fonts.check false）');
   // A-3 #21：代码区复制按钮 → 点击 → clipboard 读回与内核代码一致
   await ctx.context.grantPermissions(['clipboard-read', 'clipboard-write']);

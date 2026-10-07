@@ -301,6 +301,15 @@ class BridgeClient {
 const pace = (page, ms) => page.waitForTimeout(Math.min(800, Math.max(300, ms)));
 
 async function openNotebook(page, file) {
+  // 新鲜 context 无 onboarded flag → 首启引导模态拦截操作（与画廊同因）
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('novalab.onboarded', '1');
+      localStorage.setItem('novalab.view', 'notebook');
+    } catch {
+      /* 忽略 */
+    }
+  });
   await page.goto(APP_URL + '?path=' + encodeURIComponent(file), { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('section[data-cell-id]', { timeout: 40000 });
   const banner = page.locator('text=bridge 未连接');
