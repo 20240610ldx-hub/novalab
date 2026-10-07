@@ -304,6 +304,7 @@ def _make_fig1():
 
 fig1 = _make_fig1()
 host.view_image("fig1_trajectories.png", crop=(0.0, 0.45, 0.45, 1.0))
+fig1  # 收尾裸表达式：触发内核 matplotlib 捕获 → run.mime image/png
 
 # %% [cell-id: a1b2c30a]
 def _make_fig2():
@@ -368,6 +369,7 @@ def _make_fig2():
 
 
 fig2 = _make_fig2()
+fig2  # 收尾裸表达式：触发内核 matplotlib 捕获 → run.mime image/png
 
 # %% [cell-id: a1b2c30b]
 def _topology_summary():
@@ -471,6 +473,7 @@ def _make_fig3():
 
 
 fig3 = _make_fig3()
+fig3  # 收尾裸表达式：触发内核 matplotlib 捕获 → run.mime image/png
 
 # %% [cell-id: a1b2c30e]
 def _read_sweep_tables():
