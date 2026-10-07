@@ -33,6 +33,65 @@ vite dev server（`devUrl = http://localhost:5199`）；`frontendDist = ../dist`
 $env:NOVALAB_BRIDGE = "external"; pnpm exec tauri dev
 ```
 
+## P4.1b sidecar 打包（bridge + kernel，已实现）
+
+P4.1 的"仅壳"缺口按 Owner 裁决的 **方案 B（sidecar node.exe + bundled JS）+
+kernel 方案 B（uv sidecar，首启自装）** 落地。identifier 保持 `dev.novalab.app`
+不变（Owner 裁决）。
+
+**构建顺序**（tauri-build 在 `cargo build` 时即拷贝 externalBin/resources 到
+target/，故脚本必须先于 cargo/tauri build 跑，产物齐备才能编译）：
+
+```powershell
+pnpm --filter @novalab/app build        # 前端 dist（tauri.conf frontendDist）
+node scripts/build-bridge.mjs           # bridge → bridge-dist/bridge.mjs + binaries/node-<triple>.exe
+node scripts/sync-py-resources.mjs      # py/ → py-resources/py/ + binaries/uv-<triple>.exe
+cd app/src-tauri
+cargo build --release                   # tauri-build 拷 sidecar/resources 到 target/release/
+pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\":{\"active\":true}}'
+python scripts/verify_bundle.py         # 断言反转为「payload 必含 sidecar/resources」
+```
+
+**产物（均 gitignore，见 `.gitignore`）**：
+- `bridge-dist/bridge.mjs`：esbuild 把 `bridge/src/main.ts` 打成单文件 ESM
+  （platform=node，ws/zod/chokidar/MCP SDK 全内联，banner 兜底 createRequire）。
+  esbuild 来自 pnpm store（vite 的传递依赖，lockfile 已有）。~1.6 MB。
+- `binaries/node-x86_64-pc-windows-msvc.exe`：本机 node（`where node` realpath，
+  防 symlink；要求 ≥22）。~88 MB。
+- `binaries/uv-x86_64-pc-windows-msvc.exe`：本机 uv（`where uv` realpath）。~63 MB。
+- `py-resources/py/`：`py/` 内核源（novakernel/ + tests/ + pyproject.toml + uv.lock；
+  **排除** .venv/__pycache__/*.pyc）。~0.7 MB。装机后 .venv 由 uv 首启自建。
+
+**tauri.conf.json（最终形态）**：
+
+```jsonc
+"bundle": {
+  "active": false,               // dev 期；打包用 CLI --config 覆盖开启
+  "targets": "all",
+  "icon": [ ... ],
+  "externalBin": ["binaries/node", "binaries/uv"],   // tauri 追加 -<triple>.exe 查找
+  "resources": ["bridge-dist/", "py-resources/"]     // 数组形态（schema BundleResources 允许 list 或 map）
+}
+```
+
+**lib.rs 双分支**（`spawn_bridge`）：
+- `tauri::is_dev()`（未启用 custom-protocol）→ dev 分支：现状 `cmd /C pnpm …`。
+- packaged（`tauri build` 产物）→ `resolve_packaged_layout()` 经 `current_exe` 旁 +
+  `resource_dir()`（Windows 上二者同目录）按序探测 sidecar（`binaries/` 子目录或扁平）
+  与资源，spawn `node bridge.mjs`，注入：
+  - `NOVALAB_PACKAGED=1`
+  - `NOVALAB_PY_DIR=<resource>/py-resources/py`
+  - `NOVALAB_UV_BIN=<resource>/binaries/uv-<triple>.exe`
+  布局缺失 → 警告并回落 dev spawn。退出时 `taskkill /T /F` 杀 node→uv→python 整棵树。
+
+**bridge supervisor 适配**（`supervisor.ts`）：`StdioKernelTransport` 的 uv 命令与
+pyDir 经 `resolveKernelSpawnSpec()` 读 `NOVALAB_UV_BIN`/`NOVALAB_PY_DIR`（缺省回落
+现状 'uv' + repo 推导）。**首启自装**：packaged 下 spawn kernel 前若 `<pyDir>/.venv`
+不存在 → `ensureKernelVenv()` 跑 `uv python install` + `uv sync --directory <pyDir>
+--all-extras`（超时 300s）；任一失败/超时 → stderr warn 并**回落 BYO**（PATH uv/python）。
+bootstrap 在途时 `send()` 缓冲、spawn 后 flush（首启 load_file 不丢）。单测覆盖 env
+覆盖 + 回落 + 缓冲（注入假 runner/spawn，不真拉进程）。
+
 ## P4.1 本地 release 构建验证（2026-10-07，已跑通）
 
 ```powershell
@@ -58,33 +117,13 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
 
 ## P4 待办（打包期）
 
-- [ ] **sidecar（P4 已知缺口）**：安装包只含前端+壳。安装版在无 repo 的机器上
-      `repo_root()`（编译期 `CARGO_MANIFEST_DIR`）探测失败 → bridge 不 spawn
-      （仅警告），kernel 更无从谈起；用户须自行 `pnpm --filter @novalab/bridge
-      start` + `uv run`（py/）。方案选项（供 Owner 决策）：
-      - **bridge（node，tsx ESM，deps: ws/zod/chokidar/MCP SDK）**：
-        - **A. Node SEA 单文件**：esbuild/tsup bundle 成单 CJS →
-          `node --experimental-sea-config` 注入 blob → 产出
-          `bridge-x86_64-pc-windows-msvc.exe` 进 `bundle.externalBin`。
-          单文件干净；但 SEA 尚 experimental，体积 ~40–80 MB，CI 需 node 构建链。
-        - **B. sidecar node.exe + bundled JS**（推荐起步）：`externalBin` 带
-          官方 node.exe，bridge 打成单文件 JS 作 `bundle.resources`，壳启动
-          `node bridge.js`。无 experimental 特性、维护最省；两文件布局。
-        - **C. bun compile**：`bun build --compile` 出单 exe（~55–95 MB），
-          引入 bun 工具链作构建依赖。
-      - **py 内核（novakernel，uv 虚拟项目，python≥3.11）**：
-        - **A. python-build-standalone 便携 CPython**（astral 发行）作
-          resource/externalBin，预装 novakernel 依赖（websockets 必带；
-          pandas/matplotlib 视 demo 取舍）——完全离线；体积 +30–250 MB。
-        - **B. uv sidecar**（推荐起步）：随包带 `uv.exe`（~15 MB），首启
-          `uv python install 3.12` + `uv sync` 到 app-data——安装器小，
-          首启需联网。
-        - **C. BYO**：探测系统 python≥3.11 / uv，缺失则引导安装
-          （现状行为的正式化）；作为 A/B 的 fallback 保留。
-      - **壳侧配套**（任一组合相同）：引入 `tauri_plugin_shell`，capabilities
-        加 `shell:allow-execute`（限定 sidecar）；`lib.rs` spawn 改
-        packaged=sidecar / dev=pnpm 双分支；删 `repo_root()` 编译期启发式；
-        externalBin 文件须带 target-triple 后缀命名。
+- [x] **sidecar（P4.1b 已落地）**：bridge 走方案 B（sidecar node.exe +
+      esbuild 单文件 bridge.mjs 作 resource），kernel 走方案 B（uv sidecar +
+      首启 `uv python install`/`uv sync` 自装，失败回落 BYO=C 现状路径）。
+      未引入 tauri_plugin_shell——lib.rs 直接 `std::process::Command` spawn
+      sidecar（Rust 侧无需 shell 权限，capabilities 不动）。细节见上方 P4.1b 节。
+      遗留：安装目录若不可写（Program Files），首启 `uv sync` 到 py-resources/
+      可能因权限失败 → 回落 BYO；根治需把 py 资源/venv 迁 app-data（P4.2 候选）。
 - [x] **图标**：`tauri icon` 已生成全套（见 `icons/`），`bundle.icon` 已填；
       icons/README.md 的"空占位"描述已过时（本次已更新）。
 - [ ] **签名**：Windows 代码签名证书占位（tauri-action CI；secrets 未配 =
@@ -98,13 +137,34 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
 
 ## CI release.yml 备注
 
+**P4.1b 起 release.yml 必须新增 sidecar 生成步骤**：tauri.conf.json 已声明
+`externalBin`/`resources`，tauri-build 在 cargo 编译期就要求这些文件存在——
+缺了直接构建失败（windows 与 linux job 都是）。在 `pnpm --filter @novalab/app
+build` 之后、tauri-action 之前插入：
+
+```yaml
+      # ---- P4.1b sidecar 生成（externalBin/resources 是 cargo 编译期硬依赖）----
+      - name: install uv (sidecar 源，两平台)
+        uses: astral-sh/setup-uv@v5
+      - name: build bridge bundle + node/uv sidecars + py resources
+        run: |
+          node scripts/build-bridge.mjs
+          node scripts/sync-py-resources.mjs
+```
+
+（脚本自动按 runner 平台产出对应 triple 命名；node 取 setup-node 的
+`where/which node`，uv 取 setup-uv 装入 PATH 的 uv。windows job 出
+`*-x86_64-pc-windows-msvc.exe`，linux job 出 `*-x86_64-unknown-linux-gnu`。）
+
 本地验证与 release.yml 用同一覆盖法（`--bundles ... --config
-'{"bundle":{"active":true}}'`），**P4.1 无需调整 CI**。两点留意：
+'{"bundle":{"active":true}}'`）。两点留意：
 ① windows job 跑 `nsis,msi` 双 target——msi(WiX) 本地未验证，CI 首跑即其
 验证；若挂可临时降为 `nsis` 保 tag 发布链路。② tauri-action 以 args 数组
 直传 CLI（无 shell 引号层），单引号 JSON 在 GH runner 安全。
 `.cargo/config.toml` 的 rust-lld pin 在 CI 同样生效（rustup ≥1.28 自带
-rust-lld proxy）。
+rust-lld proxy）。③ sidecar 使产物体积大增（node ~88 MB + uv ~63 MB，NSIS
+LZMA 压缩后 setup 预计 60–140 MB），GitHub Release 附件与 actions 缓存时长
+会相应上涨。
 
 ## 目录
 
@@ -112,15 +172,21 @@ rust-lld proxy）。
 src-tauri/
 ├─ .cargo/config.toml    rust-lld linker pin（免疫 Git coreutils link.exe 劫持）
 ├─ Cargo.toml            tauri = "2" / tauri-build；lib name = novalab_lib
-├─ build.rs              tauri_build::build()
+├─ build.rs              tauri_build::build()（拷 externalBin/resources 到 target/）
 ├─ tauri.conf.json       identifier dev.novalab.app · window 1280x800 Dark
 │                        · bundle.active=false（dev 期；打包用 CLI --config 覆盖）
+│                        · externalBin [binaries/node, binaries/uv]
+│                        · resources [bridge-dist/, py-resources/]
+├─ binaries/             （生成物，gitignore）node/uv sidecar，-<triple>.exe 命名
+├─ bridge-dist/          （生成物，gitignore）esbuild 单文件 bridge.mjs
+├─ py-resources/         （生成物，gitignore）py/ 内核源（无 .venv）
 ├─ capabilities/
-│  └─ default.json       仅 core:default 权限（无插件）
+│  └─ default.json       仅 core:default 权限（无插件；sidecar 由 Rust 侧 spawn，不需 shell 权限）
 ├─ icons/                tauri icon 生成全套（P4.1 已就位）
 ├─ scripts/
-│  └─ verify_bundle.py   产物核验：installer.nsi 清单 + exe 内嵌 asset key
+│  └─ verify_bundle.py   产物核验：installer.nsi 必含 sidecar/resources、禁 .venv/凭据
 └─ src/
    ├─ main.rs            windows_subsystem 包装 → novalab_lib::run()
-   └─ lib.rs             run()：setup() spawn bridge · Exit 时 kill
+   └─ lib.rs             run()：setup() spawn bridge（dev=pnpm / packaged=sidecar
+                         node+bridge.mjs+NOVALAB_* env 注入）· Exit 时 taskkill /T
 ```

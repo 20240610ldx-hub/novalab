@@ -1,15 +1,17 @@
-"""P4.1 bundle content verification — no 7z needed.
+"""P4.1b bundle content verification — payload must now CARRY the sidecars.
 
 The NSIS payload is LZMA-solid-compressed, so byte-scanning the setup exe
 proves nothing about its contents. The ground truth is the bundler-generated
-script `target/release/nsis/<arch>/installer.nsi`: its `!define` block lists
-the exact payload (MAINBINARYSRCPATH, WebView2 mode, resources/sidecars).
+script `target/release/nsis/<arch>/installer.nsi`: its `!define` block and
+`File`/resource commands list the exact payload.
 
-Checks:
+Checks (P4.1b — assertions INVERTED vs P4.1 shell-only expectation):
 1. installer.nsi defines: payload binary, WebView2 install mode, signing cmd.
-2. No `File` commands beyond the main binary + uninstaller ⇒ shell-only bundle
-   (known P4 gap: novakernel/bridge are NOT sidecar-packaged).
-3. novalab.exe embeds the frontend dist: asset *keys* (paths) are stored
+2. Payload CONTAINS: node sidecar, uv sidecar, bridge-dist/bridge.mjs,
+   py-resources/py (novakernel source).
+3. Payload does NOT contain: any .venv, credential files (.novalab/,
+   providers.json, *.env.local, id_rsa…), __pycache__.
+4. novalab.exe embeds the frontend dist: asset *keys* (paths) are stored
    plaintext in the binary even though asset *values* are compressed.
 
 Run:  python scripts/verify_bundle.py   (from app/src-tauri, after tauri build)
@@ -18,10 +20,13 @@ import pathlib
 import re
 import sys
 
-BASE = pathlib.Path(__file__).resolve().parent.parent / "target" / "release"
+HERE = pathlib.Path(__file__).resolve().parent.parent          # app/src-tauri
+BASE = HERE / "target" / "release"
 NSI = BASE / "nsis" / "x64" / "installer.nsi"
 EXE = BASE / "novalab.exe"
-DIST = pathlib.Path(__file__).resolve().parent.parent.parent / "dist"
+DIST = HERE.parent / "dist"                                     # app/dist
+
+TRIPLE = "x86_64-pc-windows-msvc"
 
 def fail(msg: str) -> None:
     print(f"  [FAIL] {msg}")
@@ -40,28 +45,48 @@ for key in ("PRODUCTNAME", "VERSION", "MAINBINARYNAME", "MAINBINARYSRCPATH",
 if not defines.get("MAINBINARYSRCPATH", "").lower().endswith("novalab.exe"):
     fail("MAINBINARYSRCPATH does not point at novalab.exe")
 
-# ---- 2. payload file list (shell-only expectation) ---------------------------
-file_cmds = re.findall(r'^\s*File\s+(?!"/oname=)(.*)$', nsi, re.M)
-oname_cmds = re.findall(r'^\s*File\s+"/oname=([^"]+)"', nsi, re.M)
-print(f"  File commands (payload): {file_cmds}")
-print(f"  File /oname (temp, e.g. webview2): {oname_cmds}")
-unexpected = [f for f in file_cmds if "MAINBINARYSRCPATH" not in f]
-if unexpected:
-    fail(f"unexpected payload entries (resources/sidecars?): {unexpected}")
-for banned in ("novakernel", "bridge", "node.exe", "python"):
-    if re.search(rf'^\s*File\s+.*{banned}', nsi, re.M | re.I):
-        fail(f"payload unexpectedly contains {banned!r}")
-print("  => payload is main binary only: novakernel/bridge NOT bundled (P4 gap, expected)")
+nsi_l = nsi.lower()
 
-# ---- 3. frontend dist embedded in exe ----------------------------------------
+# ---- 2. payload must contain sidecars + resources ----------------------------
+REQUIRED = {
+    "node sidecar":        f"node-{TRIPLE}.exe".lower(),
+    "uv sidecar":          f"uv-{TRIPLE}.exe".lower(),
+    "bridge bundle":       "bridge.mjs",
+    "py-resources kernel": "py-resources",
+    "novakernel server":   "server.py",
+}
+print("== required payload entries ==")
+for label, needle in REQUIRED.items():
+    if needle not in nsi_l:
+        fail(f"{label} missing from installer.nsi (needle {needle!r})")
+    print(f"  [OK] {label:22} ({needle})")
+
+# ---- 3. payload must NOT contain venv/credentials ----------------------------
+# 只扫描真正的 payload 指令行（File / SetOutPath）——不扫 !define：identifier
+# `dev.novalab.app` 合法地包含子串 ".novalab"，但它是 bundle id 而非文件路径。
+BANNED = (".venv", ".novalab", "providers.json", "__pycache__",
+          ".env.local", "id_rsa", "secret.txt", "credentials")
+print("== banned payload entries ==")
+payload_lines = [
+    ln for ln in nsi.splitlines()
+    if ln.lstrip().lower().startswith(("file ", "file\tdir", "setoutpath"))
+]
+for banned in BANNED:
+    for line in payload_lines:
+        if banned in line.lower():
+            fail(f"payload contains banned entry {banned!r}: {line.strip()[:120]}")
+    print(f"  [OK] absent: {banned}")
+
+# ---- 4. frontend dist embedded in exe ----------------------------------------
 if not EXE.is_file():
     fail(f"{EXE} missing")
 exe_bytes = EXE.read_bytes()
+print(f"== {EXE.name} ({len(exe_bytes):,} bytes) ==")
 assets = sorted((DIST / "assets").glob("*")) if DIST.is_dir() else []
 if not assets:
     fail(f"no assets under {DIST} — build the frontend first")
 checked = 0
-print(f"== {EXE.name} ({len(exe_bytes):,} bytes) — embedded asset keys ==")
+print("== embedded asset keys ==")
 for a in assets:
     if a.suffix in (".woff", ".woff2"):
         continue  # spot-check below; scanning all fonts is noise
@@ -72,4 +97,9 @@ font = next((a.name for a in assets if a.suffix == ".woff2"), None)
 if font and font.encode() in exe_bytes:
     checked += 1
 print(f"  => {checked} asset keys found plaintext in exe (dist is embedded)")
+
+# ---- size report (informational) ---------------------------------------------
+for setup in sorted((BASE / "bundle" / "nsis").glob("*-setup.exe")) if (BASE / "bundle" / "nsis").is_dir() else []:
+    print(f"== installer: {setup.name} = {setup.stat().st_size / 1024 / 1024:.1f} MB ==")
+
 print("ALL CHECKS PASSED")

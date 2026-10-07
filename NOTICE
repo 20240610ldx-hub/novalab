@@ -70,6 +70,35 @@ project into this repository.
      through package managers (pnpm / uv / cargo) under their own
      licenses and are not redistributed in Source form here.
 
+7. Bundled runtime binaries (P4.1b sidecar packaging)
+   The desktop installer redistributes the following third-party
+   binaries verbatim (unmodified) so the packaged app is self-contained.
+   These are copied from the build machine by scripts/build-bridge.mjs
+   and scripts/sync-py-resources.mjs and are NOT stored in this repo.
+
+   - Node.js — the official Node.js runtime, redistributed unmodified as
+     the bridge sidecar (binaries/node-<target-triple>). Node.js is dual
+     licensed under the MIT License and the Artistic License 2.0; it is
+     used here under the MIT License. Copyright Node.js contributors and
+     other contributors. Node.js is a trademark of the OpenJS Foundation.
+     Source: https://nodejs.org · License: https://github.com/nodejs/node/
+     blob/main/LICENSE  ("Permission is hereby granted, free of charge,
+     to any person obtaining a copy … THE SOFTWARE IS PROVIDED 'AS IS' …")
+
+   - uv — the Astral Python package/project manager, redistributed
+     unmodified as the kernel-provisioning sidecar (binaries/uv-<target-
+     triple>). uv, Copyright Astral Software, Inc. Licensed under
+     Apache-2.0 OR MIT (dual licensed, at your option).
+     Source: https://github.com/astral-sh/uv ·
+     Licenses: https://github.com/astral-sh/uv/blob/main/LICENSE-APACHE
+     and https://github.com/astral-sh/uv/blob/main/LICENSE-MIT
+
+   - NovaLab's own bridge bundle (bridge-dist/bridge.mjs, esbuild output
+     of bridge/src) and kernel source (py-resources/py, from py/) are
+     original works of this project (see LICENSE); their npm/PyPI
+     dependencies are statically bundled or resolved by uv at first run
+     under their own licenses and are not redistributed in Source form.
+
 ---------------------------------------------------------------------------
 If you believe any boundary stated above is inaccurate, please open an
 issue — corrections are welcome and will be reflected in this file.

@@ -50,6 +50,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @novalab/app build
 
+      # ---- P4.1b sidecar 产物（tauri-build 编译期要求 externalBin 存在）----
+      - uses: astral-sh/setup-uv@v5
+      - run: node scripts/build-bridge.mjs
+      - run: node scripts/sync-py-resources.mjs
+
       # ---- Tauri 打包 + attach 到 GitHub Release（tag 触发时自动建 Release 草稿）----
       # 签名说明：
       #   * 未在仓库 Settings → Secrets 配置 TAURI_SIGNING_KEY / TAURI_SIGNING_KEY_PASSWORD

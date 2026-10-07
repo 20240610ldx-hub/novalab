@@ -2,7 +2,8 @@
  * KernelSupervisor —— spawn / health / restart novakernel 子进程（spec §1/§2, plan P1.3）。
  *
  * - 传输层抽象 KernelTransport：生产用 StdioKernelTransport（spawn
- *   `uv run --directory <repo>/py python -m novakernel.server`），单测注入 FakeKernel。
+ *   `<NOVALAB_UV_BIN|uv> run --directory <NOVALAB_PY_DIR|repo/py> python -m novakernel.server`，
+ *   P4.1b packaged 模式先首启自装 venv），单测注入 FakeKernel。
  * - health：每 pingIntervalMs（默认 5s）发一次 ping；仅在内核 idle 时判定超时
  *   （内核 exec 期间是同步消息循环，无法应答 ping——busy 时跳过检测，防误杀长跑 cell）。
  * - 崩溃检测：进程 exit 或 ping 超时 → state=dead（kernel.status 通知）；
@@ -12,7 +13,8 @@
 
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   ERR_KERNEL,
   isKernelResponse,
@@ -49,42 +51,225 @@ export class KernelError extends Error {
   }
 }
 
-/** 生产传输层：spawn `uv run --directory <pyDir> python -m novakernel.server`。 */
+/* ------------------------------------------------------------------ */
+/* P4.1b packaged mode: env 解析 + 首启自装 venv                        */
+/* ------------------------------------------------------------------ */
+
+/** kernel spawn 规格：env（NOVALAB_*）优先，缺省回落现状 'uv' + repo 推导 pyDir。 */
+export interface KernelSpawnSpec {
+  /** uv 可执行文件：NOVALAB_UV_BIN（packaged 由壳注入 sidecar 路径）→ 回落 PATH 'uv'。 */
+  uvBin: string;
+  /** novakernel 项目目录：NOVALAB_PY_DIR（packaged 资源目录）→ 回落 repo 推导。 */
+  pyDir: string;
+  /** `uv run --directory <pyDir> python -m novakernel.server` 参数序列。 */
+  args: string[];
+  /** NOVALAB_PACKAGED=1：packaged 模式（触发首启自装 venv）。 */
+  packaged: boolean;
+}
+
+/** 纯函数：从 env 解析 kernel spawn 规格（可单测；env 缺省全回落现状）。 */
+export function resolveKernelSpawnSpec(
+  pyDirFallback: string,
+  env: NodeJS.ProcessEnv = process.env,
+): KernelSpawnSpec {
+  const uvBin = env['NOVALAB_UV_BIN'] || 'uv';
+  const pyDir = env['NOVALAB_PY_DIR'] || pyDirFallback;
+  return {
+    uvBin,
+    pyDir,
+    args: ['run', '--directory', pyDir, 'python', '-m', 'novakernel.server'],
+    packaged: env['NOVALAB_PACKAGED'] === '1',
+  };
+}
+
+/** 子进程命令执行器（可注入单测）：ok=退出码 0；超时/错误 → ok:false。 */
+export interface CommandRunner {
+  (cmd: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; code: number | null }>;
+}
+
+/** 生产 runner：spawn + 超时杀 + stderr 透传（首启自装可见性）。 */
+export const spawnCommandRunner: CommandRunner = (cmd, args, timeoutMs) =>
+  new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean, code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok, code });
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    } catch (err) {
+      process.stderr.write(`[bridge] bootstrap spawn 抛异常: ${(err as Error).message}\n`);
+      resolve({ ok: false, code: null });
+      return;
+    }
+    const timer = setTimeout(() => {
+      process.stderr.write(
+        `[bridge] bootstrap 超时（${timeoutMs}ms）杀进程: ${cmd} ${args.join(' ')}\n`,
+      );
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* 已退出 */
+      }
+      finish(false, null);
+    }, timeoutMs);
+    timer.unref?.();
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (d: string) => process.stderr.write(`[novakernel-bootstrap] ${d}`));
+    child.on('error', (err) => {
+      process.stderr.write(`[bridge] bootstrap 进程错误: ${err.message}\n`);
+      finish(false, null);
+    });
+    child.on('exit', (code) => finish(code === 0, code));
+  });
+
+/** 首启自装整体超时：300s（uv python install + uv sync --all-extras）。 */
+export const VENV_BOOTSTRAP_TIMEOUT_MS = 300_000;
+
+export interface EnsureVenvDeps {
+  runner?: CommandRunner;
+  timeoutMs?: number;
+  /** `.venv` 是否已存在（默认 fs.existsSync；单测注入）。 */
+  venvExists?: (pyDir: string) => boolean;
+}
+
+/**
+ * packaged 首启自装：`<pyDir>/.venv` 缺失时依次
+ *   1. `uv python install`（一次性，确保解释器在位）
+ *   2. `uv sync --directory <pyDir> --all-extras`
+ * 任一失败/超时 → 返回 false（调用方回落 BYO：PATH uv/python 现状路径）并记 stderr warn。
+ * 幂等：.venv 已存在直接 true。
+ */
+export async function ensureKernelVenv(
+  uvBin: string,
+  pyDir: string,
+  deps: EnsureVenvDeps = {},
+): Promise<boolean> {
+  const runner = deps.runner ?? spawnCommandRunner;
+  const timeoutMs = deps.timeoutMs ?? VENV_BOOTSTRAP_TIMEOUT_MS;
+  const venvExists = deps.venvExists ?? ((d: string) => existsSync(path.join(d, '.venv')));
+  if (venvExists(pyDir)) return true;
+
+  const install = await runner(uvBin, ['python', 'install'], timeoutMs);
+  if (!install.ok) {
+    process.stderr.write(
+      `[bridge] WARN uv python install 失败（code=${install.code}）——回落 BYO（PATH uv/python）\n`,
+    );
+    return false;
+  }
+  const sync = await runner(uvBin, ['sync', '--directory', pyDir, '--all-extras'], timeoutMs);
+  if (!sync.ok) {
+    process.stderr.write(
+      `[bridge] WARN uv sync 失败（code=${sync.code}）——回落 BYO（PATH uv/python）\n`,
+    );
+    return false;
+  }
+  return true;
+}
+
+/** StdioKernelTransport 可注入依赖（单测用；生产缺省走真实 ensureKernelVenv / spawn）。 */
+export interface StdioTransportDeps {
+  /** 首启自装覆盖（单测注入假实现，验证成功/BYO 回落两条 spawn 路径）。 */
+  ensureVenv?: (uvBin: string, pyDir: string) => Promise<boolean>;
+  /** child_process.spawn 覆盖（单测记录参数，不真拉进程）。 */
+  spawnImpl?: typeof spawn;
+}
+
+/**
+ * 生产传输层：spawn `<uvBin> run --directory <pyDir> python -m novakernel.server`。
+ *
+ * P4.1b：uvBin / pyDir 经 resolveKernelSpawnSpec 从 env 解析（NOVALAB_UV_BIN /
+ * NOVALAB_PY_DIR，缺省回落现状 'uv' + 构造入参）。packaged 模式（NOVALAB_PACKAGED=1）
+ * 下 spawn 是异步的——先 ensureKernelVenv 首启自装（失败回落 BYO），完成后才起子进程；
+ * 就绪前的 send() 进 pendingWrites 缓冲，spawn 后 flush（supervisor 的 load_file 因此
+ * 在首启自装期间挂起而非失败）。
+ */
 export class StdioKernelTransport implements KernelTransport {
-  private readonly child: ChildProcess;
+  private child?: ChildProcess;
   private buf = '';
   private messageCb?: (msg: KernelWireMessage) => void;
   private exitCb?: (code: number | null) => void;
   private exited = false;
   private killed = false;
+  private pendingWrites: string[] = [];
+  private readonly spec: KernelSpawnSpec;
+  private readonly deps: StdioTransportDeps;
 
-  constructor(pyDir: string) {
-    this.child = spawn('uv', ['run', '--directory', pyDir, 'python', '-m', 'novakernel.server'], {
-      cwd: pyDir,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-    this.child.stdout?.setEncoding('utf8');
-    this.child.stdout?.on('data', (chunk: string) => this.onChunk(chunk));
-    this.child.stderr?.setEncoding('utf8');
-    this.child.stderr?.on('data', (d: string) => process.stderr.write(`[novakernel] ${d}`));
+  constructor(pyDir: string, env: NodeJS.ProcessEnv = process.env, deps: StdioTransportDeps = {}) {
+    this.spec = resolveKernelSpawnSpec(pyDir, env);
+    this.deps = deps;
+    if (this.spec.packaged) {
+      void this.bootstrapAndSpawn();
+    } else {
+      this.spawnChild(this.spec.uvBin, this.spec.pyDir);
+    }
+  }
+
+  /** packaged：首启自装（成功→sidecar uv；失败→BYO 'uv'）后 spawn + flush 缓冲。 */
+  private async bootstrapAndSpawn(): Promise<void> {
+    const ensure = this.deps.ensureVenv ?? ensureKernelVenv;
+    const ok = await ensure(this.spec.uvBin, this.spec.pyDir);
+    if (this.killed) {
+      // bootstrap 期间已被 kill（如首启自装中用户关窗）——不再 spawn。
+      this.fireExit(null);
+      return;
+    }
+    this.spawnChild(ok ? this.spec.uvBin : 'uv', this.spec.pyDir);
+    this.flushPending();
+  }
+
+  private spawnChild(uvBin: string, pyDir: string): void {
+    const doSpawn = this.deps.spawnImpl ?? spawn;
+    const child = doSpawn(
+      uvBin,
+      ['run', '--directory', pyDir, 'python', '-m', 'novakernel.server'],
+      { cwd: pyDir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+    );
+    this.child = child;
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => this.onChunk(chunk));
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (d: string) => process.stderr.write(`[novakernel] ${d}`));
     // 进程垂死时写 stdin 会 EPIPE——忽略，exit 事件兜底。
-    this.child.stdin?.on('error', () => {});
-    this.child.on('error', (err) => {
+    child.stdin?.on('error', () => {});
+    child.on('error', (err) => {
       process.stderr.write(`[bridge] kernel spawn 失败: ${err.message}\n`);
       this.fireExit(null);
     });
-    this.child.on('exit', (code) => this.fireExit(code));
+    child.on('exit', (code) => this.fireExit(code));
+  }
+
+  private flushPending(): void {
+    const stdin = this.child?.stdin;
+    if (!stdin || !stdin.writable) return;
+    const queued = this.pendingWrites;
+    this.pendingWrites = [];
+    for (const line of queued) {
+      try {
+        stdin.write(line);
+      } catch {
+        /* EPIPE——exit 事件兜底 */
+      }
+    }
   }
 
   send(msg: KernelRequest): void {
-    const stdin = this.child.stdin;
-    if (!stdin || !stdin.writable) throw new KernelError('kernel stdin 不可写');
-    stdin.write(JSON.stringify(msg) + '\n');
+    const line = JSON.stringify(msg) + '\n';
+    const stdin = this.child?.stdin;
+    if (stdin && stdin.writable) {
+      stdin.write(line);
+      return;
+    }
+    if (this.exited || this.killed) throw new KernelError('kernel stdin 不可写');
+    // packaged bootstrap 在途：缓冲，spawn 后 flush。
+    this.pendingWrites.push(line);
   }
 
   get pid(): number | undefined {
-    return this.child.pid;
+    return this.child?.pid;
   }
 
   onMessage(cb: (msg: KernelWireMessage) => void): void {
@@ -98,8 +283,9 @@ export class StdioKernelTransport implements KernelTransport {
   kill(): void {
     if (this.killed) return;
     this.killed = true;
-    const pid = this.child.pid;
-    if (process.platform === 'win32' && pid !== undefined) {
+    this.pendingWrites = [];
+    const pid = this.child?.pid;
+    if (this.child && process.platform === 'win32' && pid !== undefined) {
       // uv run 会再 spawn python 子进程；Windows 上必须 taskkill /T 杀整棵树。
       try {
         spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
@@ -111,7 +297,7 @@ export class StdioKernelTransport implements KernelTransport {
       }
     }
     try {
-      this.child.kill('SIGKILL');
+      this.child?.kill('SIGKILL');
     } catch {
       /* 已退出 */
     }

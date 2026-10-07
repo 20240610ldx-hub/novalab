@@ -73,6 +73,10 @@ export interface ProvidersStoreOptions {
 
 /** bridge/src/providers-store.ts → 仓库根（与 main.ts 同法）。 */
 function defaultDir(): string {
+  // packaged 模式由壳注入 NOVALAB_DATA_DIR（Tauri appData，安装目录可写性无关）；
+  // dev 模式回落 <repoRoot>/.novalab（gitignore）
+  const dataDir = process.env.NOVALAB_DATA_DIR;
+  if (dataDir) return dataDir;
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
   return path.join(repoRoot, '.novalab');
 }
