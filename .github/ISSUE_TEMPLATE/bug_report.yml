@@ -1,0 +1,67 @@
+name: Bug report
+description: 报告一个可复现的缺陷（安全漏洞请勿走此通道，见 SECURITY.md）
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告！**安全漏洞请勿在此提交**，走 [SECURITY.md](../../SECURITY.md) 的私密渠道。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 现象描述
+      description: 发生了什么？期望是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现
+      description: |
+        复现步骤 + 最小 .py notebook（`# %% [cell-id]` 格式或直接贴代码）。
+        涉及 Agent 的 bug 请说明 provider 与是否附上了审计 chip 显示的发送内容。
+      placeholder: |
+        1. 打开 demos/demo.py
+        2. 编辑第一个 cell 的 x = 0.9 → x = 1.9
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: 组件
+      multiple: true
+      options:
+        - novakernel (py/)
+        - bridge (bridge/)
+        - app 前端 (app/)
+        - Tauri 壳 (app/src-tauri/)
+        - scripts / CI
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: 平台与版本
+      description: OS / Node / pnpm / Python / uv 版本，git commit sha
+      placeholder: "Windows 11 · Node 22.x · pnpm 10.x · Python 3.13 · uv 0.5.x · main@abcdef0"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与截图
+      description: bridge 终端输出、浏览器 console、traceback；UI 问题附截图（可用 scripts/demo-gallery.mjs 拍真机态）
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 自查
+      options:
+        - label: 已搜索现有 issue，无重复
+          required: true
+        - label: 在最新 main 上仍可复现
+          required: true

@@ -1,0 +1,75 @@
+NovaLab
+Copyright 2026 NovaLab Contributors
+
+This product includes software developed under the Apache License, Version 2.0
+(see LICENSE).
+
+---------------------------------------------------------------------------
+Attribution & clean-room boundary statement (ADR-004 discipline)
+---------------------------------------------------------------------------
+
+NovaLab is an original work. Where prior art informed its design, the
+boundary below states exactly what was referenced and what was NOT copied.
+"Clean-room" here means: ideas, semantics and interaction concepts were
+studied from public documentation, published descriptions or screenshots,
+and the implementation (code, tests, wording of assertions, visual assets)
+was written from scratch by this project. No source code, stylesheet,
+icon, font glyph or other expressive asset was copied from any reference
+project into this repository.
+
+1. Reactive execution semantics (py/novakernel, bridge DAG routing)
+   - Referenced: marimo 0.25.1 (Apache-2.0) — the general approach of
+     reactive notebook execution: AST-based definition/reference
+     extraction, single-assignment DAG, staleness propagation,
+     multiple-definition-as-compile-error, cycle detection.
+   - NOT copied: no marimo source code, no vendored marimo files. The
+     kernel (dag.py / runtime.py / introspect.py / serialize.py /
+     server.py) is an independent implementation of these ideas against
+     our own JSON-RPC protocol (docs/spec.md §5/§6). marimo is only
+     present in the gitignored, read-only refs/ directory for study and
+     is not part of the build or dependency graph. The bidirectional
+     .py converter (py/novakernel/convert.py) reads and writes marimo's
+     publicly documented `@app.cell` file format; implementing a format
+     converter does not incorporate marimo code.
+
+2. File browser interaction paradigm (app sidebar / file tree)
+   - Referenced: JupyterLab (BSD-3-Clause) — the interaction model of its
+     filebrowser package: tree navigation, create/rename/delete with
+     confirmation, workspace-root scoping.
+   - NOT copied: no JupyterLab source code or UI assets. Our components,
+     handlers and tests were written from the described behavior alone.
+
+3. UI visual design (dark, minimal, monospace design tokens; layout)
+   - Referenced: publicly circulated screenshots of Claude Science
+     Notebook — clean-room re-creation of layout and interaction
+     elements (kernel tabs, live pill, cell header badges, collapsible
+     output, status bar, inline REPL, session modal) as inventoried in
+     docs/intent.md §4.
+   - NOT copied: no pixel sampling, no extracted assets, no reverse
+     engineering of any closed-source product. All design tokens, CSS
+     and components are original. The name "NovaLab" deliberately avoids
+     any third-party trademark; no affiliation with or endorsement by
+     Anthropic is claimed or implied.
+
+4. Fonts
+   - Included: JetBrains Mono, © JetBrains s.r.o., licensed under the
+     SIL Open Font License 1.1, distributed via the @fontsource/
+     jetbrains-mono npm package (bundled into the app build). The OFL
+     permits redistribution with this notice; the font is provided
+     "as is" without warranty of any kind. Full OFL text: see the
+     license file shipped inside node_modules/@fontsource/jetbrains-mono.
+
+5. Icons
+   - NovaLab-specific icons (app icon set, shell icons) are original
+     drawings created for this project. Third-party icon glyphs come
+     only from the lucide-react npm package (ISC License) as a normal
+     runtime dependency; no icon assets are vendored into the repo.
+
+6. Third-party runtime dependencies
+   - All other third-party components enter this project exclusively
+     through package managers (pnpm / uv / cargo) under their own
+     licenses and are not redistributed in Source form here.
+
+---------------------------------------------------------------------------
+If you believe any boundary stated above is inaccurate, please open an
+issue — corrections are welcome and will be reflected in this file.

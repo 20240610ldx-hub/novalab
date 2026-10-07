@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10'
+
+jobs:
+  # 类型检查 + 单测（bridge/app），双平台
+  node-tests:
+    name: node-tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck (bridge + app)
+        run: |
+          pnpm --filter @novalab/bridge exec tsc --noEmit
+          pnpm --filter @novalab/app exec tsc --noEmit
+      - name: vitest (bridge)
+        run: pnpm --filter @novalab/bridge exec vitest run
+      - name: vitest (app)
+        run: pnpm --filter @novalab/app exec vitest run
+
+  # novakernel pytest（uv 管理环境）
+  py-tests:
+    name: py-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: py/uv.lock
+      - run: uv sync --directory py --all-extras
+      - run: uv run --directory py pytest
+
+  # 端到端冒烟：bridge(真) + novakernel(真) + 模拟前端 WS 客户端
+  # （scripts/integration-smoke.mjs 自起自停 bridge，job 无需常驻服务）
+  integration:
+    name: integration-smoke
+    runs-on: ubuntu-latest
+    needs: [node-tests, py-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: py/uv.lock
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --directory py --all-extras
+      - run: node scripts/integration-smoke.mjs
+
+  # 交互状态画廊：真机截图（playwright chromium headless）。
+  # 服务由本 job 后台起（脚本检测到已运行则复用，不触发其 Windows-only 的
+  # taskkill 自停路径）；--skip-agent：无 LLM 凭据，Agent 流式态(11)跳过。
+  gallery:
+    name: gallery
+    runs-on: ubuntu-latest
+    needs: [integration]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: py/uv.lock
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --directory py --all-extras
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: start bridge + app in background
+        run: |
+          nohup pnpm dev:bridge > bridge-ci.log 2>&1 &
+          nohup pnpm dev:app > app-ci.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:5199/ > /dev/null; then
+              echo "vite ready after ${i}s"; break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:5199/ > /dev/null || { echo 'vite never came up'; cat bridge-ci.log app-ci.log; exit 1; }
+      - name: run gallery
+        run: node scripts/demo-gallery.mjs --skip-agent
+      - name: upload states artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-states
+          path: docs/demos/states/
+          retention-days: 14
+      - name: upload server logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-ci-logs
+          path: |
+            bridge-ci.log
+            app-ci.log
+          retention-days: 14

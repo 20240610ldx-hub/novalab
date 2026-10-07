@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # tauri-action 需要创建/更新 GitHub Release
+
+jobs:
+  build:
+    name: bundle (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            bundles: nsis,msi
+          - platform: linux
+            os: ubuntu-latest
+            bundles: appimage,deb
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux 系统依赖（Tauri v2 / webkit2gtk）----
+      - name: install linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # ---- 工具链 ----
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      # ---- 前端构建（tauri.conf.json beforeBuildCommand=null，需先产出 app/dist）----
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @novalab/app build
+
+      # ---- Tauri 打包 + attach 到 GitHub Release（tag 触发时自动建 Release 草稿）----
+      # 签名说明：
+      #   * 未在仓库 Settings → Secrets 配置 TAURI_SIGNING_KEY / TAURI_SIGNING_KEY_PASSWORD
+      #     时，产物【不签名】——安装时 OS 会提示未知发布者（P4 待办：Owner 生成
+      #     `tauri signer generate` 密钥对并配置 secrets，同时开启 updater 签名）。
+      #   * Windows 代码签名证书（可选）：WINDOWS_CERTIFICATE / WINDOWS_CERTIFICATE_PASSWORD，
+      #     未配置同样 = 不签名。
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_KEY_PASSWORD }}
+          # WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          # WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: app/src-tauri
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: 'NovaLab __VERSION__'
+          releaseBody: '见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。未配置签名 secrets 时产物不签名。'
+          releaseDraft: true
+          prerelease: false
+          # 仓库 tauri.conf.json 当前 bundle.active=false（P4 打包进行中），
+          # 这里以 --config 覆盖开启打包；Bridge sidecar 的捆绑方式属 P4 未决项，
+          # 产物暂不含 bridge 运行时，仅供打包流水线验证。
+          args: --bundles ${{ matrix.bundles }} --config '{"bundle":{"active":true}}'
