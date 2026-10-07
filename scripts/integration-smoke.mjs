@@ -4,6 +4,7 @@
  * 前置：bridge 依赖已装、uv 环境已 sync。仅依赖冻结协议（spec §6.1/§6.2）。
  */
 import { spawn } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,15 @@ const require = createRequire(join(root, 'bridge', 'package.json'));
 const { WebSocket } = require('ws');
 
 const DEMO = join(root, 'demos', 'demo.py');
+// smoke 的 cell.save 会落盘（幂等 toggle 改 pop 值）：进程退出时还原字节，保持仓库干净
+const demoOriginal = readFileSync(DEMO, 'utf8');
+process.on('exit', () => {
+  try {
+    writeFileSync(DEMO, demoOriginal);
+  } catch {
+    /* best-effort */
+  }
+});
 const fail = (msg) => {
   console.error('SMOKE_FAIL:', msg);
   process.exit(1);

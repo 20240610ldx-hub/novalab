@@ -14,3 +14,6 @@ refs/
 .playwright-mcp/
 *.tsbuildinfo
 demos/gallery-created.py
+# operon bundle 运行产物（csv/png 在 bundle 根目录由 showcase 运行生成）
+demos/operon-bundle/*.csv
+demos/operon-bundle/*.png

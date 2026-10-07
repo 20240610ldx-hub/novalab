@@ -10,6 +10,7 @@ dependencies = ["websockets>=12"]
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 data = ["pandas>=2", "matplotlib>=3.8"]
+demo = ["scipy>=1.11", "seaborn>=0.13", "networkx>=3.2", "requests>=2.31"]
 spike = ["marimo>=0.14"]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,70 @@
+{
+  "frame_id": "f9fa236d-78b7-49af-98cc-0c6c654630af",
+  "created_at": "2026-10-02T00:04:57.025Z",
+  "frames": [
+    {
+      "frame_id": "f9fa236d-78b7-49af-98cc-0c6c654630af",
+      "agent_name": "OPERON",
+      "dir": "frames/OPERON-f9fa236d",
+      "segments": [
+        {
+          "index": 0,
+          "kernel_id": "c8f5acb0-1cf2-4082-a666-810ee13b0415",
+          "kernel_kind": "analysis",
+          "conda_env": "python",
+          "language": "python",
+          "cell_count": 18,
+          "notebook": "frames/OPERON-f9fa236d/00-python/notebook.ipynb"
+        }
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "name": "6e34764a-fc6-bc_model.py",
+      "version_id": "6e34764a-fc6"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "fig1_trajectories.png",
+      "version_id": "a6d576d5-6338-4176-9cff-02ba4ffbf06e"
+    },
+    {
+      "name": "fig2_phase_diagram.png",
+      "version_id": "a2523bd3-2912-4852-8855-0bcd9871b02b"
+    },
+    {
+      "name": "fig3_topology.png",
+      "version_id": "4cbfe199-9c61-4b86-85c5-f47d50665d78"
+    },
+    {
+      "name": "sweep_eps.csv",
+      "version_id": "32e29f6e-ae3a-4bcb-a70a-fddcf6c32b7c"
+    },
+    {
+      "name": "sweep_eps_summary.csv",
+      "version_id": "7ca40f54-e445-418f-89d0-780e4ef628dd"
+    },
+    {
+      "name": "sweep_topology.csv",
+      "version_id": "cfa2ee94-52de-45a6-b06b-dc914de832a8"
+    },
+    {
+      "name": "sweep_topology_transition.csv",
+      "version_id": "0892c459-cc33-4d15-a619-3946f227141e"
+    },
+    {
+      "name": "sweep_finite_size.csv",
+      "version_id": "948c3f77-420b-48bb-ae10-6fc87c90a23e"
+    },
+    {
+      "name": "bc_model.py",
+      "version_id": "6e34764a-fc63-4e95-baf4-33164f088a52"
+    },
+    {
+      "name": "report_bounded_confidence.md",
+      "version_id": "1d840853-ca69-48e7-b0c4-4ac609f45c47"
+    }
+  ]
+}

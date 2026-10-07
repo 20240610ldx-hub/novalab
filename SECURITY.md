@@ -4,7 +4,7 @@
 
 **请不要开公开 issue。** 通过私密渠道报告：
 
-- 邮箱：`security@OWNER-domain.example`（占位——仓库发布前由 Owner 替换为真实地址；也可临时用 GitHub 仓库的 Private vulnerability reporting 功能）
+- 邮箱：`20240610ldx-hub@users.noreply.github.com`（过渡联系方式；首选 GitHub 仓库的 Private vulnerability reporting 功能）
 
 我们会在 72 小时内确认收到，并尽力在 30 天内给出修复或缓解方案。致谢报告者（如愿意具名）。
 

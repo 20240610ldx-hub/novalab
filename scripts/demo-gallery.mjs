@@ -1220,13 +1220,14 @@ state('16', '16-showcase-operon', async (ctx) => {
   const page = await ctx.newPage();
   const BUNDLE = join(root, 'demos', 'operon-bundle', 'bounded_confidence.py');
   await openNotebook(page, BUNDLE);
-  // 依次跑到 fig1 保存格（shim cell → bc 模型 sweep → 样式 → fig1）
-  const seq = ['0a13e8c3', '88505df0', '4ad0be09', 'fcf9903b', 'f82bb502', 'a3813757', '678ce65e', '0dc9bdaf', '62ba3cf8'];
+  // 依次跑到 fig1 保存格（imports → shim → 样式 → quick sweep → eps sweep →
+  // topo/finite sweep → scaling prints → fit/traj → fig1；curated 单赋值版）
+  const seq = ['a1b2c301', 'a1b2c302', 'a1b2c303', 'a1b2c304', 'a1b2c305', 'a1b2c306', 'a1b2c307', 'a1b2c308', 'a1b2c309'];
   for (const id of seq) {
     const rep = await runCellWs(bridge, id);
     if (!rep.ok) throw new Error(`operon run ${id} 失败: ${JSON.stringify(rep).slice(0, 300)}`);
   }
-  await expandOutput(page, '62ba3cf8');
+  await expandOutput(page, 'a1b2c309');
   await page.waitForTimeout(800);
   await shoot(page, '16-showcase-operon');
   await page.close();

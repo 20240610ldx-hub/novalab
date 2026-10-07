@@ -71,5 +71,5 @@
 - monorepo scaffold（app/bridge/py/docs/refs 骨架）
 - intent/spec/plan 文档三件套、S1 marimo 侦察备忘（互操作性修正：`@app.cell` 与本格式互不直读 → 转换器方案）、G1 决策记录（路线 B）
 
-[Unreleased]: https://github.com/OWNER/novalab/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/OWNER/novalab/releases/tag/v0.0.1
+[Unreleased]: https://github.com/20240610ldx-hub/novalab/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/20240610ldx-hub/novalab/releases/tag/v0.0.1

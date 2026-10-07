@@ -356,6 +356,12 @@ class Runtime:
     # -------------------------------------------------------------- load/save
     def load_file(self, path: str) -> dict:
         nb = serialize.parse_file(path)
+        # Jupyter 语义：内核 cwd 跟随 notebook 目录（科研 notebook 的相对路径硬需求，
+        # 如 reproducibility bundle 的 inputs/outputs 相对引用）
+        try:
+            os.chdir(os.path.dirname(os.path.abspath(path)) or os.getcwd())
+        except OSError:
+            pass
         self.header_lines = nb.header_lines
         self.config = nb.config
         self._reset_state()

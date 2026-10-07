@@ -1,7 +1,6 @@
 # NovaLab
 
-<!-- badges：OWNER 待仓库建好后替换为实际 GitHub org/user -->
-[![CI](https://github.com/OWNER/novalab/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/novalab/actions/workflows/ci.yml)
+[![CI](https://github.com/20240610ldx-hub/novalab/actions/workflows/ci.yml/badge.svg)](https://github.com/20240610ldx-hub/novalab/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#快速开始)
 
@@ -50,7 +49,7 @@ NovaLab 把 marimo 式反应式执行语义、Claude Science Notebook 式交互�
 前置：Node ≥ 22 + pnpm ≥ 9，Python ≥ 3.11 + [uv](https://docs.astral.sh/uv/)，（可选，桌面壳）Rust stable。
 
 ```bash
-git clone https://github.com/OWNER/novalab.git && cd novalab
+git clone https://github.com/20240610ldx-hub/novalab.git && cd novalab
 pnpm install                              # app + bridge 依赖
 uv sync --directory py --all-extras       # novakernel 依赖
 ```
@@ -72,6 +71,8 @@ pnpm kernel        # 终端 3（可选）：手动起 novakernel 调试协议帧
 ```
 
 打开浏览器访问 http://localhost:5199，从左侧文件树打开 `demos/demo.py`。桌面壳开发模式：`pnpm --filter @novalab/app exec tauri dev`。
+
+**Showcase notebook**：`demos/operon-bundle/bounded_confidence.py` —— 由 [Claude Science 可复现 bundle](demos/operon-bundle/README.md)（OPERON · bounded-confidence 模拟，19 cells）经本项目 `import.ipynb` 转换而来（dogfood P3.4），含 matplotlib 多图与 sweep 输出；`pnpm exec tsx scripts/convert-ipynb.ts IN.ipynb OUT.py` 可转换任意 .ipynb。
 
 ## 画廊
 
