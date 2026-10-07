@@ -8,6 +8,7 @@ import {
   useSession,
   type SessionMeta,
 } from '../../store/session';
+import { useI18n } from '../../i18n';
 import { SessionModal } from '../SessionModal';
 
 /* ------------------------------------------------------------------ */
@@ -52,6 +53,7 @@ function SessionMenu({
   footer?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const { t } = useI18n();
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -76,7 +78,7 @@ function SessionMenu({
       className="absolute left-0 top-full z-50 mt-1 max-h-80 w-80 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--panel)] py-1 shadow-lg"
     >
       {ordered.length === 0 && (
-        <p className="px-3 py-2 text-[12px] text-[var(--muted)]">暂无会话记录 —— 打开 notebook 后开始。</p>
+        <p className="px-3 py-2 text-[12px] text-[var(--muted)]">{t('session.empty')}</p>
       )}
       {ordered.map((m) => {
         const live = m.endedAt === undefined;
@@ -133,6 +135,7 @@ export function SessionBar() {
   const refreshSessions = useSession((s) => s.refreshSessions);
   const openModal = useSession((s) => s.openModal);
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
 
   // 打开下拉时拉最新列表（live cellCount / 新 ended 会话）
   const toggle = () => {
@@ -150,7 +153,7 @@ export function SessionBar() {
         type="button"
         onClick={toggle}
         disabled={!notebookPath}
-        title="session switcher — 当前与历史会话"
+        title={t('session.switcherTitle')}
         className="flex items-center gap-1.5 rounded-full bg-[var(--panel)] px-3 py-1 hover:border-[var(--border)] disabled:cursor-default disabled:opacity-60"
       >
         <span className="max-w-56 truncate">{label}</span>
@@ -164,11 +167,11 @@ export function SessionBar() {
         type="button"
         onClick={openModal}
         disabled={!notebookPath}
-        title="Session notebook — 会话浏览 · .ipynb 导出/导入"
+        title={t('session.modalEntryTitle')}
         className="flex items-center gap-1 rounded-full bg-[var(--panel)] px-2.5 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--border)] hover:text-[var(--text)] disabled:cursor-default disabled:opacity-60"
       >
         <span aria-hidden>⧉</span>
-        <span>Sessions</span>
+        <span>{t('session.sessions')}</span>
       </button>
       {open && notebookPath && (
         <SessionMenu
@@ -198,6 +201,7 @@ export function SessionStatusPill() {
   const viewingId = useSession((s) => s.viewingId);
   const refreshSessions = useSession((s) => s.refreshSessions);
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
 
   const ended = currentEndedAt !== null;
   const color = ended ? 'var(--accent-err)' : kernelState === 'busy' ? 'var(--accent-run)' : kernelState === 'dead' ? 'var(--accent-err)' : 'var(--accent-ok)';
@@ -213,7 +217,7 @@ export function SessionStatusPill() {
       <button
         type="button"
         onClick={toggle}
-        title={ended ? 'kernel session ended — 浏览历史会话' : `kernel ${kernelState} — 会话列表`}
+        title={ended ? t('session.endedPillTitle') : t('session.statePillTitle', { state: kernelState })}
         className="flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-0.5 text-[12px] hover:border-[var(--muted)]"
         style={{ color }}
       >
@@ -238,7 +242,7 @@ export function SessionStatusPill() {
                 }}
                 className="mt-1 w-full border-t border-[var(--border)] px-3 py-1.5 text-left text-[12px] text-[var(--accent-err)] hover:bg-[var(--bg)]"
               >
-                ↻ restart kernel（开启新会话）
+                {t('session.restart')}
               </button>
             ) : undefined
           }
@@ -253,6 +257,7 @@ function TruncationBanner() {
   const viewingId = useSession((s) => s.viewingId);
   const historyTotal = useSession((s) => s.historyTotal);
   const exportState = useSession((s) => s.exportState);
+  const { t } = useI18n();
   if (!viewingId) return null;
   const text = truncationBanner(historyTotal);
   if (!text) return null;
@@ -264,15 +269,16 @@ function TruncationBanner() {
         type="button"
         title={
           pending
-            ? '接线 pending —— export.ipynb 尚未接入 router（P3.1 合入后生效）'
-            : `export .ipynb — 完整日志见 ${SESSION_CELL_LIMIT}+ 导出（nbformat 4.5）`
+            ? t('session.exportWiringPending')
+            : t('session.exportTitle', { limit: SESSION_CELL_LIMIT })
         }
         onClick={() => {
           void useSession.getState().exportIpynb(viewingId);
         }}
         className="rounded border border-[var(--border)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent-run)]"
       >
-        export .ipynb{pending ? '（接线 pending）' : ''}
+        {t('session.exportButton')}
+        {pending ? t('session.exportPendingSuffix') : ''}
       </button>
     </div>
   );

@@ -23,6 +23,7 @@ import {
   type SessionSnapshotCell,
 } from '../../store/session';
 import { useNotebook } from '../../store/notebook';
+import { useI18n } from '../../i18n';
 import { CopyButton } from '../CellEditor';
 import { ErrPanel, OutPanel, WriteNotifications } from '../OutputRenderer';
 import {
@@ -30,7 +31,6 @@ import {
   execBadge,
   sessionHeaderText,
   snapshotHasOutput,
-  summaryLabel,
 } from './selectors';
 
 /* ------------------------------------------------------------------ */
@@ -57,6 +57,7 @@ function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: n
   const hasOutput = snapshotHasOutput(cell);
   // 折叠披露沿用 ▶/▼ output；error 卡默认展开
   const [open, setOpen] = useState(!!o?.traceback);
+  const { t } = useI18n();
 
   return (
     <article className="my-2 rounded-md border border-[var(--border)] bg-[var(--bg)] pb-1">
@@ -75,7 +76,7 @@ function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: n
           <span
             className="rounded-full px-2 py-px text-white"
             style={{ background: 'var(--err-border)' }}
-            title="最近一次运行失败"
+            title={t('sessionModal.errorBadgeTitle')}
           >
             {errorLine !== null ? `error (line ${errorLine})` : 'error'}
           </span>
@@ -125,7 +126,7 @@ function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: n
               )}
               {(o?.mimeKeys?.length ?? 0) > 0 && (
                 <div className="px-1 text-[11px] text-[var(--muted)]">
-                  mime: {o.mimeKeys.join(', ')}（历史快照仅存键名）
+                  {t('sessionModal.mimeNote', { keys: o.mimeKeys.join(', ') })}
                 </div>
               )}
               <WriteNotifications writes={o?.writes ?? []} />
@@ -142,6 +143,7 @@ function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: n
 /** 单个会话段：header（点击折叠/展开）+ 展开时的完整只读 cell 卡（#24）。 */
 function SessionSection({ seg }: { seg: SessionSegment }) {
   const [expanded, setExpanded] = useState(false);
+  const { t } = useI18n();
   const loading = useSession((s) => s.snapshotLoading[seg.sessionId] ?? false);
   const cells = useSession((s) => s.snapshotCells[seg.sessionId]);
   const total = useSession((s) => s.snapshotTotals[seg.sessionId] ?? 0);
@@ -178,9 +180,9 @@ function SessionSection({ seg }: { seg: SessionSegment }) {
               {banner}
             </p>
           )}
-          {loading && <p className="py-1 text-[11px] text-[var(--muted)]">加载快照…</p>}
+          {loading && <p className="py-1 text-[11px] text-[var(--muted)]">{t('sessionModal.loadingSnapshot')}</p>}
           {!loading && cells && cells.length === 0 && (
-            <p className="py-1 text-[11px] text-[var(--muted)]">无快照 cells（live 会话尚未落盘或快照缺失）。</p>
+            <p className="py-1 text-[11px] text-[var(--muted)]">{t('sessionModal.noSnapshotCells')}</p>
           )}
           {!loading &&
             cells?.map((c, i) => <SnapshotCellCard key={c.id} cell={c} index={i} />)}
@@ -200,6 +202,7 @@ export function SessionModal() {
   const importNotebook = useSession((s) => s.importNotebook);
   const notebookPath = useNotebook((s) => s.notebookPath);
   const [importPath, setImportPath] = useState('');
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -227,16 +230,17 @@ export function SessionModal() {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Session notebook"
+        aria-label={t('sessionModal.title')}
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[80vh] w-[min(860px,92vw)] flex-col rounded-lg border border-[var(--border)] bg-[var(--panel)] shadow-xl"
       >
         {/* 头部 */}
         <header className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3">
           <div className="min-w-0 flex-1">
-            <h2 className="text-[13px] text-[var(--text)]">Session notebook</h2>
+            <h2 className="text-[13px] text-[var(--text)]">{t('sessionModal.title')}</h2>
             <p className="truncate text-[11px] text-[var(--muted)]">
-              {fileName ?? '未打开 notebook'} · {summaryLabel(summary.sessionCount, summary.cellCount)}
+              {fileName ?? t('sessionModal.noNotebook')} ·{' '}
+              {t('sessionModal.summary', { sessions: summary.sessionCount, cells: summary.cellCount })}
             </p>
           </div>
           {/* 顶部 import .ipynb（路径输入 → import.ipynb rpc → openNotebook） */}
@@ -247,8 +251,8 @@ export function SessionModal() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && importPath.trim() !== '') void importNotebook(importPath);
               }}
-              placeholder="path/to/notes.ipynb"
-              aria-label="import .ipynb 路径"
+              placeholder={t('sessionModal.importPlaceholder')}
+              aria-label={t('sessionModal.importAria')}
               className="w-52 rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 font-mono text-[11px] text-[var(--text)] placeholder:text-[var(--muted)]"
             />
             <button
@@ -256,8 +260,8 @@ export function SessionModal() {
               disabled={busy || importPath.trim() === ''}
               title={
                 importState.status === 'pending-wiring'
-                  ? '接线 pending —— import.ipynb 尚未接入 router（P3.1 合入后生效）'
-                  : 'import .ipynb → 生成 NovaLab .py 并打开（outputs 丢弃、magic 降级注释）'
+                  ? t('sessionModal.importWiringPending')
+                  : t('sessionModal.importTitle')
               }
               onClick={() => {
                 void importNotebook(importPath).then((ok) => {
@@ -266,12 +270,12 @@ export function SessionModal() {
               }}
               className="rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text)] hover:border-[var(--accent-run)] disabled:opacity-50"
             >
-              import .ipynb
+              {t('sessionModal.importButton')}
             </button>
             <button
               type="button"
               onClick={closeModal}
-              aria-label="关闭"
+              aria-label={t('sessionModal.closeAria')}
               className="rounded px-1.5 py-0.5 text-[13px] text-[var(--muted)] hover:text-[var(--text)]"
             >
               ✕
@@ -283,7 +287,7 @@ export function SessionModal() {
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
           {segments.length === 0 && (
             <p className="py-6 text-center text-[12px] text-[var(--muted)]">
-              暂无会话记录 —— 打开 notebook 并运行 cell 后开始。
+              {t('sessionModal.empty')}
             </p>
           )}
           {segments.map((seg) => (
@@ -291,7 +295,7 @@ export function SessionModal() {
           ))}
           {importState.warnings.length > 0 && (
             <details className="rounded-md border border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--muted)]">
-              <summary>import 降级警告（{importState.warnings.length}）</summary>
+              <summary>{t('sessionModal.importWarnings', { count: importState.warnings.length })}</summary>
               <ul className="mt-1 list-disc pl-4">
                 {importState.warnings.map((w, i) => (
                   <li key={i}>{w}</li>
@@ -311,8 +315,8 @@ export function SessionModal() {
             disabled={busy || sessions.length === 0}
             title={
               exportPending
-                ? '接线 pending —— export.ipynb 尚未接入 router（P3.1 合入后生效）'
-                : '导出当前/浏览中会话为 .ipynb（nbformat 4.5）'
+                ? t('sessionModal.exportWiringPending')
+                : t('sessionModal.exportTitle')
             }
             onClick={() => {
               void exportIpynb();
@@ -323,7 +327,7 @@ export function SessionModal() {
                 : 'border-[var(--border)] text-[var(--text)] hover:border-[var(--accent-run)]'
             } disabled:opacity-50`}
           >
-            .ipynb{exportPending ? '（接线 pending）' : ''}
+            .ipynb{exportPending ? t('sessionModal.exportPendingSuffix') : ''}
           </button>
         </footer>
       </div>

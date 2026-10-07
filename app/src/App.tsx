@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNotebook } from './store/notebook';
 import { useSession } from './store/session';
-import { useUi } from './store/ui';
+import { appModeFromSearch, searchWithAppMode, useUi } from './store/ui';
+import { useI18n } from './i18n';
 import { CellList } from './components/CellList';
 import { KernelStatusBar } from './components/KernelStatusBar';
 import { InlineREPL } from './components/InlineREPL';
@@ -14,6 +15,9 @@ import { AgentPanel } from './components/AgentPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { Inspector } from './components/Inspector';
 import { inspectorHandlePointerDown } from './components/Inspector/dragStore';
+import { AppView } from './components/AppView';
+import { Onboarding } from './components/Onboarding';
+import { Monitor, SquarePen } from 'lucide-react';
 
 /**
  * Q 线 A-3 #23 布局：header = 左工作区标题（fs.root 目录名）+ SessionBar pill ·
@@ -21,16 +25,24 @@ import { inspectorHandlePointerDown } from './components/Inspector/dragStore';
  * 右 SessionStatusPill。
  * - Notebook 视图 = 原主列（TabBar / CellList / Inspector / footer REPL）+ 右 AgentPanel；
  * - Files 视图 = 全幅文件浏览面板（FilesView，替代原左缘 icon rail sidebar——rail 已移除）。
+ * P4.2 App View：header 右组切换钮 + URL ?view=app 双向同步（store/ui.appMode）；
+ *   app 模式 = 只读报告（AppView 组件），隐藏编辑列与 AgentPanel，无 REPL/运行入口。
+ * P4.3 i18n：界面字符串经 t()（novalab.lang）；P4.4：首启引导 Onboarding 模态。
  * 启动：bridge.connect() → 失败显示降级横幅；?path= 存在则 notebook.open。
- * 快捷键：Ctrl/Cmd+Enter 运行 active cell（仅 Notebook 视图）。
+ * 快捷键：Ctrl/Cmd+Enter 运行 active cell（仅 Notebook 编辑视图）。
  */
 export function App() {
   const bridgeConnected = useNotebook((s) => s.bridgeConnected);
   const notebookPath = useNotebook((s) => s.notebookPath);
   const root = useSession((s) => s.root);
   const view = useUi((s) => s.view);
+  const appMode = useUi((s) => s.appMode);
+  const setAppMode = useUi((s) => s.setAppMode);
+  const { t } = useI18n();
   const [attempted, setAttempted] = useState(false);
   const [pathInput, setPathInput] = useState('');
+  // P4.4：SettingsPanel「重跑首启检查」→ 强制打开 Onboarding（无视 flag）
+  const [onboardRerun, setOnboardRerun] = useState(false);
   const bootRef = useRef(false);
 
   // root 镜像 + 最近打开记录（原 Sidebar 全局副作用，rail 移除后上移到 App）
@@ -50,12 +62,37 @@ export function App() {
     });
   }, []);
 
+  // P4.2：appMode → URL ?view=app 回写。**事件驱动、不进渲染回路**：
+  // - URL→state 只在两处读：store 水合（initialAppMode，模块加载一次）与
+  //   popstate（用户前进/后退）——渲染期永不读 URL；
+  // - state→URL 仅当 search 串实际变化才 replaceState（幂等守卫），且
+  //   replaceState 不触发 popstate，无回喂环。
+  useEffect(() => {
+    const next = searchWithAppMode(window.location.search, appMode);
+    if (next !== window.location.search) {
+      window.history.replaceState(null, '', `${window.location.pathname}${next}`);
+    }
+  }, [appMode]);
+
+  // P4.2：浏览器前进/后退（popstate）→ 读回 ?view= 同步 store（双向同步的回向）
+  useEffect(() => {
+    const onPop = () => {
+      const fromUrl = appModeFromSearch(window.location.search);
+      if (fromUrl && useUi.getState().appMode !== fromUrl) {
+        useUi.getState().setAppMode(fromUrl);
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
   // Ctrl/Cmd+Enter → 运行 active cell。capture 阶段拦截并 stopPropagation，
   // 抢在 CM6 defaultKeymap 的 Mod-Enter(insertBlankLine) 之前，焦点在编辑器内也生效。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        if (useUi.getState().view !== 'notebook') return; // Files 视图不触发运行
+        const ui = useUi.getState();
+        if (ui.view !== 'notebook' || ui.appMode === 'app') return; // Files/App 视图不触发运行
         e.preventDefault();
         e.stopPropagation();
         const s = useNotebook.getState();
@@ -76,6 +113,15 @@ export function App() {
     void useNotebook.getState().openNotebook(path);
   };
 
+  const openOnboarding = useCallback(() => setOnboardRerun(true), []);
+  // 引用稳定（useCallback）：内联箭头会随 App 每次渲染变身份 → Onboarding 的
+  // onOpenChange effect 反复触发 → setState 循环（真机 Maximum update depth 教训）。
+  const onOnboardOpenChange = useCallback((open: boolean) => {
+    if (!open) setOnboardRerun(false);
+  }, []);
+
+  const appViewActive = appMode === 'app';
+
   return (
     <div className="flex h-full">
       <main className="flex min-w-0 flex-1 flex-col">
@@ -83,7 +129,7 @@ export function App() {
           {/* A-3 #23 左端：工作区标题（fs.root 目录名） */}
           <span
             className="min-w-0 max-w-44 shrink-0 truncate text-[12px] text-[var(--text)]"
-            title={root ?? '尚无工作区（打开 notebook 后为其所在目录）'}
+            title={root ?? t('app.workspaceTooltip')}
           >
             {root ? baseName(root) || root : 'workspace'}
           </span>
@@ -91,8 +137,8 @@ export function App() {
           {/* P2.8：会话切换器 pill（当前 + 历史，A-2 #13） */}
           <SessionBar />
 
-          {/* 无 ?path= 时的打开入口（Notebook 视图） */}
-          {!notebookPath && view === 'notebook' && (
+          {/* 无 ?path= 时的打开入口（Notebook 编辑视图；App View 无打开动作） */}
+          {!notebookPath && view === 'notebook' && !appViewActive && (
             <span className="flex items-center gap-1">
               <input
                 value={pathInput}
@@ -100,7 +146,7 @@ export function App() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') openPath(pathInput);
                 }}
-                placeholder="path/to/notebook.py"
+                placeholder={t('app.pathPlaceholder')}
                 spellCheck={false}
                 className="w-56 rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-[12px] placeholder-[var(--muted)] outline-none focus:border-[var(--accent-run)]"
               />
@@ -109,7 +155,7 @@ export function App() {
                 onClick={() => openPath(pathInput)}
                 className="rounded border border-[var(--border)] px-2 py-0.5 text-[12px] hover:border-[var(--accent-run)]"
               >
-                Open
+                {t('app.open')}
               </button>
             </span>
           )}
@@ -121,8 +167,24 @@ export function App() {
             </div>
           </div>
 
-          {/* A-4：header 右组 = 主题切换钮（Session pill 左）+ live/Ended pill（A-2 #12） */}
+          {/* header 右组：P4.2 App View 切换钮 + A-4 主题钮 + live/Ended pill（A-2 #12） */}
           <span className="ml-auto flex items-center gap-2">
+            {view === 'notebook' && (
+              <button
+                type="button"
+                onClick={() => setAppMode(appViewActive ? 'edit' : 'app')}
+                aria-pressed={appViewActive}
+                title={appViewActive ? t('app.toEditMode') : t('app.toAppView')}
+                aria-label={appViewActive ? t('app.toEditMode') : t('app.toAppView')}
+                className={`flex h-7 w-7 items-center justify-center rounded-full border ${
+                  appViewActive
+                    ? 'border-[var(--accent-run)] text-[var(--accent-run)]'
+                    : 'border-[var(--border)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                {appViewActive ? <SquarePen size={14} aria-hidden /> : <Monitor size={14} aria-hidden />}
+              </button>
+            )}
             <ThemeToggle />
             <SessionStatusPill />
           </span>
@@ -131,14 +193,16 @@ export function App() {
         {/* 降级横幅：bridge 连接失败（编辑器 UI 仍可浏览，内核功能不可用） */}
         {attempted && !bridgeConnected && (
           <div className="border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
-            bridge 未连接 —— kernel / 运行 / 文件功能不可用（ws://127.0.0.1:7788）。
-            请确认 bridge 进程已启动后刷新。
+            {t('app.bridgeDown')}
           </div>
         )}
 
         {view === 'files' ? (
           /* A-3 #23：全幅文件浏览面板（树放大版 + 最近打开右栏） */
           <FilesView />
+        ) : appViewActive ? (
+          /* P4.2：只读报告视图（隐藏代码/徽章/REPL/diff/运行入口，spec §15.4） */
+          <AppView />
         ) : (
           <>
             {/* P3.1：多 tab 条（A-4 #6：浅色条 --tab-strip 上 active 白 pill） */}
@@ -164,13 +228,15 @@ export function App() {
       </main>
 
       {/* P2.1/P2.5：Agent 面板（context chip · 流式对话 · One-click Fix）+ 设置入口；
-          Files 全幅视图时让位（#23 全幅语义） */}
-      {view === 'notebook' && (
+          Files 全幅视图与 App View（只读报告）时让位 */}
+      {view === 'notebook' && !appViewActive && (
         <aside className="flex w-96 shrink-0 flex-col border-l border-[var(--border)]">
           <AgentPanel />
         </aside>
       )}
-      <SettingsPanel />
+      <SettingsPanel onRerunOnboarding={openOnboarding} />
+      {/* P4.4：首启引导（flag 缺失首启弹出；SettingsPanel 重跑入口经 rerun 强制打开） */}
+      <Onboarding rerun={onboardRerun} onOpenChange={onOnboardOpenChange} />
     </div>
   );
 }

@@ -23,6 +23,7 @@ import {
 } from '../../store/notebooks';
 import { useNotebook } from '../../store/notebook';
 import { useSession } from '../../store/session';
+import { useI18n, type TFn } from '../../i18n';
 
 /** 内核状态点配色（与 KernelStatusBar 一致的 CSS 变量）。 */
 function dotColor(t: NotebookTab): string {
@@ -39,10 +40,10 @@ function dotColor(t: NotebookTab): string {
   }
 }
 
-function stateTitle(t: NotebookTab): string {
-  if (t.ended) return 'kernel ended — view only';
-  const rss = t.rssMB !== null ? ` · ${t.rssMB}MB` : '';
-  return `${t.kernelState}${rss} — ${t.path}`;
+function stateTitle(t: TFn, tab: NotebookTab): string {
+  if (tab.ended) return t('tab.endedTitle');
+  const mem = tab.rssMB !== null ? ` · ${tab.rssMB}MB` : '';
+  return t('tab.stateTitle', { state: tab.kernelState, mem, path: tab.path });
 }
 
 export function TabBar() {
@@ -52,6 +53,7 @@ export function TabBar() {
   const closeTab = useNotebook((s) => s.closeTab);
   const openNotebook = useNotebook((s) => s.openNotebook);
   const refreshList = useNotebooks((s) => s.refreshList);
+  const { t } = useI18n();
 
   const [adding, setAdding] = useState(false);
   const [pathInput, setPathInput] = useState('');
@@ -122,42 +124,42 @@ export function TabBar() {
 
   return (
     <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
-      {tabs.map((t) => {
-        const active = t.notebookId === activeId;
+      {tabs.map((tab) => {
+        const active = tab.notebookId === activeId;
         return (
           <div
-            key={t.notebookId}
+            key={tab.notebookId}
             role="tab"
             aria-selected={active}
-            title={stateTitle(t)}
-            onClick={() => void switchTab(t.notebookId)}
+            title={stateTitle(t, tab)}
+            onClick={() => void switchTab(tab.notebookId)}
             className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-t border border-b-0 px-2.5 py-1 text-[12px] ${
               active
                 ? 'border-[var(--border)] bg-[var(--panel)] text-[var(--text)]'
                 : 'border-transparent bg-transparent text-[var(--muted)] hover:bg-[var(--bg)]'
-            } ${t.ended ? 'opacity-60' : ''}`}
+            } ${tab.ended ? 'opacity-60' : ''}`}
           >
             {/* 内核状态点（ended 灰） */}
-            <span aria-hidden style={{ color: dotColor(t), fontSize: 9 }}>
+            <span aria-hidden style={{ color: dotColor(tab), fontSize: 9 }}>
               ●
             </span>
-            <span className={`max-w-40 truncate ${t.ended ? 'italic' : ''}`}>{tabLabel(t.path)}</span>
+            <span className={`max-w-40 truncate ${tab.ended ? 'italic' : ''}`}>{tabLabel(tab.path)}</span>
             {/* 未保存改动标记 */}
-            {t.dirty && !t.ended && (
-              <span aria-hidden title="未保存改动" className="text-[9px] text-[var(--accent-run)]">
+            {tab.dirty && !tab.ended && (
+              <span aria-hidden title={t('tab.dirtyTitle')} className="text-[9px] text-[var(--accent-run)]">
                 ●
               </span>
             )}
-            {t.ended && (
+            {tab.ended && (
               <span className="rounded bg-[var(--bg)] px-1 text-[9px] text-[var(--muted)]">ended</span>
             )}
             {/* × 关闭 */}
             <button
               type="button"
-              aria-label={`close ${tabLabel(t.path)}`}
+              aria-label={`close ${tabLabel(tab.path)}`}
               onClick={(e) => {
                 e.stopPropagation();
-                onClose(t);
+                onClose(tab);
               }}
               className="ml-0.5 rounded px-1 text-[var(--muted)] opacity-60 hover:bg-[var(--bg)] hover:text-[var(--accent-err)] group-hover:opacity-100"
             >
@@ -190,7 +192,7 @@ export function TabBar() {
         <button
           type="button"
           aria-label="new tab"
-          title="新建 tab（打开 .py）"
+          title={t('tab.newTitle')}
           onClick={() => setAdding(true)}
           className="shrink-0 rounded px-2 py-0.5 text-[13px] text-[var(--muted)] hover:bg-[var(--bg)] hover:text-[var(--text)]"
         >
