@@ -42,7 +42,7 @@ const STATES_DIR = join(root, 'docs', 'demos', 'states');
 // 空闲扫描选取，保证本 run 独占。
 const APP_PORT_DEFAULT = 5199;
 let APP_PORT = APP_PORT_DEFAULT;
-let APP_URL = `http://localhost:${APP_PORT}/`;
+let APP_URL = `http://127.0.0.1:${APP_PORT}/`;
 const BRIDGE_URL = 'ws://127.0.0.1:7788';
 
 /** bind 试探（唯一与 vite bind 同语义的探测）：跨线残留的坏 IPv6 监听器
@@ -256,7 +256,10 @@ function startDev(script) {
 
 /** 备用端口自起 vite：pnpm exec 直传参数（双层 pnpm run 会吞/字面化 `--` 分隔）。 */
 function startDevAppOn(port) {
-  return startDevPnpm(['--filter', '@novalab/app', 'exec', 'vite', '--port', String(port), '--strictPort'], `dev:app@${port}`);
+  return startDevPnpm(
+    ['--filter', '@novalab/app', 'exec', 'vite', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
+    `dev:app@${port}`,
+  );
 }
 
 /* ---------------- bridge WS 客户端（setup 用） ---------------- */
@@ -1070,7 +1073,7 @@ async function main() {
   }
   // app：只认真 HTTP 200 才复用 :5199（半死监听器/跨线 vite 反复启停让 TCP 状态
   // 不可信）；否则一律备用端口 5299 自起，彻底避开 strictPort 互斥竞态
-  const appHttp = await probeHttp(`http://localhost:${APP_PORT_DEFAULT}/`);
+  const appHttp = await probeHttp(`http://127.0.0.1:${APP_PORT_DEFAULT}/`);
   if (appHttp) {
     log(`app 已在跑（:${APP_PORT_DEFAULT}，HTTP 200）→ 复用`);
   } else {
