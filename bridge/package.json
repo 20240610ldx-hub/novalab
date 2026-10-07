@@ -1,7 +1,7 @@
 {
   "name": "@novalab/bridge",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "exports": {
     "./mcp-tools": "./src/mcp/tools.ts"

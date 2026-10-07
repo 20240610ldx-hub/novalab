@@ -1,7 +1,7 @@
 {
   "name": "novalab",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "scripts": {
     "dev:app": "pnpm --filter @novalab/app dev",
     "dev:bridge": "pnpm --filter @novalab/bridge dev",
