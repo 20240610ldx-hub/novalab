@@ -151,7 +151,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 | Q1 | 内核路线 B（自研）vs A（marimo 后端）偏好？ | B 为主、spike 验证、A 兜底 | 决定 P1 前两周工作量分布 |
 | Q2 | "真·多内核并存"（同屏两个 Python 进程跑不同数据集）是否 MVP 硬需求？ | 否；多 Tab 多文件已覆盖 90% 场景，真多内核放 S1 | MVP 范围 |
 | Q3 | UI 文案语言：中文优先 / 英文优先 / 双语 i18n？ | 英文 UI + 中文文档（科研工具惯例），i18n 留 P4 | 组件文案策略 |
-| Q4 | 未来开源许可证？ | Apache-2.0（与 marimo 生态兼容，允许 vendor） | 能否直接复用 marimo 代码片段 |
+| Q4 | 未来开源许可证？ | Apache-2.0（与 marimo 生态兼容，允许 vendor） | **2026-10-07 裁决：Apache-2.0 开源直发**（含 CI/发布页，P4.1/P4.5） |
 | Q5 | 产品名：NovaLab 暂定？域名/仓库名是否已占？ | NovaLab 可用则用 | 包名、窗口标题 |
 | Q6 | .ipynb 只需导出，还是要双向同步？ | 导出 + 一次性导入转换，双向 Won't | M2 边界 |
 | Q7 | 开发自测用哪家 key？（Anthropic / DeepSeek / 本地 Ollama） | 有 Anthropic 用 Anthropic，否则 DeepSeek；Ollama 作离线验收 | M6 自测路径 |

@@ -233,6 +233,17 @@ proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策�
 | 17 | 富 MIME：matplotlib 多图/中文/对数坐标图 inline | matplotlib 已入 venv；run.mime image/png 链路 P2.9 验证 | P2.9 |
 | 18 | 命名内核 tab（`Python — geo`）ended 后 view-only | 与 S1/P3.1 多 tab 合并：tab 携带 ended 状态 | P3.1 |
 
+**附录 A-3：第三批参考细节（2026-10-07 增补五图，Q 线）**
+
+| # | 参考图细节 | 我们的对应 | 阶段 |
+|---|---|---|---|
+| 19 | **JetBrains Mono 全字体**（Owner 指定） | @fontsource/jetbrains-mono 打包（离线可用），styles.css 落实 400/500/700 | Q 线 |
+| 20 | stderr/traceback/RuntimeWarning = **红左框+红字面板**，与 stdout 中性面板分离 | OutputRenderer 分区渲染 | Q 线 |
+| 21 | 代码区右上**复制按钮**（clipboard 图标） | CellEditor overlay + SessionModal 同 | Q 线 |
+| 22 | 长输出**内部滚动**（max-height + overflow-y，输出面板圆角细边框） | OutputRenderer | Q 线 |
+| 23 | 顶栏**`Files \| Notebook` 分段视图切换** + 左工作区标题 + 右图标组 | ViewSwitcher；Files = 全幅文件视图（复用树组件） | Q 线 |
+| 24 | 会话模态内**完整 cell 卡**：代码+输出+红行+复制钮+右对齐内核名+`wrote` 行 | SessionModal 行渲染升级 | Q 线 |
+
 ---
 
 ## 11. Session 日志与导出（S2, P3）

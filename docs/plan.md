@@ -71,7 +71,8 @@ P3.6 marimo ↔ NovaLab .py 双向转换器（2–4 人日，S1 侦察估计；j
 
 ## 5. 阶段 4 · 产品化（W11–W12）
 
-P4.1 CI/CD：tauri-action 双平台产物 + 签名占位；P4.2 App View 模式；P4.3 亮色主题 + i18n 骨架（Q3）；P4.4 首启引导（uv 环境自检/修复向导，intent 风险章）；P4.5 公测发布页 + 开源仓库整理（Q4 许可证落定）。
+P4.1 CI/CD：tauri-action 双平台产物 + 签名占位；**Owner 裁决（2026-10-07）：Apache-2.0 开源直发**——LICENSE/NOTICE/CONTRIBUTING/CHANGELOG/.github workflows（ci + release-on-tag）先行，push 待 Owner 建远端；
+P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（P1 全链路 / P2 修错闭环）→ docs/demos/reels/，矩阵 D 行闭环；P4.2 App View 模式；P4.3 亮色主题 + i18n 骨架（Q3）；P4.4 首启引导（uv 环境自检/修复向导，intent 风险章）；P4.5 公测发布页 + 开源仓库整理（Q4 许可证落定）。
 
 ---
 
