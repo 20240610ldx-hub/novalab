@@ -1,3 +1,4 @@
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNotebook, type CascadeOverride } from '../store/notebook';
 import { useSession, viewOnlyFooter } from '../store/session';
 import type { KernelState } from '../kernel/types';
@@ -46,7 +47,15 @@ const CASCADE_OPTIONS: { value: CascadeOverride; label: string }[] = [
  * 顶栏右侧、弹窗居中），挂载位置不影响视觉位置；选这里是因为 App.tsx 不在
  * P2.3 的文件所有权清单内。
  */
-export function KernelStatusBar() {
+export interface KernelStatusBarProps {
+  /**
+   * P3.2：⠿ 把手的拖出起点（pointerdown 直连 Inspector 的 dragStore 控制器；
+   * 拖拽/双击折叠/高度持久化逻辑都在 Inspector 内，StatusBar 仅转发）。
+   */
+  onHandlePointerDown?: (e: ReactPointerEvent<HTMLSpanElement>) => void;
+}
+
+export function KernelStatusBar({ onHandlePointerDown }: KernelStatusBarProps) {
   const kernelState = useNotebook((s) => s.kernelState);
   const cellCount = useNotebook((s) => s.cells.length);
   const cascadeOverride = useNotebook((s) => s.cascadeOverride);
@@ -67,10 +76,11 @@ export function KernelStatusBar() {
       <CascadeAskDialog />
 
       <span>{leftText}</span>
-      {/* 拖拽把手：P2 拖出变量 inspector（S3），目前仅视觉 */}
+      {/* 拖拽把手：P3.2 拖出变量 inspector（S3）；双击 = 折叠/展开（dragStore 内判定） */}
       <span
-        className="cursor-row-resize tracking-[0.2em] text-[var(--muted)] select-none"
-        title="drag to expand variable inspector (P2)"
+        className="cursor-row-resize tracking-[0.2em] text-[var(--muted)] select-none touch-none"
+        title="drag to expand variable inspector · double-click to toggle"
+        onPointerDown={onHandlePointerDown}
       >
         ⠿⠿
       </span>

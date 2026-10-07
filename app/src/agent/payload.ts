@@ -86,7 +86,11 @@ export function schemaLine(s: VarSchema): string {
     const cols = s.columns.map((c) => `${c.name}:${c.dtype}`).join(', ');
     bits.push(`columns=[${cols}]`);
   }
-  if (s.preview) bits.push(`preview=${truncateToBytes(s.preview, PREVIEW_BYTES)}`);
+  if (s.preview != null) {
+    // P3.5 起 preview 为 unknown（结构化对象或字符串）：统一序列化后按字节截断
+    const pv = typeof s.preview === 'string' ? s.preview : JSON.stringify(s.preview);
+    bits.push(`preview=${truncateToBytes(pv, PREVIEW_BYTES)}`);
+  }
   return bits.join(' ');
 }
 

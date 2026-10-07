@@ -95,8 +95,22 @@ export interface VarSchema {
   shape?: number[];
   columns?: ColumnSchema[];
   len?: number;
-  /** head(1).to_dict() 或 repr 截断 200 字符。 */
-  preview?: string;
+  /** head(1).to_dict() 或 repr 截断 200 字符；结构化时为对象（P3.5 起为 unknown）。 */
+  preview?: unknown;
+  /* ---- P3.5 扩展嗅探字段（introspect.py duck-typing，缺省即不支持/不适用） ---- */
+  dtypes?: Record<string, string>;
+  /** ndarray：{kind, itemsize} */
+  dtypeDetail?: { kind: string; itemsize: number };
+  /** scipy.sparse：format 名与非零元数 */
+  format?: string;
+  nnz?: number;
+  /** geopandas：crs 名 / bounds 四元 / geometry 列与类型 */
+  crs?: string;
+  bounds?: [number, number, number, number];
+  geometryColumn?: string;
+  geometryType?: string;
+  /** dataclass 实例：字段名列表 */
+  fields?: string[];
 }
 
 export interface RunReport {
