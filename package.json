@@ -6,5 +6,8 @@
     "dev:app": "pnpm --filter @novalab/app dev",
     "dev:bridge": "pnpm --filter @novalab/bridge dev",
     "kernel": "uv run --directory py python -m novakernel.server"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }

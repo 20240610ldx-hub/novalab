@@ -12,4 +12,5 @@ refs/
 .DS_Store
 .tauri/
 .playwright-mcp/
+*.tsbuildinfo
 demos/gallery-created.py
