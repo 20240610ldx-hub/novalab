@@ -12,6 +12,14 @@
   displayhook 语义（L-4）：末语句为裸表达式时对其 eval，并以
   run.mime {cellId:"repl", mime:"text/plain", data:repr} 回显（repr 失败降级 str；
   结果为 None 不发）；末语句异常照常走 run.error，不回显；
+- 交互控件（spec §15，P3.3）：cell 成功执行后扫描本 cell 新 defs 中的 ui.Control
+  实例 → registry 注册（controlId = "<cellId>::<变量名>"，cell 重跑 = 旧 controlId
+  注销 + 重建回默认值）+ 发 run.mime application/vnd.novalab.control+json
+  （data = {controlId,kind,spec,value} 的 strict JSON 串，见 ui.mime_data）；
+  REPL 收尾表达式是 Control 走同一发射路径（不再发 text/plain repr，不重复发）；
+  control_set(controlId, value)：mutate（不重发 mime，前端已乐观更新）→ 下游传递
+  闭包自动级联重跑（Owner 裁决：绕过 mark-only；发常规 run.* 通知）→ side-effect
+  下游仅标 stale 并进 staleSideEffect 返回；未知 controlId → KernelError -32602；
 - 通知形状（冻结）：run.started {cellId}；run.stdout/run.stderr {cellId,text}；
   run.mime {cellId,mime,data}；run.error {cellId,traceback,frames}；
   run.notify {cellId,kind,path}（kind='file-write'：exec 期间写盘的文件绝对路径，
@@ -34,6 +42,7 @@ import traceback as tbmod
 from dataclasses import dataclass, field
 
 from . import dag, introspect as _introspect, serialize
+from . import ui as _ui
 
 __all__ = [
     "CellNotFoundError",
@@ -255,6 +264,9 @@ class Runtime:
         self.defined_by: dict[str, str] = {}  # name → 提交该名字的 cell
         self.exec_counts: dict[str, int] = {}
         self.compile_error: str | None = None
+        # 交互控件 registry（spec §15.1）：controlId → 活对象；cellId → 其 controlId 集
+        self.controls: dict[str, _ui.Control] = {}
+        self._controls_by_cell: dict[str, set[str]] = {}
 
     def _emit(self, method: str, params: dict) -> None:
         self._notify_raw(method, params)
@@ -297,7 +309,7 @@ class Runtime:
         changed = {cid for cid, code in incoming if cid not in old or old[cid].code != code}
         removed = [cid for cid in old if cid not in set(new_ids)]
 
-        # 删除的 cell：其 defs 从 globals 移除（spec §5）
+        # 删除的 cell：其 defs 从 globals 移除（spec §5）；控件同步注销（§15.1）
         removed_names: set[str] = set()
         for cid in removed:
             for name, owner in list(self.defined_by.items()):
@@ -307,6 +319,7 @@ class Runtime:
                     self.globals.pop(name, None)
             self.stale.discard(cid)
             self.exec_counts.pop(cid, None)
+            self._unregister_cell_controls(cid)
 
         # 重建记录与 DAG
         analyses: dict[str, dag.CellAnalysis] = {}
@@ -430,6 +443,99 @@ class Runtime:
 
     def introspect(self) -> dict:
         return {"schemas": _introspect.snapshot(self.globals)}
+
+    # --------------------------------------------------------------- controls
+    def control_set(self, control_id: str, value=None) -> dict:
+        """control.set {controlId, value}（spec §15.3，冻结契约）。
+
+        mutate Control.value（不重发 run.mime——前端已乐观更新）→ 下游传递闭包
+        自动级联重跑（复用 exec_cell 的级联 machinery，发常规 run.* 通知；
+        Owner 裁决：控件级联绕过 mark-only）→ side-effect 下游不自动跑，
+        标 stale 并进 staleSideEffect 返回。未知 controlId → KernelError -32602；
+        值校验失败（date 非法串等）同样 -32602。REPL 控件（owner 不在 cells）
+        只 mutate 不级联；存在编译错时跳过级联（与 exec_cell 拒跑语义一致）。
+        """
+        ctl = self.controls.get(control_id)
+        if ctl is None:
+            raise KernelError(f"unknown controlId: {control_id}", -32602)
+        try:
+            ctl.value = value  # ui.Control.validate：slider clamp / date ISO 校验等
+        except (ValueError, TypeError) as e:
+            raise KernelError(f"invalid value for control {control_id}: {e}", -32602) from e
+
+        cell_id = control_id.split("::", 1)[0]
+        cascaded: list[str] = []
+        stale_side: list[str] = []
+        if (
+            self.graph is not None
+            and not self.compile_error
+            and cell_id in self.cells
+        ):
+            desc = self.graph.downstream({cell_id})
+            blocked: set[str] = set()
+            for cid in self.graph.topo or []:
+                if cid not in desc:
+                    continue
+                if self.cells[cid].side_effect:
+                    self.stale.add(cid)  # 仅标 stale + ⚡ 待手动确认（spec §15.3 例外）
+                    stale_side.append(cid)
+                    continue
+                if self.graph.parents[cid] & blocked:
+                    blocked.add(cid)  # 上游失败 → 本分支阻断
+                    self.stale.add(cid)
+                    continue
+                sub = self._run_cell(self.cells[cid], attribute=True, emit_done=True)
+                if sub.ok:
+                    cascaded.append(cid)
+                else:
+                    blocked.add(cid)
+        return {"ok": True, "cascaded": cascaded, "staleSideEffect": stale_side}
+
+    def _unregister_cell_controls(self, cell_id: str) -> None:
+        for cid in self._controls_by_cell.pop(cell_id, set()):
+            ctl = self.controls.pop(cid, None)
+            if ctl is not None:
+                ctl.control_id = None
+
+    def _register_control(self, cell_id: str, name: str, control: _ui.Control) -> None:
+        cid = f"{cell_id}::{name}"
+        control.control_id = cid  # controlId 由 runtime 注入（spec §15.1）
+        self.controls[cid] = control
+        self._controls_by_cell.setdefault(cell_id, set()).add(cid)
+        self._emit_control_mime(cell_id, control)
+
+    def _scan_controls(self, cell_id: str, committed: list[str]) -> None:
+        """cell 重跑 = 旧 controlId 注销 + 重建（值回默认，spec §15.1）。
+
+        committed 为该 cell 本次成功提交的 defs（已排序）：其中的 Control 实例
+        注册并发 run.mime；收尾裸表达式在 exec 模式不求值，不存在重复发射路径。
+        """
+        self._unregister_cell_controls(cell_id)
+        for name in committed:
+            obj = self.globals.get(name)
+            if isinstance(obj, _ui.Control):
+                self._register_control(cell_id, name, obj)
+
+    def _register_repl_control(self, control: _ui.Control) -> None:
+        """REPL 收尾表达式是 Control：同一 mime 发射路径（不发 text/plain repr）。
+
+        REPL 不提交 defs，controlId 的名字段尽量从 globals 反查绑定名
+        （`t = slider(...)` + 收尾 `t` → "repl::t"），裸表达式退化 "repl::expr"。
+        """
+        self._unregister_cell_controls(REPL_ID)
+        name = "expr"
+        for n, v in self.globals.items():
+            if v is control and n.isidentifier() and not n.startswith("__"):
+                name = n
+                break
+        self._register_control(REPL_ID, name, control)
+
+    def _emit_control_mime(self, cell_id: str, control: _ui.Control) -> None:
+        try:
+            data = control.mime_data()  # strict JSON（NaN 已在 to_jsonable 转字符串）
+        except Exception:  # noqa: BLE001 — 控件序列化失败不影响执行结果
+            return
+        self._emit("run.mime", {"cellId": cell_id, "mime": _ui.CONTROL_MIME, "data": data})
 
     # ---------------------------------------------------------------- internal
     def _ghost_cleanup(self, cell_id: str) -> None:
@@ -562,8 +668,12 @@ class Runtime:
             err.flush()
             # displayhook（L-4）：exec 与末表达式 eval 都成功才回显；None 不发。
             # 末表达式抛异常走上面的 run.error 路径，同样不回显。
+            # 收尾表达式是 Control（P3.3）：走控件 mime 同一发射路径，不再发 repr 回显。
             if value is not _MISSING and value is not None:
-                self._emit_display_value(cell_id, value)
+                if isinstance(value, _ui.Control):
+                    self._register_repl_control(value)
+                else:
+                    self._emit_display_value(cell_id, value)
 
         self._capture_matplotlib(cell_id)
 
@@ -575,6 +685,8 @@ class Runtime:
             for n in committed:
                 self.defined_by[n] = cell_id
             self.stale.discard(cell_id)
+            # P3.3：cell 成功执行后扫描新 defs 中的 Control → 注销旧 + 注册 + 发 mime
+            self._scan_controls(cell_id, committed)
 
         done = {
             "cellId": cell_id,

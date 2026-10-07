@@ -284,6 +284,8 @@ export class RpcRouter {
         return this.cellSave(params);
       case 'cell.run':
         return this.cellRun(params);
+      case 'control.set':
+        return this.controlSet(params);
       case 'kernel.vars':
         return this.kernelVars();
       case 'kernel.repl':
@@ -1133,6 +1135,16 @@ export class RpcRouter {
   }
 
   // ---------- .ipynb 导出/导入（P3.4 接线；exporter/importer 为纯模块，N6 线交付） ----------
+
+  /**
+   * control.set 透传（P3.3 接线）：焦点内核同名方法，响应 {ok,cascaded,staleSideEffect}
+   * 原样返回；级联重跑的 run.* 通知由内核自发、走既有焦点广播，广播侧零改动。
+   */
+  private async controlSet(params: Record<string, unknown>): Promise<unknown> {
+    const ctx = this.focusCtx();
+    const controlId = strParam(params, 'controlId');
+    return ctx.supervisor.request('control.set', { controlId, value: params['value'] });
+  }
 
   /**
    * export.ipynb {path?, sessionId?, target?}：

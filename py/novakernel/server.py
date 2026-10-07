@@ -7,7 +7,7 @@
 - 日志只走 stderr；stdout 仅协议消息（每行一个 JSON，UTF-8，LF）；
 - 同步循环，无心跳/异步线程（契约增补 #7）：exec 期间不应答 ping 是已知行为；
 - 方法：ping / load_file / save_file / set_cells / exec_cell / exec_repl /
-  introspect / shutdown（应答后进程退出）。
+  introspect / control.set / shutdown（应答后进程退出）。
 
 错误码：-32700 JSON 解析错；-32601 method 不存在；-32602 参数无效/未知 cell；
 -32001 尚未打开 notebook；-32000 内核内部错（含编译错拒跑）。
@@ -56,6 +56,13 @@ class Server:
             return rt.exec_cell(cell_id, cascade=cascade)
         if method == "exec_repl":
             return rt.exec_repl(self._require(params, "code", str))
+        if method == "control.set":
+            # P3.3（spec §15.3）：{controlId, value} → {ok, cascaded, staleSideEffect}。
+            # value 允许任意 JSON 值（null/false/0/'' 均合法），故只查在场性（object 恒真）。
+            return rt.control_set(
+                self._require(params, "controlId", str),
+                self._require(params, "value", object),
+            )
         if method == "introspect":
             return rt.introspect()
         if method == "shutdown":

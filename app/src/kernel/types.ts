@@ -21,6 +21,9 @@ export interface TracebackInfo {
 /** MIME bundle：mime-type → 文本或 base64（image/png 等二进制走 base64）。 */
 export type MimeBundle = Record<string, string | string[]>;
 
+/** P3.3 交互控件载荷的 mime key；同 cell 多控件按数组累积（store run.mime 特判）。 */
+export const CONTROL_MIME = 'application/vnd.novalab.control+json';
+
 /** 一次运行累积的输出缓冲（run.stdout/stderr/mime/error/notify 通知增量填充）。 */
 export interface CellOutput {
   stdout: string;

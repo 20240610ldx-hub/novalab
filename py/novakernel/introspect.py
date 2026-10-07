@@ -181,10 +181,25 @@ def _describe_keyed(name: str, value: object, tname: str) -> dict:
     }
 
 
+def _is_control(v: object) -> bool:
+    """novakernel.ui 的 Control 活对象（P3.3）：kind/spec/value duck-typing + 模块归属。"""
+    if not all(hasattr(v, a) for a in ("kind", "spec", "value")):
+        return False
+    t = type(v)
+    return getattr(t, "__module__", "") == "novakernel.ui" or t.__name__ == "Control"
+
+
 def describe(name: str, value: object) -> dict:
     """单个变量的 schema；任何异常降级为 {name, type, preview: type名}。"""
     tname = type(value).__name__
     try:
+        if _is_control(value):
+            kind = getattr(value, "kind", "control")
+            return {
+                "name": name,
+                "type": f"Control[{kind}]",
+                "preview": _fit_preview(_json_safe(getattr(value, "value", None))),
+            }
         if _is_geodataframe(value):
             return _describe_geodataframe(name, value, tname)
         if _is_dataframe(value):

@@ -8,6 +8,7 @@ import {
   type NotebookStateResult,
 } from './notebooks';
 import {
+  CONTROL_MIME,
   createEmptyOutput,
   type Cell,
   type CellOutput,
@@ -129,7 +130,19 @@ export function applyRunEvent(cells: readonly Cell[], method: string, params: un
       // 两种形态：单条 {mime, data} 或整包 {bundle: {...}}
       const bundle: MimeBundle = asRecord(p.bundle) as MimeBundle;
       if (typeof p.mime === 'string' && p.mime) {
-        bundle[p.mime] = asText(p.data);
+        const text = asText(p.data);
+        if (p.mime === CONTROL_MIME) {
+          // 同 cell 多控件逐控件发同一 mime key：按数组累积（去重），不按 key 覆盖
+          return patchCell(cells, cellId, (c) =>
+            withOutput(c, (o) => {
+              const prev = o.mime[CONTROL_MIME];
+              const arr = Array.isArray(prev) ? [...prev] : prev == null ? [] : [prev];
+              if (!arr.includes(text)) arr.push(text);
+              return { ...o, mime: { ...o.mime, [CONTROL_MIME]: arr } };
+            }),
+          );
+        }
+        bundle[p.mime] = text;
       }
       if (Object.keys(bundle).length === 0) return cells as Cell[];
       return patchCell(cells, cellId, (c) =>
