@@ -34,6 +34,11 @@ import {
   type NotebookState,
   type NotebookSummary,
   type NotebookSwitchResult,
+  type ProviderKind,
+  type ProviderSummary,
+  type ProvidersDeleteResult,
+  type ProvidersListResult,
+  type ProvidersSetActiveResult,
   type RpcRequest,
   type RpcResponse,
   type RunDoneParams,
@@ -59,6 +64,7 @@ import {
 } from './supervisor';
 import type { SessionEventKind } from './session-log';
 import { FsError, FsManager } from './fs';
+import { ProvidersStore, ProvidersStoreError } from './providers-store';
 import { SessionStore, type ActiveSession } from './session-store';
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
@@ -187,9 +193,16 @@ export interface RouterDeps {
   fs?: FsManager;
   /** 会话存储（默认新建 SessionStore；单测注入以控制时钟）。 */
   sessionStore?: SessionStore;
+  /** provider 凭据加密存储（默认新建 ProvidersStore → <repoRoot>/.novalab；单测注入临时目录）。 */
+  providersStore?: ProvidersStore;
 }
 
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
+
+const PROVIDER_KINDS: ReadonlySet<string> = new Set<ProviderKind>([
+  'anthropic-compat',
+  'openai-compat',
+]);
 
 export class RpcRouter {
   /** notebookId → 上下文（插入序 = 打开序，notebook.list 依此排列 tab）。 */
@@ -205,6 +218,7 @@ export class RpcRouter {
   private readonly ui: UiStore;
   private readonly fs: FsManager;
   private readonly sessions: SessionStore;
+  private readonly providers: ProvidersStore;
   private readonly watcher?: NotebookWatcher;
 
   constructor(private readonly deps: RouterDeps) {
@@ -212,6 +226,7 @@ export class RpcRouter {
     this.ui = deps.uiStore ?? new UiStore();
     this.fs = deps.fs ?? new FsManager();
     this.sessions = deps.sessionStore ?? new SessionStore(this.clock);
+    this.providers = deps.providersStore ?? new ProvidersStore();
     this.multiMode = deps.multi !== undefined;
     if (deps.multi) {
       this.registry = deps.multi;
@@ -332,6 +347,14 @@ export class RpcRouter {
         return this.exportIpynb(params);
       case 'import.ipynb':
         return this.importIpynb(params);
+      case 'providers.list':
+        return this.providersList();
+      case 'providers.set':
+        return this.providersSet(params);
+      case 'providers.delete':
+        return this.providersDelete(params);
+      case 'providers.setActive':
+        return this.providersSetActive(params);
       default:
         throw new RpcFault(ERR_METHOD_NOT_FOUND, `method not found: ${method}`);
     }
@@ -1218,6 +1241,84 @@ export class RpcRouter {
       return importIpynb(src, target);
     } catch (e) {
       if (e instanceof ImportError) throw new RpcFault(e.code, e.message);
+      throw e;
+    }
+  }
+
+  // ---------- providers.*（P4 凭据加密存储，protocol.ts 冻结注释；apiKey 永不出桥） ----------
+
+  /** providers.list → 全量掩码摘要（hasKey 代替 apiKey）+ activeProviderId。 */
+  private providersList(): ProvidersListResult {
+    return this.providers.list();
+  }
+
+  /**
+   * providers.set {id?,kind,name,baseURL,model,apiKey?} → ProviderSummary（upsert）。
+   * apiKey 明文入 → 加密落盘；省略/空串 = 保留既有密文（前端编辑不回传 key）。
+   */
+  private providersSet(params: Record<string, unknown>): ProviderSummary {
+    const kind = params['kind'];
+    if (typeof kind !== 'string' || !PROVIDER_KINDS.has(kind)) {
+      throw new RpcFault(
+        ERR_INVALID_PARAMS,
+        `providers.set：kind 必须是 anthropic-compat|openai-compat，收到: ${String(kind)}`,
+      );
+    }
+    const id = params['id'];
+    if (id !== undefined && typeof id !== 'string') {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'providers.set：id 必须是 string（或省略由 bridge 生成）');
+    }
+    const name = params['name'];
+    const baseURL = params['baseURL'];
+    const model = params['model'];
+    for (const [field, v] of [
+      ['name', name],
+      ['baseURL', baseURL],
+      ['model', model],
+    ] as const) {
+      if (typeof v !== 'string' || v.trim() === '') {
+        throw new RpcFault(ERR_INVALID_PARAMS, `providers.set：${field} 必须是非空 string`);
+      }
+    }
+    try {
+      new URL(baseURL as string);
+    } catch {
+      throw new RpcFault(ERR_INVALID_PARAMS, `providers.set：baseURL 不是合法 URL: ${String(baseURL)}`);
+    }
+    const apiKey = params['apiKey'];
+    if (apiKey !== undefined && typeof apiKey !== 'string') {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'providers.set：apiKey 必须是 string（或省略保留既有）');
+    }
+    try {
+      return this.providers.set({
+        ...(typeof id === 'string' && id !== '' ? { id } : {}),
+        kind: kind as ProviderKind,
+        name: (name as string).trim(),
+        baseURL: (baseURL as string).trim(),
+        model: (model as string).trim(),
+        ...(typeof apiKey === 'string' ? { apiKey } : {}),
+      });
+    } catch (e) {
+      if (e instanceof ProvidersStoreError) throw new RpcFault(ERR_INVALID_PARAMS, e.message);
+      throw e;
+    }
+  }
+
+  /** providers.delete {id} → {deleted}（幂等；删 active 时 activeProviderId 归 null）。 */
+  private providersDelete(params: Record<string, unknown>): ProvidersDeleteResult {
+    return this.providers.remove(strParam(params, 'id'));
+  }
+
+  /** providers.setActive {id: string|null} → {activeProviderId}；未知 id → -32602。 */
+  private providersSetActive(params: Record<string, unknown>): ProvidersSetActiveResult {
+    const id = params['id'];
+    if (id !== null && typeof id !== 'string') {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'providers.setActive：id 必须是 string|null');
+    }
+    try {
+      return { activeProviderId: this.providers.setActive(id) };
+    } catch (e) {
+      if (e instanceof ProvidersStoreError) throw new RpcFault(ERR_INVALID_PARAMS, e.message);
       throw e;
     }
   }

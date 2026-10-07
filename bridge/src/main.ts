@@ -1,11 +1,12 @@
 /**
- * Bridge 入口 —— WS JSON-RPC 服务（ws://127.0.0.1:7788，端口占用自动 +1）。
+ * Bridge 入口 —— WS JSON-RPC 服务（ws://127.0.0.1:7788，端口占用自动 +1）
+ * + LLM 反向代理（http://127.0.0.1:7789/llm/<providerId>/*，P4 / ADR-008，同 +1 纪律）。
  *
  * 装配：KernelSupervisor（StdioKernelTransport 工厂，spawn uv/py 内核）
- * + RpcRouter（方法路由）+ broadcast（通知发给所有已连接客户端）。
+ * + RpcRouter（方法路由，含 providers.* 加密凭据存储）+ broadcast（通知发给所有已连接客户端）。
  *
- * `--mcp [notebook.py]`：不起 WS，只起 stdio MCP server（spec §6.3，外部 Agent 接入）。
- * stdout 专属 MCP 协议帧 —— 该模式下所有日志走 stderr。
+ * `--mcp [notebook.py]`：不起 WS 也不起 LLM 代理，只起 stdio MCP server（spec §6.3，
+ * 外部 Agent 接入；stdout 专属 MCP 协议帧 —— 该模式下所有日志走 stderr）。
  */
 
 import path from 'node:path';
@@ -13,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { ERR_PARSE, type RpcRequest } from './protocol';
 import { RpcRouter } from './router';
+import { ProvidersStore } from './providers-store';
+import { startLlmProxy, type LlmProxyHandle } from './llm-proxy';
 import { MultiSupervisor, StdioKernelTransport } from './supervisor';
 import { createChokidarEventSource } from './watch';
 import { startMcpServer } from './mcp/server';
@@ -30,6 +33,7 @@ const supervisor = new MultiSupervisor({
 });
 
 let activeWss: WebSocketServer | undefined;
+let activeLlmProxy: LlmProxyHandle | undefined;
 
 function broadcast(method: string, params: unknown): void {
   if (!activeWss) return;
@@ -39,9 +43,13 @@ function broadcast(method: string, params: unknown): void {
   }
 }
 
+// P4：providers.* rpc 与 LLM 代理共用同一存储实例（.novalab/providers.json，0600）
+const providersStore = new ProvidersStore();
+
 const router = new RpcRouter({
   multi: supervisor,
   broadcast,
+  providersStore,
   // P1.8：外部 .py 变更热重载（生产用 chokidar 事件源；单测在 RouterDeps 注入假源）
   watcherFactory: createChokidarEventSource,
 });
@@ -91,6 +99,7 @@ function start(port: number): WebSocketServer {
 function shutdown(): void {
   router.dispose(); // 停 watcher + ui.json 落盘 + 全部会话快照
   supervisor.stopAll();
+  activeLlmProxy?.close();
   activeWss?.close();
   process.exit(0);
 }
@@ -125,4 +134,15 @@ if (mcpFlagIdx >= 0) {
   })();
 } else {
   start(BASE_PORT);
+  // P4：LLM 反向代理（默认分支专属；--mcp 分支不起，stdout 是 MCP 协议帧专属）
+  activeLlmProxy = startLlmProxy({ store: providersStore });
+  activeLlmProxy.listening
+    .then((port) => {
+      console.log(`[bridge] llm-proxy http://127.0.0.1:${port}/llm/<providerId>/`);
+    })
+    .catch((err: unknown) => {
+      process.stderr.write(
+        `[bridge] llm-proxy 启动失败: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
 }

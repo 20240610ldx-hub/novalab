@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { useNotebook } from './notebook';
 import {
-  loadProviderState,
+  initProviderState,
+  loadLegacyProviderState,
   saveProviderState,
   type ProviderConfig,
 } from '../agent/providers';
@@ -9,9 +10,13 @@ import type { AssembledPayload } from '../agent/payload';
 import type { TracebackFrame } from '../kernel/types';
 
 /**
- * Agent 侧全局状态（P2.1/P2.5）。
- * 与 notebook store（H 线所有）的关系：只读订阅（watchNotebookErrors），绝不写入。
- * provider 配置持久化到 localStorage（明文，见 providers.STORAGE_WARNING）。
+ * Agent 侧全局状态（P2.1/P2.5；P4 凭据存储迁移）。
+ * 与 notebook store（H 线所有）的关系：只读订阅（watchNotebookErrors + bridgeConnected
+ * 水合触发），绝不写入。
+ * provider 配置持久化（P4/ADR-008）：rpc providers.* → bridge 加密落盘
+ * .novalab/providers.json（0600，apiKey 永不出桥，见 providers.STORAGE_WARNING）。
+ * 启动快照 = 旧 localStorage 同步读（水合前展示）；bridgeConnected → initProviderState()
+ * （一次性迁移旧明文 + 播种 dev-env + 全量回灌）。bridge 不可达 → 内存态降级不抛。
  */
 
 export interface LastRunError {
@@ -32,18 +37,27 @@ interface AgentStore {
   lastError: LastRunError | null;
 
   setSettingsOpen: (open: boolean) => void;
-  upsertProvider: (config: ProviderConfig) => void;
-  removeProvider: (id: string) => void;
-  setActiveProvider: (id: string | null) => void;
+  upsertProvider: (config: ProviderConfig) => Promise<void>;
+  removeProvider: (id: string) => Promise<void>;
+  setActiveProvider: (id: string | null) => Promise<void>;
   setLastPayload: (payload: AssembledPayload | null) => void;
   setLastError: (err: LastRunError | null) => void;
 }
 
-function persist(next: Pick<AgentStore, 'providers' | 'activeProviderId'>): void {
-  saveProviderState({ providers: next.providers, activeProviderId: next.activeProviderId });
+/**
+ * 全量同步到 bridge 加密存储（upsert + 删多余 + setActive）。
+ * bridge 不可达：捕获降级——内存态仍然生效（与 P4 前 localStorage 静默失败同纪律）。
+ */
+async function persist(next: Pick<AgentStore, 'providers' | 'activeProviderId'>): Promise<void> {
+  try {
+    await saveProviderState({ providers: next.providers, activeProviderId: next.activeProviderId });
+  } catch (err) {
+    console.error('provider 持久化失败（bridge 不可达？改动仅内存态）:', err);
+  }
 }
 
-const initial = loadProviderState();
+// 水合前展示快照：旧 localStorage 明文（迁移过的浏览器为空态；bridge 回灌后替换）
+const initial = loadLegacyProviderState();
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   settingsOpen: false,
@@ -54,29 +68,54 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
-  upsertProvider: (config) => {
+  upsertProvider: async (config) => {
     const providers = get().providers;
     const exists = providers.some((p) => p.id === config.id);
     const next = exists ? providers.map((p) => (p.id === config.id ? config : p)) : [...providers, config];
     set({ providers: next });
-    persist({ providers: next, activeProviderId: get().activeProviderId });
+    await persist({ providers: next, activeProviderId: get().activeProviderId });
   },
 
-  removeProvider: (id) => {
+  removeProvider: async (id) => {
     const next = get().providers.filter((p) => p.id !== id);
     const activeProviderId = get().activeProviderId === id ? null : get().activeProviderId;
     set({ providers: next, activeProviderId });
-    persist({ providers: next, activeProviderId });
+    await persist({ providers: next, activeProviderId });
   },
 
-  setActiveProvider: (id) => {
+  setActiveProvider: async (id) => {
     set({ activeProviderId: id });
-    persist({ providers: get().providers, activeProviderId: id });
+    await persist({ providers: get().providers, activeProviderId: id });
   },
 
   setLastPayload: (payload) => set({ lastPayload: payload }),
   setLastError: (err) => set({ lastError: err }),
 }));
+
+/* ---------------- P4：bridge 连接后一次性水合（迁移 + dev-env 播种 + 回灌） ---------------- */
+
+let providerHydrationStarted = false;
+
+function hydrateProvidersOnce(): void {
+  if (providerHydrationStarted) return;
+  providerHydrationStarted = true;
+  void initProviderState()
+    .then((state) => {
+      useAgentStore.setState({
+        providers: state.providers,
+        activeProviderId: state.activeProviderId,
+      });
+    })
+    .catch((err) => {
+      console.error('provider 水合失败（保持内存态）:', err);
+    });
+}
+
+// notebook store 只读订阅：bridgeConnected 翻真 → 水合一次（页面生命周期内幂等）
+useNotebook.subscribe((s) => {
+  if (s.bridgeConnected) hydrateProvidersOnce();
+});
+if (useNotebook.getState().bridgeConnected) hydrateProvidersOnce();
 
 /* ---------------- run.error 只读订阅 ---------------- */
 

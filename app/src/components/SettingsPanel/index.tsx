@@ -4,6 +4,7 @@ import { useAgentStore } from '../../store/agent';
 import {
   createLanguageModel,
   hasDevEnvModel,
+  isProviderStorageRemote,
   modelSuggestionsFor,
   STORAGE_WARNING,
   type ProviderConfig,
@@ -11,8 +12,13 @@ import {
 } from '../../agent/providers';
 
 /**
- * 设置面板（P2.1 / M6 模型解耦）：provider 增删改 + 当前生效指示 + 测试连接。
- * 存储：localStorage 键 `novalab.providers`，明文 —— 顶部常驻显著警告（P4 迁移 keychain）。
+ * 设置面板（P2.1 / M6 模型解耦；P4 加密存储 + LLM 代理）：provider 增删改 +
+ * 当前生效指示 + 测试连接。
+ * 存储（P4/ADR-008）：rpc providers.* → bridge AES-256-GCM 加密落盘
+ * .novalab/providers.json（0600）—— apiKey 永不出桥（列表仅 hasKey 掩码，
+ * 编辑时 key 留空 = 保留既有）；顶部常驻存储说明（STORAGE_WARNING）。
+ * 测试连接走 bridge LLM 代理（127.0.0.1:7789）：先把草稿落库，再以 'proxy'
+ * 占位 key 发起 generateText，真 key 由代理注入上游。
  */
 
 type Draft = ProviderConfig;
@@ -45,29 +51,44 @@ export function SettingsPanel() {
   if (!open) return null;
 
   const suggestions = draft ? modelSuggestionsFor(draft) : [];
+  const remote = isProviderStorageRemote();
 
   const startEdit = (config: ProviderConfig | null) => {
-    setDraft(config ? { ...config } : newDraft());
+    // bridge 掩码纪律：已存 key 的 provider 编辑时 key 置空（留空 = 保留既有密文）
+    setDraft(config ? { ...config, apiKey: config.hasKey ? '' : config.apiKey } : newDraft());
     setTest({ state: 'idle', msg: '' });
   };
 
   const save = () => {
     if (!draft) return;
     if (!draft.name.trim() || !draft.baseURL.trim() || !draft.model.trim()) return;
-    upsertProvider({ ...draft, name: draft.name.trim(), baseURL: draft.baseURL.trim(), model: draft.model.trim() });
-    // 首个 provider 自动设为当前生效；dev 兜底让位
-    if (activeProviderId == null) setActiveProvider(draft.id);
-    setDraft(null);
+    void (async () => {
+      // 顺序 await：两次 persist 都是全量同步，串行避免 setActive 竞态
+      await upsertProvider({ ...draft, name: draft.name.trim(), baseURL: draft.baseURL.trim(), model: draft.model.trim() });
+      // 首个 provider 自动设为当前生效；dev 兜底让位
+      if (activeProviderId == null) await setActiveProvider(draft.id);
+      setDraft(null);
+    })();
   };
 
   const testConnection = async () => {
     if (!draft || !draft.baseURL.trim() || !draft.model.trim()) return;
     setTest({ state: 'testing', msg: '' });
     try {
-      const model = createLanguageModel({ ...draft, baseURL: draft.baseURL.trim(), model: draft.model.trim() });
+      const cleaned: ProviderConfig = {
+        ...draft,
+        name: draft.name.trim() || '(未命名)',
+        baseURL: draft.baseURL.trim(),
+        model: draft.model.trim(),
+      };
+      // 测试走 bridge 代理：先把草稿落入加密存储（代理按 id 注入真 key）。
+      // bridge 不可达时 persist 静默降级，createLanguageModel 自动回退直连草稿凭据。
+      await upsertProvider(cleaned);
+      const model = createLanguageModel(cleaned);
       const res = await generateText({ model, prompt: 'ping' });
       const text = (res.text ?? '').trim();
-      setTest({ state: 'ok', msg: `连接成功 · 回复 ${text.length} 字符${text ? `："${text.slice(0, 40)}"` : ''}` });
+      const via = remote ? '经 bridge 代理 127.0.0.1:7789' : '直连（bridge 未就绪）';
+      setTest({ state: 'ok', msg: `连接成功（${via}）· 回复 ${text.length} 字符${text ? `："${text.slice(0, 40)}"` : ''}` });
     } catch (err) {
       setTest({ state: 'err', msg: err instanceof Error ? err.message : String(err) });
     }
@@ -93,13 +114,18 @@ export function SettingsPanel() {
           </button>
         </div>
 
-        {/* 明文存储警告（常驻显著） */}
-        <div className="mb-3 rounded border border-[var(--accent-err)] bg-[var(--diff-del)] p-2 text-[11px] leading-relaxed text-[var(--accent-err)]">
+        {/* P4 存储说明（常驻）：加密落盘 + 代理路径；bridge 未就绪时附加降级提示 */}
+        <div className="mb-3 rounded border border-[var(--border)] bg-[var(--bg)] p-2 text-[11px] leading-relaxed text-[var(--muted)]">
           {STORAGE_WARNING}
           <p className="mt-1">
-            另注（L-1）：浏览器 dev 下用户自配 provider 仍直连其 baseURL——端点若不回
-            CORS 头（Access-Control-Allow-Origin），请求会被浏览器拦截；可暂用 dev
-            兜底（.env.local，经 vite 同源代理 /llm），P4 迁移 bridge 侧代理后消除。
+            请求统一经 bridge LLM 代理（127.0.0.1:7789/llm/&lt;id&gt;/v1，SSE 流式透传）——
+            浏览器不再直连 provider 端点，原 L-1 CORS 拦截消除。
+            {!remote && (
+              <span className="text-[var(--accent-run)]">
+                {' '}当前 bridge 未就绪：回退 P4 前直连（用户 provider 直连其 baseURL 可能被
+                CORS 拦截；dev 兜底走 vite 同源代理 /llm）。
+              </span>
+            )}
           </p>
         </div>
 
@@ -124,20 +150,23 @@ export function SettingsPanel() {
                 </span>
                 <span className="text-[var(--text)]">{p.name}</span>
                 <span className="rounded bg-[var(--bg)] px-1 text-[10px] text-[var(--muted)]">{p.kind}</span>
+                {p.hasKey && (
+                  <span title="API Key 已加密存储于 bridge 侧（.novalab/providers.json，永不回传前端）">🔑</span>
+                )}
                 <span className="truncate text-[var(--muted)]" title={p.baseURL}>
                   {p.baseURL}
                 </span>
                 <span className="ml-auto shrink-0 text-[var(--muted)]">{p.model}</span>
                 <span className="flex shrink-0 gap-1">
                   {!isActive && (
-                    <button type="button" onClick={() => setActiveProvider(p.id)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-ok)] hover:text-[var(--accent-ok)]">
+                    <button type="button" onClick={() => void setActiveProvider(p.id)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-ok)] hover:text-[var(--accent-ok)]">
                       设为当前
                     </button>
                   )}
                   <button type="button" onClick={() => startEdit(p)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:text-[var(--text)]">
                     编辑
                   </button>
-                  <button type="button" onClick={() => removeProvider(p.id)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-err)] hover:text-[var(--accent-err)]">
+                  <button type="button" onClick={() => void removeProvider(p.id)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-err)] hover:text-[var(--accent-err)]">
                     删除
                   </button>
                 </span>
@@ -152,9 +181,11 @@ export function SettingsPanel() {
                 {activeProviderId == null ? '●' : '○'}
               </span>
               <span className="text-[var(--text)]">dev 兜底（.env.local）</span>
-              <span className="text-[var(--muted)]">VITE_NOVALAB_LLM_* · anthropic-compat</span>
+              <span className="text-[var(--muted)]">
+                {remote ? 'bridge 加密存储 dev-env · 经代理' : 'VITE_NOVALAB_LLM_* · anthropic-compat'}
+              </span>
               {activeProviderId != null && (
-                <button type="button" onClick={() => setActiveProvider(null)} className="ml-auto rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-ok)] hover:text-[var(--accent-ok)]">
+                <button type="button" onClick={() => void setActiveProvider(null)} className="ml-auto rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-ok)] hover:text-[var(--accent-ok)]">
                   设为当前
                 </button>
               )}
@@ -205,12 +236,12 @@ export function SettingsPanel() {
               />
             </label>
             <label className="block text-[11px] text-[var(--muted)]">
-              apiKey（明文存本机 localStorage，见上方警告）
+              apiKey（经 bridge AES-256-GCM 加密落盘 .novalab/providers.json{draft.hasKey ? '；已存 🔑，留空 = 保留不变' : ''}）
               <input
                 type="password"
                 value={draft.apiKey}
                 onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })}
-                placeholder="sk-…（ollama 本地可留空）"
+                placeholder={draft.hasKey ? '已存储（留空保留不变，填入则轮换）' : 'sk-…（ollama 本地可留空）'}
                 spellCheck={false}
                 className={`mt-0.5 ${inputCls}`}
               />
@@ -245,6 +276,7 @@ export function SettingsPanel() {
                 type="button"
                 onClick={() => void testConnection()}
                 disabled={test.state === 'testing' || !draft.baseURL.trim() || !draft.model.trim()}
+                title="先保存当前草稿到加密存储，再经 bridge 代理（127.0.0.1:7789）发起一句 generateText"
                 className="rounded border border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--accent-run)] hover:text-[var(--accent-run)] disabled:opacity-40"
               >
                 {test.state === 'testing' ? '测试中…' : '测试连接'}

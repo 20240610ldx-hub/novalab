@@ -336,6 +336,48 @@ export interface SessionEndedParams {
   reason: SessionEndReason;
 }
 
+// ---------- providers.*（P4 凭据加密存储 + LLM 代理，ADR-008，本任务冻结） ----------
+//
+//   providers.list     {}                          → ProvidersListResult
+//   providers.set      {id?,kind,name,baseURL,     → ProviderSummary（upsert；apiKey
+//                       model,apiKey?}               明文入→AES-256-GCM 加密落盘
+//   providers.delete   {id}                        → ProvidersDeleteResult（幂等）
+//   providers.setActive {id: string|null}          → ProvidersSetActiveResult
+//
+// 纪律：**apiKey 永不出桥** —— list/set 的响应只有 hasKey:boolean 掩码；
+// set 的 apiKey 省略或空串 = 保留既有密文（前端编辑不回传 key）。
+// 存储 .novalab/providers.json（0600），损坏 → 空态降级不抛（bridge/src/providers-store.ts）。
+// LLM 请求本身不走 rpc：前端 SDK baseURL 指向 bridge 侧 HTTP 代理
+// http://127.0.0.1:7789/llm/<providerId>/v1（bridge/src/llm-proxy.ts，SSE 流式透传，
+// 真 key 由代理按 kind 注入上游请求头）。
+
+/** provider 协议类型（与前端 providers.ts ProviderId 一致）。 */
+export type ProviderKind = 'anthropic-compat' | 'openai-compat';
+
+/** providers.list / providers.set 的响应条目：无 apiKey，只有 hasKey 掩码。 */
+export interface ProviderSummary {
+  id: string;
+  kind: ProviderKind;
+  name: string;
+  baseURL: string;
+  model: string;
+  hasKey: boolean;
+}
+
+export interface ProvidersListResult {
+  providers: ProviderSummary[];
+  /** null = 无用户选择（前端走 dev-env 兜底）。 */
+  activeProviderId: string | null;
+}
+
+export interface ProvidersDeleteResult {
+  deleted: boolean;
+}
+
+export interface ProvidersSetActiveResult {
+  activeProviderId: string | null;
+}
+
 // ---------- 内核 stdio wire 契约（§6.2，与 py 工作线共同冻结） ----------
 
 /**
