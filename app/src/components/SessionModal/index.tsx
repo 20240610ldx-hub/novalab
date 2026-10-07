@@ -4,7 +4,10 @@
  * - 头部：`Session notebook` + notebook 名 + `N sessions · M cells`；顶部 import .ipynb；
  * - 主体：按 session.list 分组（buildSegments：会话即 segment，>30min 间隔在会话内
  *   再切子段——parts>1 时 header 注记）；每段折叠/展开，展开列该会话快照 cells 的
- *   只读精简行 `[n] + 首行代码 + 状态点`；>500 cell 复用 store 既有截断 selector；
+ *   **完整只读 cell 卡**（A-3 #24，Q 线）：[n] 徽章 + 语言 chip + error (line N)
+ *   实心红 pill + 右对齐内核名 + 只读代码（出错行红底）+ 复制钮 + 输出区
+ *   （stdout 中性面板 / stderr·traceback 红面板 / wrote 行 / mime 键名注记；
+ *   历史快照仅文本形态）；>500 cell 复用 store 既有截断 selector；
  * - footer 右：`.ipynb` 导出（export.ipynb rpc）；-32600/-32601 → 降级
  *   （tooltip「接线 pending」，P3.1 router 合入后自然恢复）。
  * - Esc / 遮罩点击关闭。挂载点：SessionBar（fixed 覆盖层，挂载位置不影响视觉）。
@@ -17,17 +20,126 @@ import {
   truncationBanner,
   useSession,
   type SessionSegment,
+  type SessionSnapshotCell,
 } from '../../store/session';
 import { useNotebook } from '../../store/notebook';
+import { CopyButton } from '../CellEditor';
+import { ErrPanel, OutPanel, WriteNotifications } from '../OutputRenderer';
 import {
-  DOT_COLOR,
-  cellRowLabel,
+  errorLineFromTraceback,
+  execBadge,
   sessionHeaderText,
-  statusDot,
+  snapshotHasOutput,
   summaryLabel,
 } from './selectors';
 
-/** 单个会话段：header（点击折叠/展开）+ 展开时的只读 cell 精简行。 */
+/* ------------------------------------------------------------------ */
+/* A-3 #24：完整只读 cell 卡                                             */
+/* ------------------------------------------------------------------ */
+
+/** 只读代码块：逐行 span（出错行 --err-line 整行红底，复用 errorLine 装饰观感）。 */
+function ReadOnlyCode({ code, errorLine }: { code: string; errorLine: number | null }) {
+  const lines = (code ?? '').split('\n');
+  return (
+    <pre className="nl-scroll-thin overflow-x-auto rounded-md bg-[var(--panel)] px-3 py-1.5 text-[12px] leading-[1.65] text-[var(--text)]">
+      {lines.map((l, i) => (
+        <span key={i} className={`block min-w-fit ${errorLine === i + 1 ? 'nl-err-line' : ''}`}>
+          {l === '' ? ' ' : l}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: number }) {
+  const o = cell.output;
+  const errorLine = o?.traceback ? errorLineFromTraceback(o.traceback) : null;
+  const hasOutput = snapshotHasOutput(cell);
+  // 折叠披露沿用 ▶/▼ output；error 卡默认展开
+  const [open, setOpen] = useState(!!o?.traceback);
+
+  return (
+    <article className="my-2 rounded-md border border-[var(--border)] bg-[var(--bg)] pb-1">
+      {/* 卡头：[n] 徽章 + 语言 chip + error (line N) 实心红 pill + 右对齐内核名 */}
+      <div className="flex items-center gap-2 px-3 pt-2 text-[11px] select-none">
+        <span className="text-[var(--muted)]" title="execution count">
+          {execBadge(cell, index)}
+        </span>
+        <span
+          className="rounded-full px-2 py-px"
+          style={{ background: 'var(--chip-bg)', color: 'var(--chip-text)' }}
+        >
+          python
+        </span>
+        {o?.traceback && (
+          <span
+            className="rounded-full px-2 py-px text-white"
+            style={{ background: 'var(--err-border)' }}
+            title="最近一次运行失败"
+          >
+            {errorLine !== null ? `error (line ${errorLine})` : 'error'}
+          </span>
+        )}
+        <span className="ml-auto text-[var(--muted)]" title="会话内核">
+          python
+        </span>
+      </div>
+
+      {/* 只读代码 + 右上复制钮（#21 同源组件，hover 显现） */}
+      <div className="group relative mt-1 px-2">
+        <ReadOnlyCode code={cell.code} errorLine={o?.traceback ? errorLine : null} />
+        <div className="absolute right-3.5 top-2.5">
+          <CopyButton getText={() => cell.code} label={`copy cell ${index + 1} code`} />
+        </div>
+      </div>
+
+      {/* 输出区：stdout 中性面板 / stderr·traceback 红面板 / mime 键名注记 / wrote 行 */}
+      {hasOutput && (
+        <div className="px-2">
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            className="flex w-full items-center gap-1.5 px-1 py-1 text-[11px] text-[var(--muted)] hover:text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent-run)]"
+          >
+            <span aria-hidden>{open ? '▼' : '▶'}</span>
+            <span>output</span>
+            {o?.traceback && <span className="text-[var(--muted)]/70">· error</span>}
+          </button>
+          {open && (
+            <div className="space-y-2 border-t border-[var(--border)] p-1.5 text-[12px]">
+              {o?.stdout !== '' && o?.stdout != null && (
+                <OutPanel>
+                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stdout}</pre>
+                </OutPanel>
+              )}
+              {o?.stderr !== '' && o?.stderr != null && (
+                <ErrPanel>
+                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stderr}</pre>
+                </ErrPanel>
+              )}
+              {o?.traceback && (
+                <ErrPanel>
+                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.traceback}</pre>
+                </ErrPanel>
+              )}
+              {(o?.mimeKeys?.length ?? 0) > 0 && (
+                <div className="px-1 text-[11px] text-[var(--muted)]">
+                  mime: {o.mimeKeys.join(', ')}（历史快照仅存键名）
+                </div>
+              )}
+              <WriteNotifications writes={o?.writes ?? []} />
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+/** 单个会话段：header（点击折叠/展开）+ 展开时的完整只读 cell 卡（#24）。 */
 function SessionSection({ seg }: { seg: SessionSegment }) {
   const [expanded, setExpanded] = useState(false);
   const loading = useSession((s) => s.snapshotLoading[seg.sessionId] ?? false);
@@ -71,13 +183,7 @@ function SessionSection({ seg }: { seg: SessionSegment }) {
             <p className="py-1 text-[11px] text-[var(--muted)]">无快照 cells（live 会话尚未落盘或快照缺失）。</p>
           )}
           {!loading &&
-            cells?.map((c, i) => (
-              <div key={c.id} className="flex items-center gap-2 py-0.5 text-[11px]">
-                <span aria-hidden style={{ color: DOT_COLOR[statusDot(c)] }}>●</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-[var(--text)]">{cellRowLabel(i, c.code)}</span>
-                {c.execCount > 0 && <span className="text-[var(--muted)]">[{c.execCount}]</span>}
-              </div>
-            ))}
+            cells?.map((c, i) => <SnapshotCellCard key={c.id} cell={c} index={i} />)}
         </div>
       )}
     </section>
@@ -123,7 +229,7 @@ export function SessionModal() {
         aria-modal="true"
         aria-label="Session notebook"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[80vh] w-[min(720px,92vw)] flex-col rounded-lg border border-[var(--border)] bg-[var(--panel)] shadow-xl"
+        className="flex max-h-[80vh] w-[min(860px,92vw)] flex-col rounded-lg border border-[var(--border)] bg-[var(--panel)] shadow-xl"
       >
         {/* 头部 */}
         <header className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3">

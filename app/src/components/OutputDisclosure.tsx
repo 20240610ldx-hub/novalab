@@ -51,7 +51,7 @@ export function OutputDisclosure({ summary, children, defaultOpen = false, cellI
       <button
         type="button"
         onClick={toggle}
-        className="flex w-full items-center gap-1.5 px-3 py-1 text-[12px] text-[var(--muted)] hover:text-[var(--text)]"
+        className="flex w-full items-center gap-1.5 px-3 py-1 text-[12px] text-[var(--muted)] hover:text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent-run)]"
         aria-expanded={open}
       >
         <span className="inline-block transition-transform" style={{ transform: open ? 'rotate(90deg)' : 'none' }}>

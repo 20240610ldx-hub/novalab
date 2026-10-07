@@ -1,9 +1,12 @@
-/* NovaLab design tokens — clean-room 复刻 Claude Science 气质（spec §10, ADR-004） */
+/* NovaLab design tokens — clean-room 复刻 Claude Science 气质（spec §10, ADR-004）
+ * A-4（Q 线）：双主题——:root = 暗色（默认），[data-theme='light'] = 浅色覆盖；
+ * 结构规则（tab pill / 徽章 / 输出面板 / 分隔线）两主题共用。 */
 @import 'tailwindcss';
 
 :root {
   --bg: #0b0b0c;
   --panel: #141416;
+  --panel-2: #19191c; /* stdout / text-plain 中性输出面板底（A-4 #3） */
   --border: #26262a;
   --text: #e6e6e9;
   --muted: #8b8b93;
@@ -14,7 +17,44 @@
   --diff-add: #1f3b2a;
   --diff-del: #3b1f24;
   --sel-bg: #26364e; /* CM6 选区 */
+  --err-text: #e08a8a; /* A-3 #20：stderr/traceback 面板红粉字 */
+  --err-panel: #171012; /* 错误面板底（比 --panel 微红） */
+  --err-border: #e05252; /* 错误面板红左竖框 / 实心红 pill */
+  --err-line: #3b1f24; /* 编辑器出错行整行高亮（CM6 + 只读卡共用） */
+  --chip-bg: #1c1c1f; /* 语言 chip 中性 pill 底 */
+  --chip-text: #9a9aa2;
+  --tab-strip: var(--bg); /* tab 条底 */
+  --tab-active: #1d1d21; /* active tab pill = 提亮底（A-4 #6） */
+  --gutter-fg: #6a6a72; /* CM6 行号（A-4 #8） */
+  --active-line: rgba(255, 255, 255, 0.025);
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* A-4：浅色主题 token 集（Owner 参考图取色） */
+[data-theme='light'] {
+  --bg: #fbfbfb;
+  --panel: #ededed;
+  --panel-2: #f2f2f2;
+  --border: #e4e4e4;
+  --text: #1f1f1f;
+  --muted: #8a8a8a;
+  --accent-run: #b07f2a;
+  --accent-ok: #3d9970;
+  --accent-err: #d4453f;
+  --accent-stale: #9a9aa0;
+  --diff-add: #dcf2e3;
+  --diff-del: #f9d8d8;
+  --sel-bg: #cfe0f5;
+  --err-text: #b03a34;
+  --err-panel: #fdeeee;
+  --err-border: #d4453f;
+  --err-line: #f6d7d7;
+  --chip-bg: #e6e6e6;
+  --chip-text: #555555;
+  --tab-strip: #f3f3f3;
+  --tab-active: #ffffff;
+  --gutter-fg: #b0b0b0;
+  --active-line: rgba(0, 0, 0, 0.03);
 }
 
 html,
@@ -28,6 +68,96 @@ body {
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 13px;
+}
+
+/* ---- 输出面板（A-3 #20 / A-4 #3/#22，Q 线） ----
+ * 中性面板：stdout / text-plain / 表格 = 极细边框圆角、--panel-2 底；
+ * 错误面板：stderr / traceback / RuntimeWarning = 着色底 + 红左竖框 + 红系字；
+ * 两者内部滚动 max-height ≈420px（短输出不出滚动条）；
+ * wrote 行在面板外下方（muted 纯文本无边框，A-4 #2）。 */
+.nl-out-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  max-height: 420px;
+  overflow-y: auto;
+}
+.nl-out-err {
+  border: none;
+  border-left: 3px solid var(--err-border);
+  border-radius: 4px;
+  background: var(--err-panel);
+  color: var(--err-text);
+}
+
+/* 细滚动条（#22）：webkit + firefox 双轨 */
+.nl-scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.nl-scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.nl-scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.nl-scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.nl-scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-stale);
+}
+
+/* SessionModal 只读代码卡的出错行高亮（#24 / A-4 #4，与 CM6 装饰同源变量） */
+.nl-err-line {
+  background-color: var(--err-line);
+}
+
+/* ---- A-4 #6：tab pill（TabBar 为禁改文件，结构选择器覆盖） ----
+ * active = 提亮底 + 1px 边框 + 微影（浅色条上白 pill）；inactive = 纯 muted 文本。 */
+div[role='tab'] {
+  border-radius: 9999px;
+  border: 1px solid transparent;
+}
+div[role='tab'][aria-selected='true'] {
+  background: var(--tab-active);
+  border-color: var(--border);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+  color: var(--text);
+}
+div[role='tab']:not([aria-selected='true']) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+/* header 会话 pill 统一 1px 边框 pill 样式（SessionBar 禁改，title 钩子覆盖） */
+button[title^='session switcher'],
+button[title^='Session notebook'] {
+  border: 1px solid var(--border);
+}
+
+/* ---- A-4 #7：cell 头徽章（CellHeader 禁改，title/结构钩子覆盖） ----
+ * [n] 执行计数 = 纯 muted 文本无框；语言 chip = 中性 pill；
+ * error (line N) = 实心红 pill 白字（双主题）。 */
+section[data-cell-id] span[title='execution count'] {
+  background: transparent;
+  padding-left: 0;
+  padding-right: 0;
+  color: var(--muted);
+}
+section[data-cell-id] div.group > span.rounded-full {
+  background: var(--chip-bg);
+  border-color: transparent;
+  color: var(--chip-text);
+}
+span[title='最近一次运行失败'] {
+  background: var(--err-border);
+  color: #fff;
+  border-radius: 9999px;
+  padding: 1px 8px;
 }
 
 /* ---- CellEditor 语法着色 tokens（暗色，见 components/CellEditor.tsx overlay） ---- */
@@ -53,3 +183,26 @@ body {
 .nl-bi {
   color: #56b6c2;
 } /* builtin */
+
+/* A-4：浅色主题语法着色（Owner 参考图取色） */
+[data-theme='light'] .nl-com {
+  color: #9a9a9a;
+}
+[data-theme='light'] .nl-str {
+  color: #2f7d32;
+}
+[data-theme='light'] .nl-num {
+  color: #1863c9;
+}
+[data-theme='light'] .nl-kw {
+  color: #c21a87;
+}
+[data-theme='light'] .nl-fn {
+  color: #6f42c1;
+}
+[data-theme='light'] .nl-cls {
+  color: #a8631c;
+}
+[data-theme='light'] .nl-bi {
+  color: #0e7490;
+}

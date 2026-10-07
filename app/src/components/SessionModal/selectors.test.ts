@@ -85,3 +85,46 @@ describe('段 header 与计数', () => {
     expect(summaryLabel(0, 0)).toBe('0 sessions · 0 cells');
   });
 });
+
+/* ---- A-3 #24：完整 cell 卡派生 selector（Q 线） ---- */
+
+import { errorLineFromTraceback, execBadge, snapshotHasOutput } from './selectors';
+
+const TB_SAMPLE = [
+  'Traceback (most recent call last):',
+  '  File "<cell e5d6f7a8>", line 2, in <module>',
+  '    row = survey.iloc[0].to_dict()',
+  '  File "/py/novakernel/runner.py", line 88, in _exec',
+  '    exec(code, ns)',
+  '  File "<cell e5d6f7a8>", line 4, in <module>',
+  '    label = row["county"]',
+  'KeyError: \'county\'',
+].join('\n');
+
+describe('errorLineFromTraceback（快照文本 → 出错行号）', () => {
+  it('取最后一个 <cell …> 用户帧行号（stdlib 帧跳过）', () => {
+    expect(errorLineFromTraceback(TB_SAMPLE)).toBe(4);
+  });
+
+  it('null / 无用户帧 → null', () => {
+    expect(errorLineFromTraceback(null)).toBeNull();
+    expect(errorLineFromTraceback('')).toBeNull();
+    expect(errorLineFromTraceback('File "/usr/lib/python/x.py", line 9, in f')).toBeNull();
+  });
+});
+
+describe('snapshotHasOutput / execBadge', () => {
+  it('无任何输出字段 → false；stdout/stderr/traceback/writes/mimeKeys 任一 → true', () => {
+    expect(snapshotHasOutput(snap())).toBe(false);
+    expect(snapshotHasOutput(snap({}, { stdout: 'hi' }))).toBe(true);
+    expect(snapshotHasOutput(snap({}, { stderr: 'warn' }))).toBe(true);
+    expect(snapshotHasOutput(snap({}, { traceback: 'boom' }))).toBe(true);
+    expect(snapshotHasOutput(snap({}, { writes: ['C:/tmp/x.csv'] }))).toBe(true);
+    expect(snapshotHasOutput(snap({}, { mimeKeys: ['image/png'] }))).toBe(true);
+  });
+
+  it('execBadge：execCount>0 用计数，否则 1-based 序号', () => {
+    expect(execBadge(snap({ execCount: 7 }), 0)).toBe('[7]');
+    expect(execBadge(snap({ execCount: 0 }), 2)).toBe('[3]');
+  });
+});

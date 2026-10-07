@@ -11,6 +11,7 @@ import {
 import { bridge } from '../../bridge/client';
 import { useNotebook } from '../../store/notebook';
 import { useSession } from '../../store/session';
+import { useUi } from '../../store/ui';
 import {
   baseName,
   dirName,
@@ -31,21 +32,18 @@ import {
 } from './helpers';
 
 /* ------------------------------------------------------------------ */
-/* P2.8 工作区 sidebar（intent M8 / spec 附录 A-2）                       */
+/* 工作区文件视图（intent M8 / spec 附录 A-2 + A-3 #23，Q 线重构）          */
 /*                                                                     */
 /* 交互模式借鉴 refs/jupyterlab filebrowser（视觉 clean-room）：           */
 /* - DirListing：单击选中（ctrl 切换 / shift 范围）、双击打开或进入目录、   */
 /*   目录在前按名排序、行内 rename 输入框（.py 选中主名保留扩展名）；        */
 /* - crumbs.ts：路径面包屑，点段导航；                                    */
 /* - model.ts：cd/refresh 语义 → 懒加载目录 + ⟳ 全量刷新。                */
-/* 增补（Claude Science 复刻）：左缘 icon rail 可折叠、右键/⋯ 菜单          */
-/* （新建 notebook=marimo 头模板 / 新建文件夹 / 重命名 / 删除需输入文件名 /  */
-/* 设为工作区=fs.setRoot）、最近打开（localStorage）。                    */
+/* A-3 #23：原左缘 icon rail sidebar 已移除——Files 升级为顶栏分段控件      */
+/* `Files | Notebook` 切换的**全幅文件视图**（FilesView：树放大版 + 最近    */
+/* 打开右栏），避免双入口。useWorkspaceSync 由 App 挂载（root 镜像 +        */
+/* 最近打开记录，与视图无关全局生效）。                                     */
 /* ------------------------------------------------------------------ */
-
-const COLLAPSE_KEY = 'novalab.sidebar.collapsed';
-
-type Tab = 'files' | 'recent';
 
 interface PromptState {
   mode: 'new-notebook' | 'new-folder' | 'rename';
@@ -75,19 +73,54 @@ function childRel(dirRel: string, name: string): string {
   return dirRel === '' ? name : `${dirRel}/${name}`;
 }
 
+/** 全幅 Files 视图的行缩进（放大版：比原 sidebar 宽一档）。 */
+const ROW_INDENT_PX = 18;
+
+function indentPx(depth: number): string {
+  return `${8 + depth * ROW_INDENT_PX}px`;
+}
+
 /* ------------------------------------------------------------------ */
-/* Sidebar 根：rail + 面板（files / recent 两个 tab）                     */
+/* FilesView：全幅文件视图（A-3 #23）= 树（放大版）+ 最近打开右栏            */
 /* ------------------------------------------------------------------ */
 
-export function Sidebar() {
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(COLLAPSE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const [tab, setTab] = useState<Tab>('files');
+/** 打开 notebook：同步 ?path=（刷新可恢复）+ store.openNotebook + 切回 Notebook 视图。 */
+export function useOpenNotebookAbs() {
+  return useCallback((abs: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('path', abs);
+    window.history.replaceState(null, '', url.toString());
+    // guard（store/session.ts）会先退出历史只读视图再打开
+    void useNotebook.getState().openNotebook(abs);
+    useUi.getState().setView('notebook'); // 双击文件 → 跳转 Notebook 视图
+  }, []);
+}
+
+/**
+ * 全局工作区副作用（App 挂载，与视图切换无关）：
+ * - fs.root 镜像（header 工作区标题 / FilesView 消费）；
+ * - notebookPath 变化（无论入口）→ 记录最近打开（localStorage）。
+ */
+export function useWorkspaceSync() {
+  useEffect(() => {
+    void useSession.getState().syncRoot();
+    return useNotebook.subscribe((s, prev) => {
+      if (s.notebookPath && s.notebookPath !== prev.notebookPath) {
+        try {
+          const entry: RecentEntry = { path: s.notebookPath, openedAt: new Date().toISOString() };
+          saveRecent(localStorage, pushRecent(loadRecent(localStorage), entry));
+        } catch {
+          /* 忽略 */
+        }
+        void useSession.getState().syncRoot();
+      }
+    });
+  }, []);
+}
+
+export function FilesView() {
+  const openNotebookAbs = useOpenNotebookAbs();
+  // 挂载时读 localStorage（每次切入 Files 视图重挂载 → 列表总是最新）
   const [recents, setRecents] = useState<RecentEntry[]>(() => {
     try {
       return loadRecent(localStorage);
@@ -95,44 +128,6 @@ export function Sidebar() {
       return [];
     }
   });
-
-  const persistCollapsed = (v: boolean) => {
-    setCollapsed(v);
-    try {
-      localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0');
-    } catch {
-      /* 忽略 */
-    }
-  };
-
-  /** 打开 notebook：同步 ?path=（刷新可恢复，与 App.openPath 同语义）+ store.openNotebook。 */
-  const openNotebookAbs = useCallback((abs: string) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set('path', abs);
-    window.history.replaceState(null, '', url.toString());
-    // guard（store/session.ts）会先退出历史只读视图再打开
-    void useNotebook.getState().openNotebook(abs);
-  }, []);
-
-  // notebookPath 变化（无论入口）→ 记录最近打开 + 同步 bridge 默认 root
-  useEffect(() => {
-    void useSession.getState().syncRoot();
-    return useNotebook.subscribe((s, prev) => {
-      if (s.notebookPath && s.notebookPath !== prev.notebookPath) {
-        const entry: RecentEntry = { path: s.notebookPath, openedAt: new Date().toISOString() };
-        setRecents((list) => {
-          const next = pushRecent(list, entry);
-          try {
-            saveRecent(localStorage, next);
-          } catch {
-            /* 忽略 */
-          }
-          return next;
-        });
-        void useSession.getState().syncRoot();
-      }
-    });
-  }, []);
 
   const removeRecent = (p: string) => {
     setRecents((list) => {
@@ -156,71 +151,16 @@ export function Sidebar() {
   };
 
   return (
-    <div className="flex h-full shrink-0">
-      {/* 左缘 icon rail */}
-      <nav className="flex w-9 shrink-0 flex-col items-center gap-1 border-r border-[var(--border)] bg-[var(--panel)] py-2">
-        <RailButton
-          glyph="▤"
-          title="Files — 工作区文件树"
-          active={!collapsed && tab === 'files'}
-          onClick={() => {
-            setTab('files');
-            persistCollapsed(false);
-          }}
-        />
-        <RailButton
-          glyph="◷"
-          title="Recent — 最近打开"
-          active={!collapsed && tab === 'recent'}
-          onClick={() => {
-            setTab('recent');
-            persistCollapsed(false);
-          }}
-        />
-        <span className="flex-1" />
-        <RailButton
-          glyph={collapsed ? '⟩' : '⟨'}
-          title={collapsed ? '展开 sidebar' : '折叠 sidebar'}
-          active={false}
-          onClick={() => persistCollapsed(!collapsed)}
-        />
-      </nav>
-
-      {!collapsed && (
-        <div className="flex w-60 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)]">
-          {tab === 'files' ? (
-            <FilesPanel onOpenNotebook={openNotebookAbs} />
-          ) : (
-            <RecentPanel recents={recents} onOpen={openNotebookAbs} onRemove={removeRecent} onClear={clearRecents} />
-          )}
-        </div>
-      )}
+    <div className="flex min-h-0 flex-1">
+      {/* 全幅文件浏览面板（树放大版：面包屑 + 列表 + 操作菜单） */}
+      <div className="flex min-w-0 flex-1 flex-col bg-[var(--panel)]">
+        <FilesPanel onOpenNotebook={openNotebookAbs} />
+      </div>
+      {/* 最近打开右栏（原 sidebar recent tab 的归处） */}
+      <div className="flex w-80 shrink-0 flex-col border-l border-[var(--border)] bg-[var(--panel)]">
+        <RecentPanel recents={recents} onOpen={openNotebookAbs} onRemove={removeRecent} onClear={clearRecents} />
+      </div>
     </div>
-  );
-}
-
-function RailButton({
-  glyph,
-  title,
-  active,
-  onClick,
-}: {
-  glyph: string;
-  title: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      className={`flex h-7 w-7 items-center justify-center rounded text-[14px] ${
-        active ? 'bg-[var(--bg)] text-[var(--accent-run)]' : 'text-[var(--muted)] hover:text-[var(--text)]'
-      }`}
-    >
-      {glyph}
-    </button>
   );
 }
 
@@ -439,10 +379,10 @@ function FilesPanel({ onOpenNotebook }: { onOpenNotebook: (abs: string) => void 
         role="treeitem"
         aria-selected={isSelected}
         aria-expanded={isDir ? isOpen : undefined}
-        className={`group flex cursor-default items-center gap-1.5 rounded px-1 py-[3px] pr-1 text-[12px] select-none ${
+        className={`group flex cursor-default items-center gap-2 rounded px-1.5 py-1 pr-2 text-[13px] select-none ${
           isSelected ? 'bg-[var(--sel-bg)]' : 'hover:bg-[var(--bg)]'
         } ${!isDir && !notebook ? 'text-[var(--muted)] opacity-60' : ''}`}
-        style={{ paddingLeft: `${6 + depth * 14}px` }}
+        style={{ paddingLeft: indentPx(depth) }}
         title={isDir ? rel : `${rel}${notebook ? '' : ' — 非 notebook，不可打开'}`}
         onClick={(e) => onRowClick(e, rel)}
         onDoubleClick={() => onRowDblClick(rel, entry)}
@@ -527,9 +467,9 @@ function FilesPanel({ onOpenNotebook }: { onOpenNotebook: (abs: string) => void 
 
   return (
     <>
-      {/* 面板头：root 名 + 快捷动作 */}
-      <div className="flex items-center gap-1 border-b border-[var(--border)] px-2 py-1.5">
-        <span className="min-w-0 flex-1 truncate text-[11px] tracking-wider text-[var(--muted)] uppercase">
+      {/* 面板头：root 名 + 快捷动作（全幅视图放大版） */}
+      <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2.5">
+        <span className="min-w-0 flex-1 truncate text-[12px] tracking-wider text-[var(--muted)] uppercase">
           {root === null ? 'workspace' : baseName(root) || root}
         </span>
         <IconBtn
@@ -552,7 +492,7 @@ function FilesPanel({ onOpenNotebook }: { onOpenNotebook: (abs: string) => void 
       <div
         role="tree"
         aria-label="workspace files"
-        className="min-h-0 flex-1 overflow-y-auto px-1 py-1"
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
         onContextMenu={(e) => {
           // 空白背景 → 所在层级菜单（root）
           if (e.target === e.currentTarget) openMenu(e, null, null, '');
@@ -643,7 +583,7 @@ function Breadcrumbs({ root, onNavigate }: { root: string; onNavigate: (dir: str
     crumbs.push({ label: parts[i]!, dir: navigable ? acc : '' });
   }
   return (
-    <div className="flex items-center gap-0.5 overflow-x-auto whitespace-nowrap border-b border-[var(--border)] px-2 py-1 text-[11px] text-[var(--muted)] [scrollbar-width:none]">
+    <div className="flex items-center gap-0.5 overflow-x-auto whitespace-nowrap border-b border-[var(--border)] px-4 py-1.5 text-[12px] text-[var(--muted)] [scrollbar-width:none]">
       {crumbs.map((c, i) => (
         <span key={c.dir || c.label} className="flex items-center gap-0.5">
           {i > 0 && <span aria-hidden className="text-[var(--border)]">›</span>}
@@ -792,14 +732,14 @@ function PromptInput({
   };
 
   return (
-    <div className="px-1 py-[2px]" style={{ paddingLeft: `${6 + depth * 14}px` }}>
+    <div className="px-1.5 py-[3px]" style={{ paddingLeft: indentPx(depth) }}>
       <input
         ref={ref}
         defaultValue={initial}
         spellCheck={false}
         onKeyDown={onKey}
         aria-label={mode === 'rename' ? 'rename' : mode}
-        className={`w-full rounded border bg-[var(--bg)] px-1 py-[2px] text-[12px] text-[var(--text)] outline-none ${
+        className={`w-full max-w-md rounded border bg-[var(--bg)] px-1.5 py-1 text-[13px] text-[var(--text)] outline-none ${
           error ? 'border-[var(--accent-err)]' : 'border-[var(--accent-run)]'
         }`}
       />

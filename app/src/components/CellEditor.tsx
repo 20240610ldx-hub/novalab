@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { Check, Copy } from 'lucide-react';
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction } from '@codemirror/state';
 import {
   Decoration,
@@ -215,15 +216,15 @@ const darkTheme = EditorView.theme(
     '.cm-line': { padding: '0 8px' },
     '.cm-gutters': {
       backgroundColor: 'transparent',
-      color: 'var(--muted)',
+      color: 'var(--gutter-fg)',
       border: 'none',
       borderRight: '1px solid var(--border)',
       paddingRight: '4px',
     },
-    '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.025)' },
+    '.cm-activeLine': { backgroundColor: 'var(--active-line)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text)' },
-    // P2.9 出错行红底（--diff-del 系，贴参考图）；行装饰类落在 .cm-line 上
-    '.cm-line.cm-error-line': { backgroundColor: 'var(--diff-del)' },
+    // P2.9 出错行高亮（A-4 #4：--err-line 变量，双主题；浅 #f6d7d7 / 暗 --diff-del 系）
+    '.cm-line.cm-error-line': { backgroundColor: 'var(--err-line)' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': {
       backgroundColor: 'var(--sel-bg)',
@@ -232,6 +233,72 @@ const darkTheme = EditorView.theme(
   },
   { dark: true },
 );
+
+/* ------------------------------------------------------------------ */
+/* 复制按钮（A-3 #21，Q 线）：代码区右上角 clipboard 图标，hover 显现，      */
+/* 点击 navigator.clipboard.writeText + 短暂 ✓ 反馈。CellEditor 与          */
+/* SessionModal 只读 cell 卡（#24）共用本组件。                             */
+/* ------------------------------------------------------------------ */
+
+export function CopyButton({
+  getText,
+  label = 'copy code',
+}: {
+  /** 点击时取当前文本（ref 语义，避免闭包过期）。 */
+  getText: () => string;
+  label?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const onClick = (e: ReactMouseEvent) => {
+    e.stopPropagation();
+    const text = getText();
+    const fallback = () => {
+      // 非安全上下文 / clipboard API 被拒：隐藏 textarea + execCommand 兜底
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch {
+        /* 忽略 */
+      }
+    };
+    const p = navigator.clipboard?.writeText(text);
+    if (p) p.catch(fallback);
+    else fallback();
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={copied ? '已复制' : '复制代码'}
+      aria-label={label}
+      className="flex h-6 w-6 items-center justify-center rounded border border-[var(--border)] bg-[var(--panel)] text-[var(--muted)] opacity-0 transition-opacity group-hover:opacity-100 hover:!text-[var(--text)] focus-visible:opacity-100"
+    >
+      {copied ? (
+        <Check size={13} className="text-[var(--accent-ok)]" aria-hidden />
+      ) : (
+        <Copy size={13} aria-hidden />
+      )}
+    </button>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -257,6 +324,9 @@ export function CellEditor({ value, onChange, errorLine = null }: CellEditorProp
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  // #21 复制按钮取最新代码（不受创建时闭包影响）
+  const valueRef = useRef(value);
+  valueRef.current = value;
   // P2.8：会话只读（历史视图）→ 编辑器不可写
   const readOnly = useSession((s) => s.readOnly);
   const roComp = useMemo(() => new Compartment(), []);
@@ -317,5 +387,13 @@ export function CellEditor({ value, onChange, errorLine = null }: CellEditorProp
     view.dispatch({ effects: setErrorLine.of(errorLine ?? null) });
   }, [errorLine]);
 
-  return <div ref={hostRef} className="min-w-0 text-[var(--text)]" />;
+  return (
+    <div className="relative min-w-0">
+      <div ref={hostRef} className="min-w-0 text-[var(--text)]" />
+      {/* #21：代码区右上角复制按钮（hover 显现，✓ 短暂反馈） */}
+      <div className="absolute right-2 top-1.5 z-10">
+        <CopyButton getText={() => valueRef.current} />
+      </div>
+    </div>
+  );
 }

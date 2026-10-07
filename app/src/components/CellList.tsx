@@ -36,31 +36,35 @@ function CellView({
   onRun,
 }: CellProps) {
   const hasOutput = !isOutputEmpty(cell.output);
-  const border = active ? 'var(--accent-run)' : 'var(--border)';
 
   return (
     <section
       data-cell-id={cell.id}
       onClick={() => onActivate(cell.id)}
-      className="group mb-3 overflow-hidden rounded-md border bg-[var(--panel)]"
-      style={{ borderColor: border }}
+      className="group border-b border-[var(--border)] px-4 pt-1.5 pb-3 last:border-b-0"
     >
       <CellHeader cell={cell} onRun={onRun} compileError={compileError} />
 
-      {mounted ? (
-        <CellEditor
-          value={cell.code}
-          onChange={(code) => onCodeChange(cell.id, code)}
-          errorLine={
-            cell.status === 'error' ? lastCellFrameLine(cell.output?.traceback?.frames) : null
-          }
-        />
-      ) : (
-        // 静态占位：与编辑器同字体/行高，保证滚动几何接近、切回时无跳变
-        <pre className="whitespace-pre overflow-x-auto border-l border-[var(--border)] px-3 py-[6px] text-[13px] leading-[1.65] text-[var(--text)]">
-          {cell.code}
-        </pre>
-      )}
+      {/* A-4 #5：代码面板 = 与页面底色分层的圆角面板（active 琥珀 1px 描边），无重边框 */}
+      <div
+        className="mt-1 overflow-hidden rounded-md bg-[var(--panel)]"
+        style={{ border: `1px solid ${active ? 'var(--accent-run)' : 'transparent'}` }}
+      >
+        {mounted ? (
+          <CellEditor
+            value={cell.code}
+            onChange={(code) => onCodeChange(cell.id, code)}
+            errorLine={
+              cell.status === 'error' ? lastCellFrameLine(cell.output?.traceback?.frames) : null
+            }
+          />
+        ) : (
+          // 静态占位：与编辑器同字体/行高，保证滚动几何接近、切回时无跳变
+          <pre className="whitespace-pre overflow-x-auto px-3 py-[6px] text-[13px] leading-[1.65] text-[var(--text)]">
+            {cell.code}
+          </pre>
+        )}
+      </div>
 
       {/* P2.3 DiffOverlay 挂载点：目标为本 cell 的 pending diff 行内审阅 UI（无则 null） */}
       <DiffOverlay cellId={cell.id} />
@@ -161,7 +165,7 @@ export function CellList() {
   }
 
   return (
-    <div ref={listRef} className="p-4">
+    <div ref={listRef} className="pb-4">
       {cells.map((c) => (
         <CellView
           key={c.id}

@@ -37,8 +37,36 @@ const { WebSocket } = require('ws');
 
 const DEMOS = join(root, 'demos');
 const STATES_DIR = join(root, 'docs', 'demos', 'states');
-const APP_URL = 'http://localhost:5199/';
+// Q 线：5199 可能被跨线残留的失响应监听器占住（TCP hang / bind EADDRINUSE 但无
+// 健康 HTTP），且多线并发跑本脚本会竞抢同一备用端口——备用端口按 pid 抖动 +
+// 空闲扫描选取，保证本 run 独占。
+const APP_PORT_DEFAULT = 5199;
+let APP_PORT = APP_PORT_DEFAULT;
+let APP_URL = `http://localhost:${APP_PORT}/`;
 const BRIDGE_URL = 'ws://127.0.0.1:7788';
+
+/** bind 试探（唯一与 vite bind 同语义的探测）：跨线残留的坏 IPv6 监听器
+ * （Get-NetTCPConnection 里 State 为空、netstat 不可见、connect 立即 RST）
+ * 只能靠真 bind 暴露。双族皆可 bind 才视为空闲。 */
+function tryBind(port, host) {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.listen({ port, host }, () => {
+      s.close(() => resolve(true));
+    });
+  });
+}
+
+/** 备用端口候选：pid 抖动起点 + 步进扫描，双族 bind 皆成功者中选。 */
+async function pickFreeAppPort() {
+  const base = 5299 + (process.pid % 4) * 100;
+  for (let i = 0; i < 8; i++) {
+    const p = base + i * 7;
+    if ((await tryBind(p, '::1')) && (await tryBind(p, '127.0.0.1'))) return p;
+  }
+  return base + 999; // 全占的极端情况：直接试，失败 loudly
+}
 
 const DEMO_PY = join(DEMOS, 'demo.py');
 const ERROR_PY = join(DEMOS, 'gallery-error.py');
@@ -152,22 +180,38 @@ function killStartedServers() {
   }
 }
 
-/** TCP 探测（1s 超时）：端口活着即视为服务已在跑（复用，不杀不管）。 */
-function probePort(port, timeoutMs = 1200) {
+/**
+ * TCP 探测三态（1.2s 超时）：
+ * - 'up'：连接成功（服务在跑）；
+ * - 'free'：立即 RST（端口真空闲，可 bind）；
+ * - 'hung'：连接挂到超时 = 端口被占但 accept 队列满/进程失响应（跨线残留
+ *   僵尸监听器的特征）——此时任何 vite bind 都会 strictPort 冲突，必须换端口。
+ */
+function probePortState(port, timeoutMs = 1200, host = '127.0.0.1') {
   return new Promise((resolve) => {
-    const s = net.connect({ host: '127.0.0.1', port });
+    const s = net.connect({ host, port });
     let done = false;
-    const finish = (ok) => {
+    const finish = (st) => {
       if (done) return;
       done = true;
       s.destroy();
-      resolve(ok);
+      resolve(st);
     };
     s.setTimeout(timeoutMs);
-    s.once('connect', () => finish(true));
-    s.once('error', () => finish(false));
-    s.once('timeout', () => finish(false));
+    s.once('connect', () => finish('up'));
+    s.once('error', () => finish('free'));
+    s.once('timeout', () => finish('hung'));
   });
+}
+
+/** HTTP 健康探测（TCP LISTEN ≠ 能服务：跨线残留进程可能占端口但不响应）。 */
+async function probeHttp(url, timeoutMs = 3000) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function waitForHttp(url, timeoutMs = 120000) {
@@ -182,9 +226,9 @@ async function waitForHttp(url, timeoutMs = 120000) {
   }
 }
 
-/** spawn pnpm <script>（shell:true；输出环形缓存，早退时打印尾部供诊断）。 */
-function startDev(script) {
-  const child = spawn('pnpm', [script], {
+/** spawn pnpm <args>（shell:true；输出环形缓存，早退时打印尾部供诊断）。 */
+function startDevPnpm(args, name) {
+  const child = spawn('pnpm', args, {
     cwd: root,
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -198,11 +242,21 @@ function startDev(script) {
   child.stderr.on('data', cap);
   child.on('exit', (code) => {
     if (code !== 0 && code !== null) {
-      console.error(`[gallery] ${script} 早退 code=${code}，输出尾部:\n` + tail.join('\n'));
+      console.error(`[gallery] ${name} 早退 code=${code}，输出尾部:\n` + tail.join('\n'));
     }
   });
-  startedServers.push({ child, name: script });
+  startedServers.push({ child, name });
   return child;
+}
+
+/** spawn pnpm <script>（默认端口复用路径）。 */
+function startDev(script) {
+  return startDevPnpm([script], script);
+}
+
+/** 备用端口自起 vite：pnpm exec 直传参数（双层 pnpm run 会吞/字面化 `--` 分隔）。 */
+function startDevAppOn(port) {
+  return startDevPnpm(['--filter', '@novalab/app', 'exec', 'vite', '--port', String(port), '--strictPort'], `dev:app@${port}`);
 }
 
 /* ---------------- bridge WS 客户端（setup 用） ---------------- */
@@ -280,10 +334,50 @@ class BridgeClient {
 const log = (...a) => console.log('[gallery]', ...a);
 
 async function openNotebook(page, file) {
+  // Q 线 A-3 #23：视图切换持久化于 localStorage（跨页共享 context）——强制
+  // notebook 视图再导航，防止前序状态（09 Files 视图）残留导致 cell 选择器落空。
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('novalab.view', 'notebook');
+    } catch {
+      /* 忽略 */
+    }
+  });
   await page.goto(APP_URL + '?path=' + encodeURIComponent(file), { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('section[data-cell-id]', { timeout: 40000 });
   const banner = page.locator('text=bridge 未连接');
   if (await banner.count()) throw new Error('前端降级横幅出现：bridge 未连接');
+}
+
+/** 主题直达（A-4）：localStorage + html[data-theme]（模态遮罩挡住 toggle 钮时用）。 */
+async function setTheme(page, theme) {
+  await page.evaluate((t) => {
+    try {
+      localStorage.setItem('novalab.theme', t);
+    } catch {
+      /* 忽略 */
+    }
+    document.documentElement.dataset.theme = t;
+  }, theme);
+  await page.waitForTimeout(250);
+}
+
+/** A-4 浅色证据：切浅色（优先真点 header toggle 钮）→ 拍 <name>-light → 切回暗色。 */
+async function shootLight(page, name) {
+  const toggle = page.locator('button[aria-label="toggle theme"]');
+  if (await toggle.count()) {
+    await toggle.click();
+    await page.waitForTimeout(300);
+  } else {
+    await setTheme(page, 'light');
+  }
+  await shoot(page, `${name}-light`);
+  if (await toggle.count()) {
+    await toggle.click();
+    await page.waitForTimeout(200);
+  } else {
+    await setTheme(page, 'dark');
+  }
 }
 
 /** 主列内部滚动 → 溢出时临时增高视口，fullPage 拍全后还原 1440x900。
@@ -431,12 +525,34 @@ state('01', '01-open-idle', async (ctx) => {
   await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
-  // sidebar 文件树可见（root = demos/）
+  await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
+  // A-3 #23：顶栏分段控件 Files ↔ Notebook（rail 已移除，文件树在全幅 Files 视图）
+  await page.locator('button[title="Files 视图"]').click();
   await page.waitForSelector('[role="tree"][aria-label="workspace files"] [role="treeitem"]', {
     timeout: 15000,
   });
+  await page.locator('button[title="Notebook 视图"]').click();
   await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
+  // A-3 #19：JetBrains Mono 真正加载（fontsource 打包，document.fonts 断言）
+  const fontOk = await page.evaluate(() => document.fonts.check('13px "JetBrains Mono"'));
+  if (!fontOk) throw new Error('JetBrains Mono 未生效（document.fonts.check false）');
+  // A-3 #21：代码区复制按钮 → 点击 → clipboard 读回与内核代码一致
+  await ctx.context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.locator('section[data-cell-id="a1b2c3d4"] .cm-content').hover();
+  const copyBtn = page.locator('section[data-cell-id="a1b2c3d4"] button[aria-label="copy code"]');
+  await copyBtn.waitFor({ timeout: 5000 });
+  await copyBtn.click();
+  await page.waitForTimeout(250);
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  const cellCode = await ctx.bridge.rpc('agent.cellCode', { cellId: 'a1b2c3d4' });
+  // CRLF 归一：文件落盘 CRLF / CM6 文档 LF 的换行差异不算读回不一致
+  const norm = (s) => String(s).replace(/\r\n/g, '\n');
+  if (norm(clip) !== norm(cellCode.code)) {
+    throw new Error('复制钮 clipboard 读回不一致: ' + String(clip).slice(0, 60));
+  }
+  ctx.notes.push('01: #19 JetBrains Mono fonts.check=true；#21 复制钮 clipboard 读回一致');
   await shoot(page, '01-open-idle');
+  await shootLight(page, '01-open-idle'); // A-4 浅色证据
   await page.close();
 });
 
@@ -499,6 +615,7 @@ state('03', '03-error-fixcard', async (ctx) => {
   await page.waitForSelector('aside span:text-is("run.error")', { timeout: 15000 });
   await page.waitForSelector('aside button:has-text("修复（traceback")', { timeout: 15000 });
   await shoot(page, '03-error-fixcard');
+  await shootLight(page, '03-error-fixcard'); // A-4 浅色证据（切回暗色后再交给 11）
   ctx.errorPage = page; // 交给紧随其后的 11（agent-stream）复用——必须赶在后续状态
   // 重新 notebook.open 之前：bridge 的 cache 还是 gallery-error.py，Agent 工具
   // （get_cell_output/propose_code_change）才能按 cellId 命中正确 notebook。
@@ -689,6 +806,8 @@ state('09', '09-sidebar-actions', async (ctx) => {
   await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
+  // A-3 #23：文件操作在全幅 Files 视图（顶栏分段控件切入；rail sidebar 已移除）
+  await page.locator('button[title="Files 视图"]').click();
   await page.waitForSelector('[role="tree"][aria-label="workspace files"] [role="treeitem"]', {
     timeout: 15000,
   });
@@ -702,7 +821,7 @@ state('09', '09-sidebar-actions', async (ctx) => {
   await page.waitForSelector('[role="treeitem"]:has-text("gallery-created.py")', { timeout: 10000 });
   await page.waitForTimeout(400);
   // 面包屑（root 路径分段）同框可见
-  await page.waitForSelector('nav + div >> text=demos', { timeout: 5000 }).catch(() => {});
+  await page.locator('main >> text=demos').first().waitFor({ timeout: 5000 }).catch(() => {});
   await shoot(page, '09-sidebar-actions');
   await page.close();
 });
@@ -713,8 +832,8 @@ state('10', '10-settings', async (ctx) => {
   await openNotebook(page, DEMO_PY);
   await page.locator('button[title="设置（provider 管理）"]').click();
   await page.waitForSelector('h2:text-is("设置 · LLM Provider")', { timeout: 10000 });
-  // 明文存储警告（STORAGE_WARNING 原文关键句）+ provider 列表/dev 兜底行
-  await page.getByText('明文仅存于本机浏览器 localStorage').waitFor({ timeout: 10000 });
+  // 存储说明原文（providers.ts STORAGE_WARNING，keychain 迁移后为加密落盘陈述）
+  await page.getByText('keys encrypted at rest', { exact: false }).waitFor({ timeout: 10000 });
   await page.waitForTimeout(300);
   await shoot(page, '10-settings');
   await page.close();
@@ -857,6 +976,10 @@ state('15', '15-session-modal', async (ctx) => {
   }
   await page.waitForTimeout(600); // 快照行渲染稳定
   await shoot(page, '15-session-modal');
+  // A-4 浅色证据：模态遮罩挡住 header toggle 钮 → DOM 直达主题（拍完即回暗色）
+  await setTheme(page, 'light');
+  await shoot(page, '15-session-modal-light');
+  await setTheme(page, 'dark');
 
   // footer「.ipynb」导出 → 断言 .novalab/sessions/*.ipynb 落盘（node 侧 fs）
   const status = dialog.locator('footer p[aria-live="polite"]');
@@ -902,6 +1025,21 @@ state('15', '15-session-modal', async (ctx) => {
   await page.close();
 });
 
+/** 并发孪生检测：他线 chromium（跑本共享脚本）= bridge/notebook 上下文必互搅。 */
+function chromiumCount() {
+  try {
+    const out = spawnSync('tasklist', ['/FI', 'IMAGENAME eq chromium.exe', '/NH'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return String(out.stdout ?? '')
+      .split('\n')
+      .filter((l) => l.includes('chromium.exe')).length;
+  } catch {
+    return 0;
+  }
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -921,17 +1059,25 @@ async function main() {
   const demoOriginal = fs.readFileSync(DEMO_PY, 'utf8');
 
   // dev 服务：已在跑就复用；没跑就自起（退出前自停，见 killStartedServers）
-  if (await probePort(7788)) {
+  const bridgeState = await probePortState(7788);
+  if (bridgeState === 'up') {
     log('bridge 已在跑（:7788）→ 复用');
+  } else if (bridgeState === 'hung') {
+    throw new Error(':7788 被失响应残留占住（TCP hang）——bridge 无法换端口（app 硬编码 ws://127.0.0.1:7788），请等残留退出或人工清理后重跑');
   } else {
     log('bridge 未跑 → 自起 pnpm dev:bridge');
     startDev('dev:bridge');
   }
-  if (await probePort(5199)) {
-    log('app 已在跑（:5199）→ 复用');
+  // app：只认真 HTTP 200 才复用 :5199（半死监听器/跨线 vite 反复启停让 TCP 状态
+  // 不可信）；否则一律备用端口 5299 自起，彻底避开 strictPort 互斥竞态
+  const appHttp = await probeHttp(`http://localhost:${APP_PORT_DEFAULT}/`);
+  if (appHttp) {
+    log(`app 已在跑（:${APP_PORT_DEFAULT}，HTTP 200）→ 复用`);
   } else {
-    log('app 未跑 → 自起 pnpm dev:app');
-    startDev('dev:app');
+    APP_PORT = await pickFreeAppPort();
+    APP_URL = `http://localhost:${APP_PORT}/`;
+    log(`:${APP_PORT_DEFAULT} 无健康 HTTP 服务 → vite 自起于 :${APP_PORT}（pid 抖动空闲端口）`);
+    startDevAppOn(APP_PORT);
   }
   await waitForHttp(APP_URL);
   log('vite HTTP 200', APP_URL);
@@ -940,6 +1086,16 @@ async function main() {
   await bridge.connect();
   await bridge.rpc('ping');
   log('bridge 已连接', BRIDGE_URL);
+
+  // 并发孪生（他线跑本共享脚本）时 bridge 单实例必互搅（closeAllTabs/kernel.restart
+  // 跨 run 生效）——最多等 10min 让其跑完再起跑
+  let twinWait = 0;
+  while (chromiumCount() > 0 && twinWait < 600000) {
+    if (twinWait === 0) log('检测到并发 chromium（他线画廊）——最多等 10min 避互搅');
+    await new Promise((r) => setTimeout(r, 20000));
+    twinWait += 20000;
+  }
+  if (twinWait > 0) log(`并发等待结束（${Math.round(twinWait / 1000)}s），起跑`);
 
   // 起跑线卫生：关掉遗留上下文 + 清 stale-live 索引（见 reconcileStaleSessions 注释）
   await closeAllTabs(bridge);
@@ -956,6 +1112,7 @@ async function main() {
   const consoleErrors = [];
   const ctx = {
     bridge,
+    context,
     demoOriginal,
     notes: [],
     newPage: async () => {
@@ -1052,6 +1209,24 @@ process.on('exit', killStartedServers);
 process.on('SIGINT', () => {
   killStartedServers();
   process.exit(130);
+});
+
+state('16', '16-showcase-operon', async (ctx) => {
+  const { bridge } = ctx;
+  await closeAllTabs(bridge);
+  const page = await ctx.newPage();
+  const BUNDLE = join(root, 'demos', 'operon-bundle', 'bounded_confidence.py');
+  await openNotebook(page, BUNDLE);
+  // 依次跑到 fig1 保存格（shim cell → bc 模型 sweep → 样式 → fig1）
+  const seq = ['0a13e8c3', '88505df0', '4ad0be09', 'fcf9903b', 'f82bb502', 'a3813757', '678ce65e', '0dc9bdaf', '62ba3cf8'];
+  for (const id of seq) {
+    const rep = await runCellWs(bridge, id);
+    if (!rep.ok) throw new Error(`operon run ${id} 失败: ${JSON.stringify(rep).slice(0, 300)}`);
+  }
+  await expandOutput(page, '62ba3cf8');
+  await page.waitForTimeout(800);
+  await shoot(page, '16-showcase-operon');
+  await page.close();
 });
 
 main().catch((err) => {

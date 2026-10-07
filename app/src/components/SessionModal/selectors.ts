@@ -53,3 +53,40 @@ export function sessionHeaderText(seg: SessionSegment): string {
 export function summaryLabel(sessionCount: number, cellCount: number): string {
   return `${sessionCount} sessions · ${cellCount} cells`;
 }
+
+/* ---- A-3 #24：完整 cell 卡派生（Q 线） ---- */
+
+/** 快照 traceback 文本中的用户帧（内核 _cell_filename 契约：`File "<cell …>", line N`）。 */
+const CELL_FRAME_RE = /File "<cell[^"]*>", line (\d+)/g;
+
+/**
+ * 快照 traceback（仅文本形态，无 frames 结构）→ 出错行号（error (line N) 徽章 +
+ * 只读代码红行高亮共用）。取**最后一个** cell 用户帧（最内层）；无用户帧 → null。
+ */
+export function errorLineFromTraceback(tb: string | null | undefined): number | null {
+  if (!tb) return null;
+  let last: number | null = null;
+  for (const m of tb.matchAll(CELL_FRAME_RE)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1) last = n;
+  }
+  return last;
+}
+
+/** 快照 cell 是否有可渲染输出（决定 ▶/▼ output 披露区是否出现）。 */
+export function snapshotHasOutput(cell: SessionSnapshotCell): boolean {
+  const o = cell.output;
+  if (!o) return false;
+  return (
+    o.stdout !== '' ||
+    o.stderr !== '' ||
+    !!o.traceback ||
+    (o.writes?.length ?? 0) > 0 ||
+    (o.mimeKeys?.length ?? 0) > 0
+  );
+}
+
+/** [n] 徽章文案：execCount >0 用执行计数，否则用 1-based 序号占位。 */
+export function execBadge(cell: SessionSnapshotCell, index: number): string {
+  return `[${cell.execCount > 0 ? cell.execCount : index + 1}]`;
+}
