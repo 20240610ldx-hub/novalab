@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { bridge } from '../bridge/client';
 import { decideStalePolicy, type StaleContext, type StaleDecision } from '../kernel/stalePolicy';
 import {
+  emptyCache,
+  useNotebooks,
+  type NotebookCache,
+  type NotebookStateResult,
+} from './notebooks';
+import {
   createEmptyOutput,
   type Cell,
   type CellOutput,
@@ -446,6 +452,11 @@ interface NotebookStore {
   runRepl: (code: string) => Promise<void>;
   restartKernel: () => Promise<void>;
 
+  /** P3.1：切换焦点 tab（捕获旧 tab 切片 → 恢复目标 tab；内核进程保活）。 */
+  switchTab: (notebookId: string) => Promise<void>;
+  /** P3.1：关闭 tab（bridge notebook.close → 会话 ended；焦点转移并恢复新焦点缓存）。 */
+  closeTab: (notebookId: string) => Promise<void>;
+
   setCascadeOverride: (v: CascadeOverride) => void;
   /** Accept → bridge diff.accept（bridge 会 save+run cascade:false 并回 diff.updated）。 */
   acceptDiff: (diffId: string) => Promise<void>;
@@ -542,6 +553,50 @@ function compileErrorCellIds(
   return e.cellIds && e.cellIds.length > 0 ? e.cellIds : [fallback];
 }
 
+/* ---- P3.1 多 tab：焦点视图 ⇄ notebooks 缓存 的捕获/恢复 + ended 护栏 ---- */
+
+/** 捕获当前焦点视图切片 → notebooks 缓存（tab 切走时调用）。 */
+function captureCache(): NotebookCache {
+  const s = useNotebook.getState();
+  return {
+    cells: s.cells,
+    dagEdges: s.dagEdges,
+    staleSet: s.staleSet,
+    schemas: s.schemas,
+    compileErrors: s.compileErrors,
+    diffs: s.diffs,
+    diffMarks: s.diffMarks,
+    activeCellId: s.activeCellId,
+    uiCollapsed: s.uiCollapsed,
+    lastRunMs: s.lastRunMs,
+  };
+}
+
+/** 从 notebooks 缓存恢复焦点视图（tab 切回时调用）。 */
+function hydrateCache(c: NotebookCache): void {
+  useNotebook.setState({
+    cells: c.cells,
+    dagEdges: c.dagEdges,
+    staleSet: c.staleSet,
+    schemas: c.schemas,
+    compileErrors: c.compileErrors,
+    diffs: c.diffs,
+    diffMarks: c.diffMarks,
+    activeCellId: c.activeCellId,
+    uiCollapsed: c.uiCollapsed,
+    lastRunMs: c.lastRunMs,
+  });
+}
+
+/**
+ * 焦点 tab 是否已 ended（内核 dead / 会话结束）→ view-only。
+ * 复用 session readOnly 护栏语义：写路径 action 全部 no-op（防 Ctrl+Enter、
+ * 残留 debounce、外部热重载广播等旁路触碰已死内核）。无 tab 时 false（放行）。
+ */
+function activeEnded(): boolean {
+  return useNotebooks.getState().activeTab()?.ended === true;
+}
+
 /** 全局状态：cell 列表、DAG、stale 集合、diff 队列、内核状态（spec §10）。 */
 export const useNotebook = create<NotebookStore>((set, get) => ({
   cells: [],
@@ -600,9 +655,33 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
             });
             break;
           }
-          case 'kernel.status':
-            set({ kernelState: mapKernelState(String(asRecord(params).state ?? '')) });
+          case 'kernel.status': {
+            const raw = String(asRecord(params).state ?? '');
+            set({ kernelState: mapKernelState(raw) });
+            // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
+            const aid = useNotebooks.getState().activeId;
+            if (
+              aid &&
+              (raw === 'idle' || raw === 'busy' || raw === 'restarting' || raw === 'dead')
+            ) {
+              useNotebooks.getState().setKernelState(aid, raw);
+            }
             break;
+          }
+          case 'focus.changed': {
+            // P3.1：焦点切换（本端 switchTab 的回声 id===activeId 时跳过，防环）。
+            // 纯本地恢复：不再回调 bridge（避免二次 switch）。
+            const id = String(asRecord(params).notebookId ?? '');
+            const nb = useNotebooks.getState();
+            if (!id || id === nb.activeId) break;
+            if (nb.activeId) nb.saveCache(nb.activeId, captureCache());
+            nb.setActive(id);
+            const tab = nb.tabs.find((t) => t.notebookId === id);
+            set({ notebookPath: tab?.path ?? null });
+            const cached = nb.readCache(id);
+            if (cached) hydrateCache(cached);
+            break;
+          }
           case 'kernel.schemas': {
             // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
             // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
@@ -628,13 +707,18 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   openNotebook: async (path) => {
     try {
-      const res = await bridge.rpc<NotebookStatePayload>('notebook.open', { path });
+      // P3.1：notebook.open 返回 {notebookId, state}；注册表 upsert tab + 置焦点
+      const res = await useNotebooks.getState().openRpc(path);
+      const id = typeof res?.notebookId === 'string' ? res.notebookId : null;
       set({ notebookPath: path });
-      get().applyNotebookState(res);
+      if (res?.state) get().applyNotebookState(res.state as unknown as NotebookStatePayload);
+      // 焦点视图切片种入该 tab 缓存（切走再切回可即时恢复）
+      if (id) useNotebooks.getState().saveCache(id, captureCache());
       // P1.8：水合 UI sidecar（折叠集合 + activeCellId）；失败不阻塞打开主流程
       try {
         const ui = await bridge.rpc('ui.get', { path });
         get().hydrateUi(ui);
+        if (id) useNotebooks.getState().saveCache(id, captureCache());
       } catch (err) {
         console.error('ui.get 失败:', err);
       }
@@ -688,11 +772,15 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   },
 
   setCellCode: (cellId, code) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, code })) });
+    const id = useNotebooks.getState().activeId;
+    if (id) useNotebooks.getState().markDirty(id, true); // 本地未保存标记（close 确认用）
   },
 
   /** cell.save：bridge 重算 DAG，响应更新 dagEdges/staleSet 并把 stale cell 标灰。 */
   saveCell: async (cellId, code) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     try {
       const res = await bridge.rpc<CellSaveResult>('cell.save', { cellId, code });
       const staleSet = res?.staleSet ?? get().staleSet;
@@ -705,6 +793,9 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
         compileErrors,
         cells: applyStaleSet(get().cells, staleSet),
       });
+      // 落盘成功 → 清除该 tab 的未保存标记（bridge cell.save 即写 .py）
+      const id = useNotebooks.getState().activeId;
+      if (id) useNotebooks.getState().markDirty(id, false);
     } catch (err) {
       console.error('cell.save 失败:', err);
     }
@@ -716,6 +807,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 恒 cascade:false（决策没有意义，也不弹窗）。
    */
   runCell: async (cellId) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const s = get();
     const downstream = downstreamCells(cellId, s.dagEdges, s.cells);
     let cascade = false;
@@ -749,6 +841,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 该 cell kind='repl' → CellHeader 显示 [repl] 徽章、不参与 DAG/stale。
    */
   runRepl: async (code) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const cellId = REPL_CELL_ID;
     set({
       cells: upsertReplCell(get().cells, cellId, code),
@@ -783,6 +876,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   },
 
   restartKernel: async () => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     set({ kernelState: 'restarting' });
     try {
       // 冻结契约：kernel.restart 响应 = 新的 notebook.state 全量载荷
@@ -794,10 +888,69 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     }
   },
 
+  /* ---------------- P3.1 多 tab：切换 / 关闭（内核进程保活） ---------------- */
+
+  /**
+   * 切换焦点 tab：捕获当前焦点切片入旧 tab 缓存 → bridge notebook.switch（切 router
+   * 焦点，返回目标全量 state）→ 恢复目标视图（优先新鲜 state，否则本地缓存）。
+   * 内核进程在 bridge 侧保活，切走不杀；切回状态即在。
+   */
+  switchTab: async (notebookId) => {
+    const nb = useNotebooks.getState();
+    const prev = nb.activeId;
+    if (prev === notebookId) return;
+    if (prev) nb.saveCache(prev, captureCache());
+    const res: NotebookStateResult | null = await nb.switchRpc(notebookId);
+    const tab = useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId);
+    if (tab) set({ notebookPath: tab.path });
+    // 恢复目标视图：优先本地缓存（含输出缓冲/repl/状态，"切回状态即在"）；
+    // 无缓存时用 bridge 返回的全量 state 兜底。均走非护栏 set（tab 导航不受只读护栏拦截）。
+    const cached = useNotebooks.getState().readCache(notebookId);
+    if (cached) {
+      hydrateCache(cached);
+    } else if (res?.state && (res.state.cells || res.state.dagEdges)) {
+      const p = res.state as unknown as NotebookStatePayload;
+      const cells = applyStaleSet(normalizeCells(p.cells ?? [], p.execCounts), p.staleSet ?? []);
+      set({
+        cells,
+        dagEdges: p.dagEdges ?? [],
+        staleSet: p.staleSet ?? [],
+        schemas: p.schemas ?? [],
+        activeCellId: cells[0]?.id ?? null,
+      });
+      useNotebooks.getState().saveCache(notebookId, captureCache());
+    }
+    set({ kernelState: tab ? mapKernelState(tab.kernelState) : 'connecting' });
+  },
+
+  /**
+   * 关闭 tab：bridge notebook.close（save_file + 内核 shutdown + 会话 ended）→ 注册表
+   * 摘除 → 若关的是焦点 tab，恢复新焦点 tab 的缓存（无剩余则清空焦点视图）。
+   */
+  closeTab: async (notebookId) => {
+    const nb = useNotebooks.getState();
+    const wasActive = nb.activeId === notebookId;
+    const { nextActiveId } = await nb.closeRpc(notebookId);
+    if (!wasActive) return;
+    if (nextActiveId) {
+      const tab = useNotebooks.getState().tabs.find((t) => t.notebookId === nextActiveId);
+      set({ notebookPath: tab?.path ?? null });
+      const cached = useNotebooks.getState().readCache(nextActiveId);
+      if (cached) hydrateCache(cached);
+      set({ kernelState: tab ? mapKernelState(tab.kernelState) : 'connecting' });
+    } else {
+      // 无剩余 tab：清空焦点视图
+      set({
+        notebookPath: null,
+        ...emptyCache(),
+        kernelState: 'connecting',
+      });
+    }
+  },
+
   /* ---------------- P2.3 diff 审阅切片（spec §9 状态机） ---------------- */
 
   setCascadeOverride: (v) => set({ cascadeOverride: v }),
-
   resolveCascadeAsk: (run) => {
     const ask = get().cascadeAsk;
     set({ cascadeAsk: null });
@@ -815,6 +968,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * rpc 失败 → 回滚乐观态，diff 回到队列可重试。
    */
   acceptDiff: async (diffId) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const prev = get().diffs.find((d) => d.id === diffId);
     if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
     set({ diffs: revertDiffState(get().diffs, diffId, 'accepted') });
@@ -893,6 +1047,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   /** Reject（proposed/edited-staged → rejected）：乐观出队 + bridge diff.reject。 */
   rejectDiff: async (diffId) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const prev = get().diffs.find((d) => d.id === diffId);
     if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
     set({ diffs: revertDiffState(get().diffs, diffId, 'rejected') });
@@ -906,6 +1061,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   /** Esc Esc 全拒：整批乐观出队 + 并发 diff.reject（单个失败只回滚由 bridge 通知收敛）。 */
   rejectAllPending: async () => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const queue = pendingDiffs(get().diffs);
     if (queue.length === 0) return;
     set({
@@ -929,6 +1085,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 状态机（spec §9）：edited-staged 重新进入 proposed 队列，标注 user-edited。
    */
   reStageDiff: async (diffId, newCode) => {
+    if (activeEnded()) return; // view-only（ended tab）护栏
     const old = get().diffs.find((d) => d.id === diffId);
     if (!old || (old.state !== 'proposed' && old.state !== 'edited-staged')) return;
     if (old.newCode === newCode) return;

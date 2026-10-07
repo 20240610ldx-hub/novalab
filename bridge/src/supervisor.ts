@@ -12,6 +12,7 @@
 
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import {
   ERR_KERNEL,
   isKernelResponse,
@@ -31,6 +32,11 @@ export interface KernelTransport {
   onExit(cb: (code: number | null) => void): void;
   /** 强杀进程（Windows 下需杀整棵进程树：uv → python）。 */
   kill(): void;
+  /**
+   * 子进程 pid（P3.1 内存水位采样用）；无法获知时缺省（FakeKernel）。
+   * 生产 StdioKernelTransport 返回 uv 包装进程 pid（python 是其子进程）。
+   */
+  readonly pid?: number;
 }
 
 export class KernelError extends Error {
@@ -75,6 +81,10 @@ export class StdioKernelTransport implements KernelTransport {
     const stdin = this.child.stdin;
     if (!stdin || !stdin.writable) throw new KernelError('kernel stdin 不可写');
     stdin.write(JSON.stringify(msg) + '\n');
+  }
+
+  get pid(): number | undefined {
+    return this.child.pid;
   }
 
   onMessage(cb: (msg: KernelWireMessage) => void): void {
@@ -175,6 +185,11 @@ export class KernelSupervisor extends EventEmitter {
 
   get loadedPath(): string | undefined {
     return this.lastPath;
+  }
+
+  /** 当前传输层子进程 pid（内存水位采样用；无传输时 undefined）。 */
+  get pid(): number | undefined {
+    return this.transport?.pid;
   }
 
   /** 事件：'status' (KernelStatusParams) / 'notification' ({method, params})。 */
@@ -351,5 +366,167 @@ export class KernelSupervisor extends EventEmitter {
   private stopPing(): void {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = undefined;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* P3.1 多内核：SupervisorRegistry —— 每 path 一个 KernelSupervisor      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 每实例 supervisor 事件（按 path 打标）——router 据此把内核事件路由到对应
+ * notebook 上下文。三种事件都携带来源 path；registry 只转发，不解释语义。
+ */
+export interface KernelStatusEvent {
+  path: string;
+  params: KernelStatusParams;
+}
+export interface KernelNotificationEvent {
+  path: string;
+  method: string;
+  params?: unknown;
+}
+export interface KernelCrashEvent {
+  path: string;
+  code: number | null;
+}
+
+/**
+ * supervisor 注册表：按 path 管理 KernelSupervisor 生命周期。
+ * - MultiSupervisor（生产 / 多 tab 测试）：每 path 惰性新建并保活一个 supervisor；
+ * - SingleSupervisorRegistry（既有单 supervisor 路由测试的兼容包装）：所有 path
+ *   复用同一个注入的 supervisor（单 notebook 替换语义）。
+ * 事件（'kernel-status' / 'kernel-notification' / 'kernel-crash'）按 path 打标转发。
+ */
+export interface SupervisorRegistry extends EventEmitter {
+  /** 取该 path 的 supervisor，不存在则创建（不 start）。 */
+  ensure(path: string): KernelSupervisor;
+  get(path: string): KernelSupervisor | undefined;
+  /** 已登记的 path 列表。 */
+  paths(): string[];
+  /** 该 path 内核进程的 RSS（MB）水位；不可采样 → null。 */
+  rssMB(path: string): number | null;
+  /** 停止并摘除该 path 的 supervisor（关 tab）。 */
+  release(path: string): void;
+  /** 停止全部（进程退场）。 */
+  stopAll(): void;
+}
+
+/**
+ * 默认 RSS 采样器：仅 Linux 读 /proc/<pid>/status 的 VmRSS（kB→MB 取整）。
+ * Windows / macOS 无 /proc → null（协议允许 rssMB=null）；注意生产 pid 是 uv run
+ * 包装进程而非 python 本体，故 Linux 上也只是近似水位——精确到 python 需枚举子进程，
+ * 超出 P3.1 范围（遗留）。可经 MultiSupervisorOptions.rssSampler 注入替换（单测）。
+ */
+export function defaultRssSampler(pid: number | undefined): number | null {
+  if (pid === undefined || process.platform !== 'linux') return null;
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+    const m = /VmRSS:\s+(\d+)\s*kB/.exec(status);
+    return m ? Math.round(Number(m[1]) / 1024) : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface MultiSupervisorOptions {
+  /** 每 path 新建 supervisor 时的传输层工厂（生产：StdioKernelTransport）。 */
+  transportFactory: () => KernelTransport;
+  pingIntervalMs?: number;
+  pingTimeoutMs?: number;
+  /** RSS 采样器（默认 defaultRssSampler；单测注入固定值验证 list 形状）。 */
+  rssSampler?: (pid: number | undefined) => number | null;
+}
+
+/** 多内核注册表：Map<path, KernelSupervisor>，health/restart/rss per instance。 */
+export class MultiSupervisor extends EventEmitter implements SupervisorRegistry {
+  private readonly sups = new Map<string, KernelSupervisor>();
+  private readonly sampler: (pid: number | undefined) => number | null;
+
+  constructor(private readonly opts: MultiSupervisorOptions) {
+    super();
+    this.sampler = opts.rssSampler ?? defaultRssSampler;
+  }
+
+  ensure(path: string): KernelSupervisor {
+    const existing = this.sups.get(path);
+    if (existing) return existing;
+    const sup = new KernelSupervisor({
+      transportFactory: this.opts.transportFactory,
+      ...(this.opts.pingIntervalMs !== undefined ? { pingIntervalMs: this.opts.pingIntervalMs } : {}),
+      ...(this.opts.pingTimeoutMs !== undefined ? { pingTimeoutMs: this.opts.pingTimeoutMs } : {}),
+    });
+    // 事件按 path 打标转发给 router（每实例独立订阅，一次即可）
+    sup.on('status', (params: KernelStatusParams) => this.emit('kernel-status', { path, params }));
+    sup.on('notification', (n: { method: string; params?: unknown }) =>
+      this.emit('kernel-notification', { path, method: n.method, params: n.params }),
+    );
+    sup.on('crash', (c: { code: number | null }) => this.emit('kernel-crash', { path, code: c.code }));
+    this.sups.set(path, sup);
+    return sup;
+  }
+
+  get(path: string): KernelSupervisor | undefined {
+    return this.sups.get(path);
+  }
+
+  paths(): string[] {
+    return [...this.sups.keys()];
+  }
+
+  rssMB(path: string): number | null {
+    const sup = this.sups.get(path);
+    if (!sup) return null;
+    return this.sampler(sup.pid);
+  }
+
+  release(path: string): void {
+    const sup = this.sups.get(path);
+    if (!sup) return;
+    sup.stop();
+    this.sups.delete(path);
+  }
+
+  stopAll(): void {
+    for (const sup of this.sups.values()) sup.stop();
+    this.sups.clear();
+  }
+}
+
+/**
+ * 单 supervisor 兼容包装：既有路由单测以 RouterDeps.supervisor 注入一个
+ * KernelSupervisor（单 notebook 替换语义）。本包装把它适配成 SupervisorRegistry，
+ * 所有 path 复用同一实例，事件按其 loadedPath 打标（start() 会先置 lastPath，
+ * 故 restarting/idle 等状态事件都能路由到当前上下文）。
+ */
+export class SingleSupervisorRegistry extends EventEmitter implements SupervisorRegistry {
+  constructor(private readonly sup: KernelSupervisor) {
+    super();
+    const tag = (): string => this.sup.loadedPath ?? '';
+    sup.on('status', (params: KernelStatusParams) => this.emit('kernel-status', { path: tag(), params }));
+    sup.on('notification', (n: { method: string; params?: unknown }) =>
+      this.emit('kernel-notification', { path: tag(), method: n.method, params: n.params }),
+    );
+    sup.on('crash', (c: { code: number | null }) => this.emit('kernel-crash', { path: tag(), code: c.code }));
+  }
+
+  ensure(_path: string): KernelSupervisor {
+    return this.sup;
+  }
+  get(_path: string): KernelSupervisor | undefined {
+    return this.sup;
+  }
+  paths(): string[] {
+    const p = this.sup.loadedPath;
+    return p ? [p] : [];
+  }
+  rssMB(_path: string): number | null {
+    return null;
+  }
+  release(_path: string): void {
+    this.sup.stop();
+  }
+  stopAll(): void {
+    this.sup.stop();
   }
 }

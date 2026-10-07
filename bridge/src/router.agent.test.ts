@@ -53,7 +53,7 @@ async function call(method: string, params?: unknown): Promise<RpcResponse> {
 async function openNotebook(): Promise<NotebookState> {
   const res = await call('notebook.open', { path: NB_PATH });
   expect(res.error).toBeUndefined();
-  return res.result as NotebookState;
+  return (res.result as { state: NotebookState }).state;
 }
 
 function countNotes(method: string): number {

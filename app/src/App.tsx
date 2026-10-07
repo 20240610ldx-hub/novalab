@@ -4,9 +4,12 @@ import { CellList } from './components/CellList';
 import { KernelStatusBar } from './components/KernelStatusBar';
 import { InlineREPL } from './components/InlineREPL';
 import { SessionBar, SessionStatusPill } from './components/SessionBar';
+import { TabBar } from './components/TabBar';
 import { Sidebar } from './components/sidebar';
 import { AgentPanel } from './components/AgentPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { Inspector } from './components/Inspector';
+import { inspectorHandlePointerDown } from './components/Inspector/dragStore';
 
 /**
  * 左缘 Sidebar（P2.8 工作区文件树/最近打开）+ 主列（header / CellList /
@@ -101,6 +104,11 @@ export function App() {
           </span>
         </header>
 
+        {/* P3.1：多 tab 条（每 tab = 一个保活内核；ended 灰化 view-only；Ctrl+Tab 切换） */}
+        <div className="flex items-center border-b border-[var(--border)] bg-[var(--bg)] px-2 py-1">
+          <TabBar />
+        </div>
+
         {/* 降级横幅：bridge 连接失败（编辑器 UI 仍可浏览，内核功能不可用） */}
         {attempted && !bridgeConnected && (
           <div className="border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
@@ -113,9 +121,12 @@ export function App() {
           <CellList />
         </div>
 
+        {/* P3.2：变量 inspector 抽屉（footer 上方；把手拖拽逻辑在 Inspector/dragStore） */}
+        <Inspector />
+
         <footer>
-          {/* 元素 6：内核状态栏 */}
-          <KernelStatusBar />
+          {/* 元素 6：内核状态栏（⠿ 把手 pointerdown → Inspector 拖出） */}
+          <KernelStatusBar onHandlePointerDown={inspectorHandlePointerDown} />
           {/* 元素 7：内联 REPL */}
           <InlineREPL />
         </footer>

@@ -89,6 +89,70 @@ export interface NotebookState {
   execCounts: Record<string, number>;
 }
 
+// ---------- notebook.* 多 tab 多内核（P3.1，intent S1 / A-2 #18，本任务冻结） ----------
+//
+// 增量式协议：既有 cell.* / kernel.* / diff.* / agent.* 方法一律作用于「焦点
+// notebook」，语义不变；本节新增的方法管理"同时打开的多个 notebook（= 多个并存的
+// 内核进程）"，全部为**追加**，不改动任何既有方法的请求/响应形状，唯一例外是
+// notebook.open 的响应体（见下），它由裸 NotebookState 升级为 {notebookId, state}
+// 以携带新分配的 notebook 句柄。
+//
+//   notebook.open   {path}         → NotebookOpenResult {notebookId, state}
+//                                    同一路径重复 open = 聚焦既有 tab（不重启内核）。
+//   notebook.list   {}             → NotebookSummary[]（TabBar 数据源；含每内核 rssMB 水位）
+//   notebook.switch {notebookId}   → NotebookSwitchResult {notebookId, state}
+//                                    切 router 焦点 + 广播 focus.changed {notebookId}；
+//                                    不杀内核（进程保活，切回状态即在）。
+//   notebook.close  {notebookId}   → NotebookCloseResult {notebookId, closed:true}
+//                                    未保存改动先 save_file → 内核 shutdown → 会话
+//                                    ended('shutdown')（进 SessionBar 历史）→ 摘除 tab。
+//   focus.changed   {notebookId}   （bridge → 前端通知）焦点切换，前端 setActiveId。
+//
+// 内核进程按「1 文件 = 1 进程」并存（MultiSupervisor: Map<path, KernelSupervisor>）。
+// 只有**焦点** notebook 的内核事件（run.* / kernel.status / kernel.schemas /
+// notebook.state）被广播给前端；后台 notebook 的内核事件仍刷新 bridge 侧缓存，
+// 在 notebook.switch 时随响应体的全量 state 回灌前端（避免给通知加 notebookId 打标、
+// 保持既有广播形状逐字兼容）。ended（内核 dead / 会话结束）的 tab = view-only。
+
+/** notebook.open 响应（P3.1）：新分配（或既有）notebook 句柄 + 初始状态快照。 */
+export interface NotebookOpenResult {
+  notebookId: string;
+  state: NotebookState;
+}
+
+/**
+ * notebook.list 条目（P3.1，TabBar 数据源）。
+ * rssMB = 该内核进程的常驻内存（MB）水位；平台不可采样时为 null——
+ * Windows 无 /proc，且 uv run 的 pid 是包装进程而非 python 本体，采样意义有限，
+ * 故仅 Linux 走 /proc/<pid>/status 近似，其余留 null（见 supervisor.ts defaultRssSampler）。
+ */
+export interface NotebookSummary {
+  notebookId: string;
+  path: string;
+  kernelState: KernelState;
+  cellCount: number;
+  /** 内核已死 / 会话结束 → view-only（前端灰化 tab、禁用写路径）。 */
+  ended?: boolean;
+  rssMB: number | null;
+}
+
+/** notebook.switch 响应：新焦点句柄 + 全量状态（前端 hydrate 焦点视图）。 */
+export interface NotebookSwitchResult {
+  notebookId: string;
+  state: NotebookState;
+}
+
+/** notebook.close 响应。 */
+export interface NotebookCloseResult {
+  notebookId: string;
+  closed: true;
+}
+
+/** focus.changed 通知载荷（bridge → 前端）：焦点 notebook 已切换。 */
+export interface FocusChangedParams {
+  notebookId: string;
+}
+
 /** DAG 编译错（环 / 多重定义，spec §5/§12）。 */
 export interface CompileError {
   message: string;

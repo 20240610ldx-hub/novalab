@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { ERR_PARSE, type RpcRequest } from './protocol';
 import { RpcRouter } from './router';
-import { KernelSupervisor, StdioKernelTransport } from './supervisor';
+import { MultiSupervisor, StdioKernelTransport } from './supervisor';
 import { createChokidarEventSource } from './watch';
 import { startMcpServer } from './mcp/server';
 
@@ -24,7 +24,8 @@ const MAX_PORT_TRIES = 10;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const pyDir = path.join(repoRoot, 'py');
 
-const supervisor = new KernelSupervisor({
+// P3.1 多内核：每 path 一个 novakernel 子进程，保活并存（tab 切换不杀内核）。
+const supervisor = new MultiSupervisor({
   transportFactory: () => new StdioKernelTransport(pyDir),
 });
 
@@ -39,7 +40,7 @@ function broadcast(method: string, params: unknown): void {
 }
 
 const router = new RpcRouter({
-  supervisor,
+  multi: supervisor,
   broadcast,
   // P1.8：外部 .py 变更热重载（生产用 chokidar 事件源；单测在 RouterDeps 注入假源）
   watcherFactory: createChokidarEventSource,
@@ -88,8 +89,8 @@ function start(port: number): WebSocketServer {
 }
 
 function shutdown(): void {
-  router.dispose(); // 停 watcher + ui.json 落盘
-  supervisor.stop();
+  router.dispose(); // 停 watcher + ui.json 落盘 + 全部会话快照
+  supervisor.stopAll();
   activeWss?.close();
   process.exit(0);
 }

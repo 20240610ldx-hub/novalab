@@ -1,8 +1,18 @@
 /**
- * RpcRouter —— 前端 WS JSON-RPC 方法路由（spec §6.1，plan P1.3）。
+ * RpcRouter —— 前端 WS JSON-RPC 方法路由（spec §6.1，plan P1.3；P3.1 多 tab 多内核）。
  *
  * 职责：notebook 状态缓存、内核请求编排、diff 暂存队列（内存）、
  * session 事件落盘、内核通知转发（broadcast 注入，main.ts 发给所有 ws 客户端）。
+ *
+ * P3.1（intent S1 / A-2 #18）：从单 notebook 升级为多 notebook 并存——
+ * - 每个已打开的 .py = 一个 NotebookContext（独立 supervisor/cache/session/diffs/outputs）；
+ * - router 维护「焦点」notebook（focusId）；既有 cell.* / kernel.* / diff.* / agent.*
+ *   一律作用于焦点上下文（语义不变）；
+ * - 新增 notebook.list / notebook.switch / notebook.close（见 protocol.ts 冻结注释）；
+ * - supervisor 经 SupervisorRegistry 管理：生产 MultiSupervisor（每 path 一进程保活），
+ *   既有单测 SingleSupervisorRegistry（包装注入的单个 KernelSupervisor，替换语义）。
+ * - 只有**焦点** notebook 的内核事件被广播（保持既有广播形状逐字兼容）；后台 notebook
+ *   的内核事件仍刷新其 bridge 侧缓存，在 notebook.switch 响应里随全量 state 回灌前端。
  */
 
 import { randomBytes } from 'node:crypto';
@@ -19,7 +29,11 @@ import {
   type DiffAction,
   type FsEntry,
   type FsRootResult,
+  type NotebookCloseResult,
+  type NotebookOpenResult,
   type NotebookState,
+  type NotebookSummary,
+  type NotebookSwitchResult,
   type RpcRequest,
   type RpcResponse,
   type RunDoneParams,
@@ -33,7 +47,16 @@ import {
   type StagedDiff,
   type VarSchema,
 } from './protocol';
-import { KernelError, KernelSupervisor } from './supervisor';
+import {
+  KernelError,
+  KernelSupervisor,
+  MultiSupervisor,
+  SingleSupervisorRegistry,
+  type KernelCrashEvent,
+  type KernelNotificationEvent,
+  type KernelStatusEvent,
+  type SupervisorRegistry,
+} from './supervisor';
 import type { SessionEventKind } from './session-log';
 import { FsError, FsManager } from './fs';
 import { SessionStore, type ActiveSession } from './session-store';
@@ -110,8 +133,36 @@ export class RpcFault extends Error {
   }
 }
 
+/**
+ * 一个已打开 notebook 的全部 router 侧状态（P3.1）。
+ * 内核进程按「1 文件 = 1 进程」由 registry 保活；context 只持有其 supervisor 引用。
+ */
+interface NotebookContext {
+  readonly notebookId: string;
+  readonly path: string;
+  readonly supervisor: KernelSupervisor;
+  cache?: NotebookState;
+  /** 当前内核生命周期的会话句柄（P2.8：事件按 sessionId 落 .novalab/sessions/）。 */
+  session?: ActiveSession;
+  diffs: StagedDiff[];
+  diffSeq: number;
+  /** 每 cell 最近一次 run 的输出缓存（agent.cellOutput / get_cell_output 用）。 */
+  outputs: Map<string, OutputBuffer>;
+  /** 内核已死 / 会话结束 → view-only（notebook.list 上报，前端灰化 tab）。 */
+  ended: boolean;
+}
+
 export interface RouterDeps {
-  supervisor: KernelSupervisor;
+  /**
+   * 单 supervisor（既有路由单测的注入点）：包装成 SingleSupervisorRegistry，
+   * 所有 path 复用同一实例（单 notebook 替换语义）。与 multi 二选一。
+   */
+  supervisor?: KernelSupervisor;
+  /**
+   * 多内核注册表（生产 / 多 tab 测试）：每 path 惰性新建并保活一个 supervisor。
+   * 传入即启用多 tab「追加」语义（notebook.open 同一路径 = 聚焦既有 tab）。
+   */
+  multi?: MultiSupervisor;
   /** 通知广播（bridge → 所有 ws 客户端）。 */
   broadcast: (method: string, params: unknown) => void;
   clock?: () => Date;
@@ -134,14 +185,15 @@ export interface RouterDeps {
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
 
 export class RpcRouter {
-  private cache?: NotebookState;
-  private notebookPath?: string;
-  /** 当前内核生命周期的会话句柄（P2.8：事件按 sessionId 落 .novalab/sessions/）。 */
-  private session?: ActiveSession;
-  private diffs: StagedDiff[] = [];
-  private diffSeq = 0;
-  /** 每 cell 最近一次 run 的输出缓存（agent.cellOutput / get_cell_output 用）。 */
-  private outputs = new Map<string, OutputBuffer>();
+  /** notebookId → 上下文（插入序 = 打开序，notebook.list 依此排列 tab）。 */
+  private readonly contexts = new Map<string, NotebookContext>();
+  /** resolved path → notebookId（同一路径重复 open 去重）。 */
+  private readonly byPath = new Map<string, string>();
+  /** 焦点 notebook（cell.* / kernel.* / diff.* / agent.* 的作用对象）。 */
+  private focusId?: string;
+  private readonly registry: SupervisorRegistry;
+  /** 多 tab 追加语义（deps.multi 存在）；false = 单 notebook 替换语义（兼容既有单测）。 */
+  private readonly multiMode: boolean;
   private readonly clock: () => Date;
   private readonly ui: UiStore;
   private readonly fs: FsManager;
@@ -153,6 +205,14 @@ export class RpcRouter {
     this.ui = deps.uiStore ?? new UiStore();
     this.fs = deps.fs ?? new FsManager();
     this.sessions = deps.sessionStore ?? new SessionStore(this.clock);
+    this.multiMode = deps.multi !== undefined;
+    if (deps.multi) {
+      this.registry = deps.multi;
+    } else if (deps.supervisor) {
+      this.registry = new SingleSupervisorRegistry(deps.supervisor);
+    } else {
+      throw new Error('RpcRouter 需要 deps.multi 或 deps.supervisor 之一');
+    }
     if (deps.watcherFactory) {
       const factory = deps.watcherFactory;
       this.watcher = new NotebookWatcher({
@@ -162,18 +222,21 @@ export class RpcRouter {
         ...(deps.watcherSuppressMs !== undefined ? { suppressMs: deps.watcherSuppressMs } : {}),
       });
     }
-    deps.supervisor.on('status', (params) => deps.broadcast('kernel.status', params));
-    deps.supervisor.on('notification', (n: { method: string; params?: unknown }) => {
-      this.onKernelNotification(n.method, n.params);
-      deps.broadcast(n.method, n.params);
-    });
-    // P2.8：内核进程死亡 = 当前会话 ended（新会话在 restart 成功后开启）
-    deps.supervisor.on('crash', () => this.endSession('crash'));
+    // 内核事件按 path 打标到达 → 路由到对应上下文；仅焦点上下文的 event 广播给前端。
+    this.registry.on('kernel-status', (e: KernelStatusEvent) => this.onKernelStatus(e.path, e.params));
+    this.registry.on('kernel-notification', (e: KernelNotificationEvent) =>
+      this.onKernelEvent(e.path, e.method, e.params),
+    );
+    // P2.8：内核进程死亡 = 该 notebook 会话 ended（新会话在 restart 成功后开启）
+    this.registry.on('kernel-crash', (e: KernelCrashEvent) => this.onKernelCrash(e.path));
   }
 
-  /** 进程退场：会话快照落盘、停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
+  /** 进程退场：全部会话快照落盘、停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
   dispose(): void {
-    this.endSession('shutdown');
+    for (const ctx of this.contexts.values()) this.endSession(ctx, 'shutdown');
+    this.contexts.clear();
+    this.byPath.clear();
+    this.focusId = undefined;
     this.watcher?.close();
     this.ui.flush();
   }
@@ -204,6 +267,12 @@ export class RpcRouter {
         return { pong: Date.now() };
       case 'notebook.open':
         return this.notebookOpen(params);
+      case 'notebook.list':
+        return this.notebookList();
+      case 'notebook.switch':
+        return this.notebookSwitch(params);
+      case 'notebook.close':
+        return this.notebookClose(params);
       case 'cell.save':
         return this.cellSave(params);
       case 'cell.run':
@@ -257,43 +326,163 @@ export class RpcRouter {
     }
   }
 
-  // ---------- notebook ----------
+  // ---------- notebook（P3.1 多 tab） ----------
 
-  private async notebookOpen(params: Record<string, unknown>): Promise<NotebookState> {
+  /**
+   * notebook.open {path} → {notebookId, state}。
+   * - 多 tab 模式：同一路径已打开 = 聚焦既有 tab（不重启内核，进程保活）；否则新建 context。
+   * - 单 supervisor 兼容模式：替换语义——旧 notebook 会话 ended('switch') 后开新的（既有行为）。
+   */
+  private async notebookOpen(params: Record<string, unknown>): Promise<NotebookOpenResult> {
     const p = params['path'];
     if (typeof p !== 'string' || p.length === 0) {
       throw new RpcFault(ERR_INVALID_PARAMS, 'notebook.open 需要 {path: string}');
     }
-    const state = await this.deps.supervisor.start(p);
-    // P2.8：换 notebook = 旧会话 ended（旧 cache/outputs 仍在 → 快照完整），再开新会话
-    this.endSession('switch');
-    this.cache = normalizeState(state);
-    this.notebookPath = p;
+
+    // 多 tab：已打开则直接聚焦返回（切回状态即在，不杀内核）
+    const existing = this.ctxByPath(p);
+    if (existing && this.multiMode) {
+      this.setFocus(existing.notebookId);
+      this.deps.broadcast('focus.changed', { notebookId: existing.notebookId });
+      return { notebookId: existing.notebookId, state: this.snapshot(existing) };
+    }
+
+    // 单 supervisor 兼容：替换旧 notebook（会话 ended 'switch'）
+    if (!this.multiMode) {
+      for (const ctx of [...this.contexts.values()]) {
+        this.endSession(ctx, 'switch');
+        this.contexts.delete(ctx.notebookId);
+        this.byPath.delete(path.resolve(ctx.path));
+      }
+    }
+
+    const ctx = await this.spawnContext(p);
     // 默认工作区 root = 最近一次 notebook.open 的 dirname（fs.setRoot 可改）
     this.fs.setRootDefault(path.dirname(p));
-    this.diffs = [];
-    this.diffSeq = 0;
-    this.outputs.clear();
-    // P1.8 热重载：watch 新路径（内部先 unwatch 旧路径）
-    this.watcher?.watch(p);
-    this.beginSession(p);
-    return this.snapshot();
+    this.setFocus(ctx.notebookId);
+    this.beginSession(ctx);
+    if (this.multiMode) this.deps.broadcast('focus.changed', { notebookId: ctx.notebookId });
+    return { notebookId: ctx.notebookId, state: this.snapshot(ctx) };
+  }
+
+  /** 建 context + 从 registry 取/建 supervisor + start（load_file）。失败回滚登记。 */
+  private async spawnContext(p: string): Promise<NotebookContext> {
+    const notebookId = `nb-${randomBytes(4).toString('hex')}`;
+    const supervisor = this.registry.ensure(p);
+    const ctx: NotebookContext = {
+      notebookId,
+      path: p,
+      supervisor,
+      diffs: [],
+      diffSeq: 0,
+      outputs: new Map(),
+      ended: false,
+    };
+    this.contexts.set(notebookId, ctx);
+    this.byPath.set(path.resolve(p), notebookId);
+    // 先设焦点再 start：内核 start 期间的 kernel.status（restarting→idle）才能作为
+    // 焦点事件广播给前端（与既有单 notebook 行为一致，状态 pill 不卡在 connecting）。
+    this.setFocus(notebookId);
+    try {
+      const state = await supervisor.start(p);
+      ctx.cache = normalizeState(state);
+    } catch (err) {
+      this.contexts.delete(notebookId);
+      this.byPath.delete(path.resolve(p));
+      // 回滚焦点到剩余上下文（多 tab）或清空（无可回退）
+      this.focusId = this.contexts.keys().next().value as string | undefined;
+      throw err;
+    }
+    return ctx;
+  }
+
+  /** notebook.list → 全部已打开 notebook 摘要（TabBar 数据源；含每内核 rssMB 水位）。 */
+  private notebookList(): NotebookSummary[] {
+    return [...this.contexts.values()].map((ctx) => {
+      const state = ctx.supervisor.state;
+      const ended = ctx.ended || state === 'dead';
+      return {
+        notebookId: ctx.notebookId,
+        path: ctx.path,
+        kernelState: state,
+        cellCount: ctx.cache?.cells.length ?? 0,
+        ...(ended ? { ended: true } : {}),
+        rssMB: this.registry.rssMB(ctx.path),
+      };
+    });
+  }
+
+  /** notebook.switch {notebookId} → 切焦点 + 广播 focus.changed + 返回新焦点全量 state。 */
+  private notebookSwitch(params: Record<string, unknown>): NotebookSwitchResult {
+    const id = strParam(params, 'notebookId');
+    const ctx = this.contexts.get(id);
+    if (!ctx || !ctx.cache) {
+      throw new RpcFault(ERR_INVALID_PARAMS, `unknown notebookId: ${id}`);
+    }
+    this.setFocus(id);
+    this.deps.broadcast('focus.changed', { notebookId: id });
+    return { notebookId: id, state: this.snapshot(ctx) };
   }
 
   /**
-   * 外部改动 .py → 内核 load_file → 广播全量 notebook.state（前端 applyNotebookState）
-   * + session 留痕 external_reload。失败只记 stderr，保留旧缓存（文件可能处于半保存态）。
+   * notebook.close {notebookId} → 未保存改动先 save_file → 会话 ended('shutdown') →
+   * 内核 shutdown（进程退场）→ 摘除 tab。关焦点 tab 时把焦点转给下一个并广播 focus.changed。
+   */
+  private async notebookClose(params: Record<string, unknown>): Promise<NotebookCloseResult> {
+    const id = strParam(params, 'notebookId');
+    const ctx = this.contexts.get(id);
+    if (!ctx) throw new RpcFault(ERR_INVALID_PARAMS, `unknown notebookId: ${id}`);
+
+    // 未保存改动先 save_file（内核可能已死 → 忽略失败，仍继续关闭）
+    if (ctx.cache) {
+      try {
+        await this.persistToDisk(ctx);
+      } catch {
+        /* 内核死 / 写盘失败：关闭流程不因此中断（会话快照仍落盘） */
+      }
+    }
+    this.endSession(ctx, 'shutdown');
+    try {
+      ctx.supervisor.stop();
+    } catch {
+      /* 已停 */
+    }
+    this.registry.release(ctx.path);
+    this.contexts.delete(id);
+    this.byPath.delete(path.resolve(ctx.path));
+
+    if (this.focusId === id) {
+      const next = this.contexts.values().next().value as NotebookContext | undefined;
+      this.focusId = next?.notebookId;
+      if (next) {
+        this.watcher?.watch(next.path);
+        this.deps.broadcast('focus.changed', { notebookId: next.notebookId });
+      } else {
+        this.watcher?.unwatch();
+      }
+    }
+    return { notebookId: id, closed: true };
+  }
+
+  /** 设焦点：更新 focusId + watcher 跟随焦点（后台 notebook 不热重载，见文件头遗留说明）。 */
+  private setFocus(notebookId: string): void {
+    this.focusId = notebookId;
+    const ctx = this.contexts.get(notebookId);
+    if (ctx) this.watcher?.watch(ctx.path);
+  }
+
+  /**
+   * 外部改动 .py → 该 notebook 内核 load_file → 若为焦点则广播全量 notebook.state
+   * （前端 applyNotebookState）+ session 留痕 external_reload。失败只记 stderr，保留旧缓存。
    */
   private async externalReload(filePath: string): Promise<void> {
-    if (!this.cache || !this.notebookPath) return;
-    if (path.resolve(filePath) !== path.resolve(this.notebookPath)) return;
+    const ctx = this.ctxByPath(filePath);
+    if (!ctx || !ctx.cache) return;
     try {
-      const state = (await this.deps.supervisor.request('load_file', {
-        path: this.notebookPath,
-      })) as NotebookState;
-      this.cache = normalizeState(state);
-      this.deps.broadcast('notebook.state', this.snapshot());
-      this.log('external_reload', undefined, filePath);
+      const state = (await ctx.supervisor.request('load_file', { path: ctx.path })) as NotebookState;
+      ctx.cache = normalizeState(state);
+      if (this.isFocus(ctx)) this.deps.broadcast('notebook.state', this.snapshot(ctx));
+      this.log(ctx, 'external_reload', undefined, path.resolve(filePath));
     } catch (err) {
       process.stderr.write(
         `[bridge] 外部变更重载失败（${filePath}）: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -301,15 +490,32 @@ export class RpcRouter {
     }
   }
 
-  private requireCache(): NotebookState {
-    if (!this.cache || !this.notebookPath) {
-      throw new RpcFault(ERR_NO_NOTEBOOK, '尚未打开 notebook（先调 notebook.open）');
-    }
-    return this.cache;
+  // ---------- 上下文定位 ----------
+
+  private ctxByPath(p: string): NotebookContext | undefined {
+    const id = this.byPath.get(path.resolve(p));
+    return id ? this.contexts.get(id) : undefined;
   }
 
-  private snapshot(): NotebookState {
-    const c = this.requireCache();
+  private focusCtxOptional(): NotebookContext | undefined {
+    return this.focusId ? this.contexts.get(this.focusId) : undefined;
+  }
+
+  private focusCtx(): NotebookContext {
+    const ctx = this.focusCtxOptional();
+    if (!ctx || !ctx.cache) {
+      throw new RpcFault(ERR_NO_NOTEBOOK, '尚未打开 notebook（先调 notebook.open）');
+    }
+    return ctx;
+  }
+
+  private isFocus(ctx: NotebookContext): boolean {
+    return this.focusId === ctx.notebookId;
+  }
+
+  private snapshot(ctx: NotebookContext): NotebookState {
+    const c = ctx.cache;
+    if (!c) throw new RpcFault(ERR_NO_NOTEBOOK, '尚未打开 notebook（先调 notebook.open）');
     return structuredClone({
       cells: c.cells,
       dagEdges: c.dagEdges,
@@ -322,14 +528,15 @@ export class RpcRouter {
   // ---------- cell ----------
 
   private async cellSave(params: Record<string, unknown>): Promise<SaveResult> {
-    const cache = this.requireCache();
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
     const cellId = strParam(params, 'cellId');
     const code = strParam(params, 'code');
     const cell = cache.cells.find((c) => c.id === cellId);
     if (!cell) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
     cell.code = code;
-    const res = await this.applyCellsToKernel();
-    this.log('save', cellId, `chars:${code.length}`);
+    const res = await this.applyCellsToKernel(ctx);
+    this.log(ctx, 'save', cellId, `chars:${code.length}`);
     return {
       dagEdges: res.dagEdges,
       staleSet: res.staleSet,
@@ -338,104 +545,108 @@ export class RpcRouter {
   }
 
   private async cellRun(params: Record<string, unknown>): Promise<RunReport> {
-    const cache = this.requireCache();
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
     const cellId = strParam(params, 'cellId');
     const cascade = params['cascade'] === true;
     if (!cache.cells.some((c) => c.id === cellId)) {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
     }
-    const report = (await this.deps.supervisor.request('exec_cell', {
+    const report = (await ctx.supervisor.request('exec_cell', {
       cellId,
       cascade,
     })) as RunReport;
-    this.settleRun(cache, report);
+    this.settleRun(ctx, report);
     return report;
   }
 
   /** run 完成后：出 staleSet、落 session 事件（run | error）。 */
-  private settleRun(cache: NotebookState, report: RunReport): void {
+  private settleRun(ctx: NotebookContext, report: RunReport): void {
+    const cache = ctx.cache!;
     const executed = new Set([report.cellId, ...report.cascaded]);
     cache.staleSet = cache.staleSet.filter((id) => !executed.has(id));
     const execRef = `exec:${cache.execCounts[report.cellId] ?? 0}`;
     if (report.ok) {
-      this.log('run', report.cellId, execRef);
+      this.log(ctx, 'run', report.cellId, execRef);
     } else {
-      this.log('error', report.cellId, execRef);
+      this.log(ctx, 'error', report.cellId, execRef);
     }
   }
 
   /** 全量 cells 推给内核 set_cells，并用返回值刷新缓存；随后落盘 .py（P1.8）。 */
-  private async applyCellsToKernel(): Promise<SetCellsResult> {
-    const cache = this.requireCache();
-    const res = (await this.deps.supervisor.request('set_cells', {
+  private async applyCellsToKernel(ctx: NotebookContext): Promise<SetCellsResult> {
+    const cache = ctx.cache!;
+    const res = (await ctx.supervisor.request('set_cells', {
       cells: cache.cells.map((c) => ({ id: c.id, code: c.code })),
     })) as SetCellsResult;
     if (res.cells) cache.cells = normalizeCells(res.cells);
     cache.dagEdges = res.dagEdges ?? [];
     cache.staleSet = res.staleSet ?? [];
-    await this.persistToDisk();
+    await this.persistToDisk(ctx);
     return res;
   }
 
   /**
-   * cell.save / diff.accept 后把全量 cells 写回 .py（内核 save_file）。
+   * cell.save / diff.accept / notebook.close 后把全量 cells 写回 .py（内核 save_file）。
    * 写盘前后各续一次自写跳过窗口：watcher 忽略写后 suppressMs 内的 fs 事件，
    * 防自己的保存触发热重载回环。
    */
-  private async persistToDisk(): Promise<void> {
-    const cache = this.cache;
-    const p = this.notebookPath;
-    if (!cache || !p) return;
-    this.watcher?.markSelfWrite(p);
+  private async persistToDisk(ctx: NotebookContext): Promise<void> {
+    const cache = ctx.cache;
+    if (!cache) return;
+    this.watcher?.markSelfWrite(ctx.path);
     try {
-      await this.deps.supervisor.request('save_file', {
-        path: p,
+      await ctx.supervisor.request('save_file', {
+        path: ctx.path,
         cells: cache.cells.map((c) => ({ id: c.id, code: c.code })),
       });
     } finally {
-      this.watcher?.markSelfWrite(p);
+      this.watcher?.markSelfWrite(ctx.path);
     }
   }
 
   // ---------- kernel ----------
 
   private async kernelVars(): Promise<{ schemas: VarSchema[] }> {
-    this.requireCache();
-    const schemas = await this.introspectAndBroadcast();
+    const ctx = this.focusCtx();
+    const schemas = await this.introspectAndBroadcast(ctx);
     return { schemas };
   }
 
   /**
-   * introspect → 刷新缓存 schemas → 广播 kernel.schemas（L-3）→ 返回新值。
-   * 调用点：kernel.vars 显式请求（错误照常抛给 RPC 调用方）；run.done 通知后
-   * 自动触发（调用侧 catch 落 stderr——刷新失败不打断执行主流程）。
+   * introspect → 刷新缓存 schemas → 若为焦点则广播 kernel.schemas（L-3）→ 返回新值。
+   * 调用点：kernel.vars 显式请求（焦点，错误照常抛给 RPC 调用方）；run.done 通知后
+   * 自动触发（调用侧 catch 落 stderr——刷新失败不打断执行主流程；后台 notebook 只更新缓存不广播）。
    */
-  private async introspectAndBroadcast(): Promise<VarSchema[]> {
-    const res = (await this.deps.supervisor.request('introspect', {})) as {
+  private async introspectAndBroadcast(ctx: NotebookContext): Promise<VarSchema[]> {
+    const res = (await ctx.supervisor.request('introspect', {})) as {
       schemas?: VarSchema[];
     };
     const schemas = res.schemas ?? [];
-    if (this.cache) this.cache.schemas = schemas;
-    this.deps.broadcast('kernel.schemas', { schemas: structuredClone(schemas) });
+    if (ctx.cache) ctx.cache.schemas = schemas;
+    if (this.isFocus(ctx)) {
+      this.deps.broadcast('kernel.schemas', { schemas: structuredClone(schemas) });
+    }
     return schemas;
   }
 
   private async kernelRepl(params: Record<string, unknown>): Promise<RunReport> {
-    this.requireCache();
+    const ctx = this.focusCtx();
     const code = strParam(params, 'code');
-    const report = (await this.deps.supervisor.request('exec_repl', { code })) as RunReport;
-    this.log('repl', 'repl', `ok:${report.ok}`);
+    const report = (await ctx.supervisor.request('exec_repl', { code })) as RunReport;
+    this.log(ctx, 'repl', 'repl', `ok:${report.ok}`);
     return report;
   }
 
   private async kernelRestart(): Promise<NotebookState> {
-    this.requireCache();
+    const ctx = this.focusCtx();
     // P2.8：restart = 当前会话 ended（写快照）+ 新内核生命周期开新会话
-    this.endSession('restart');
-    const state = await this.deps.supervisor.restart();
-    this.cache = normalizeState(state);
-    if (this.notebookPath) this.beginSession(this.notebookPath);
-    return this.snapshot();
+    this.endSession(ctx, 'restart');
+    const state = await ctx.supervisor.restart();
+    ctx.cache = normalizeState(state);
+    ctx.ended = false;
+    this.beginSession(ctx);
+    return this.snapshot(ctx);
   }
 
   // ---------- diff（内存暂存队列，UI 在 P2） ----------
@@ -446,10 +657,11 @@ export class RpcRouter {
    * - compileError → 不入队，返回 {rejected:true, reason}，让模型自纠；
    * - 试探后无论成败都再 set_cells 回滚为原 cells。两次额外往返的成本可接受：
    *   set_cells 无执行开销，而拦下一个多重定义/环能让前端少弹一次无效审阅。
-   * 预检不触碰 this.cache / 不落盘（直接 supervisor.request，绕开 applyCellsToKernel）。
+   * 预检不触碰 cache / 不落盘（直接 supervisor.request，绕开 applyCellsToKernel）。
    */
   private async diffStage(params: Record<string, unknown>): Promise<StageResult> {
-    const cache = this.requireCache();
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
     const targetCellId = strParam(params, 'targetCellId');
     const action = params['action'];
     const newCode = strParam(params, 'newCode');
@@ -463,17 +675,17 @@ export class RpcRouter {
     // —— 编译预检：候选 cells 试探 + 无条件回滚 ——
     const original = cache.cells.map((c) => ({ id: c.id, code: c.code }));
     const candidate = buildCandidateCells(cache.cells, targetCellId, action as DiffAction, newCode);
-    const probe = (await this.deps.supervisor.request('set_cells', {
+    const probe = (await ctx.supervisor.request('set_cells', {
       cells: candidate,
     })) as SetCellsResult;
-    await this.deps.supervisor.request('set_cells', { cells: original });
+    await ctx.supervisor.request('set_cells', { cells: original });
     if (probe.compileError) {
       return { rejected: true, reason: probe.compileError };
     }
 
     const rationale = typeof params['rationale'] === 'string' ? params['rationale'] : undefined;
     const diff: StagedDiff = {
-      diffId: `diff-${++this.diffSeq}`,
+      diffId: `diff-${++ctx.diffSeq}`,
       targetCellId,
       action: action as DiffAction,
       newCode,
@@ -481,17 +693,18 @@ export class RpcRouter {
       status: 'proposed',
       createdAt: this.clock().toISOString(),
     };
-    this.diffs.push(diff);
-    this.emitDiffs();
-    this.log('diff_proposed', targetCellId, diff.diffId);
+    ctx.diffs.push(diff);
+    this.emitDiffs(ctx);
+    this.log(ctx, 'diff_proposed', targetCellId, diff.diffId);
     return { diffId: diff.diffId };
   }
 
   private async diffAccept(
     params: Record<string, unknown>,
   ): Promise<{ diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport }> {
-    const cache = this.requireCache();
-    const diff = this.requireDiff(strParam(params, 'diffId'));
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
+    const diff = this.requireDiff(ctx, strParam(params, 'diffId'));
     let runCellId = diff.targetCellId;
     if (diff.action === 'insert_below') {
       const idx = cache.cells.findIndex((c) => c.id === diff.targetCellId);
@@ -511,10 +724,10 @@ export class RpcRouter {
       cell.code = diff.newCode;
     }
 
-    const saved = await this.applyCellsToKernel();
+    const saved = await this.applyCellsToKernel(ctx);
     diff.status = 'accepted';
-    this.emitDiffs();
-    this.log('diff_accepted', runCellId, diff.diffId);
+    this.emitDiffs(ctx);
+    this.log(ctx, 'diff_accepted', runCellId, diff.diffId);
 
     const out: { diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport } = {
       diffId: diff.diffId,
@@ -526,41 +739,45 @@ export class RpcRouter {
       return out; // 编译错不进运行队列（spec §12）
     }
     // accept = cell.save + cell.run cascade=false（Owner 裁决 mark-only）
-    const report = (await this.deps.supervisor.request('exec_cell', {
+    const report = (await ctx.supervisor.request('exec_cell', {
       cellId: runCellId,
       cascade: false,
     })) as RunReport;
-    this.settleRun(cache, report);
+    this.settleRun(ctx, report);
     out.run = report;
     return out;
   }
 
   private diffReject(params: Record<string, unknown>): { diffId: string; status: 'rejected' } {
-    this.requireCache();
-    const diff = this.requireDiff(strParam(params, 'diffId'));
+    const ctx = this.focusCtx();
+    const diff = this.requireDiff(ctx, strParam(params, 'diffId'));
     diff.status = 'rejected';
-    this.emitDiffs();
-    this.log('diff_rejected', diff.targetCellId, diff.diffId);
+    this.emitDiffs(ctx);
+    this.log(ctx, 'diff_rejected', diff.targetCellId, diff.diffId);
     return { diffId: diff.diffId, status: 'rejected' };
   }
 
-  private requireDiff(diffId: string): StagedDiff {
-    const diff = this.diffs.find((d) => d.diffId === diffId);
+  private requireDiff(ctx: NotebookContext, diffId: string): StagedDiff {
+    const diff = ctx.diffs.find((d) => d.diffId === diffId);
     if (!diff || diff.status !== 'proposed') {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown or already-resolved diffId: ${diffId}`);
     }
     return diff;
   }
 
-  private emitDiffs(): void {
-    this.deps.broadcast('diff.updated', { diffs: structuredClone(this.diffs) });
+  private emitDiffs(ctx: NotebookContext): void {
+    // diff 队列是焦点视图的一部分；仅焦点上下文的变更广播（后台 tab 的 diff 在切换时随 state 回灌）
+    if (this.isFocus(ctx)) {
+      this.deps.broadcast('diff.updated', { diffs: structuredClone(ctx.diffs) });
+    }
   }
 
   // ---------- agent.*（P2.6/P2.7：前端 in-process 工具与 MCP server 共用，spec §7） ----------
 
   /** get_notebook_context：DAG 边 + schemas（过 preview 截断出口，spec §8）+ staleSet；无原始数据。 */
   private agentContext(): AgentContext {
-    const c = this.requireCache();
+    const ctx = this.focusCtx();
+    const c = ctx.cache!;
     return {
       dagEdges: structuredClone(c.dagEdges),
       // 隐私边界（spec §8）：schemas 出进程前必过 PreviewSerializer 4KB 硬截断
@@ -572,14 +789,15 @@ export class RpcRouter {
 
   /** list_cells：全部 cell 的摘要（不含源码正文，只有首行）。 */
   private agentListCells(): AgentCellSummary[] {
-    const c = this.requireCache();
+    const ctx = this.focusCtx();
+    const c = ctx.cache!;
     const stale = new Set(c.staleSet);
     return c.cells.map((cell) => {
       const firstLine = (cell.code.split('\n')[0] ?? '').trim();
       return {
         id: cell.id,
         execCount: cell.execCount,
-        status: this.cellStatus(cell.id, cell.execCount, stale.has(cell.id)),
+        status: this.cellStatus(ctx, cell.id, cell.execCount, stale.has(cell.id)),
         firstLine: firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine,
         defs: [...cell.defs],
         refs: [...cell.refs],
@@ -587,16 +805,17 @@ export class RpcRouter {
     });
   }
 
-  private cellStatus(id: string, execCount: number, isStale: boolean): AgentCellSummary['status'] {
+  private cellStatus(ctx: NotebookContext, id: string, execCount: number, isStale: boolean): AgentCellSummary['status'] {
     if (isStale) return 'stale';
-    if (this.outputs.get(id)?.traceback !== undefined) return 'error';
+    if (ctx.outputs.get(id)?.traceback !== undefined) return 'error';
     if (execCount > 0) return 'ok';
     return 'idle';
   }
 
   /** get_cell_code：源码原文（spec §7 白名单"代码文本"，不截断）。 */
   private agentCellCode(params: Record<string, unknown>): { cellId: string; code: string } {
-    const cache = this.requireCache();
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
     const cellId = strParam(params, 'cellId');
     const cell = cache.cells.find((c) => c.id === cellId);
     if (!cell) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
@@ -605,12 +824,13 @@ export class RpcRouter {
 
   /** get_cell_output：最近一次 run 的 stdout/stderr/traceback/mimeKeys/writes，字符字段截断 8KB、路径列表限 50 条。 */
   private agentCellOutput(params: Record<string, unknown>): CellOutputSnapshot {
-    const cache = this.requireCache();
+    const ctx = this.focusCtx();
+    const cache = ctx.cache!;
     const cellId = strParam(params, 'cellId');
     if (cellId !== 'repl' && !cache.cells.some((c) => c.id === cellId)) {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
     }
-    const buf = this.outputs.get(cellId);
+    const buf = ctx.outputs.get(cellId);
     return {
       stdout: capOutput(buf?.stdout ?? '', buf?.stdoutTrunc ?? false),
       stderr: capOutput(buf?.stderr ?? '', buf?.stderrTrunc ?? false),
@@ -635,39 +855,55 @@ export class RpcRouter {
     return this.ui.set(notebookPath, patch as UiPatch);
   }
 
-  // ---------- 通知侧效应 ----------
+  // ---------- 内核事件侧效应（按 path 路由到上下文） ----------
 
-  private onKernelNotification(method: string, params: unknown): void {
-    this.accumulateOutput(method, params);
-    if (!this.cache) return;
-    if (method === 'run.done') {
-      const p = params as RunDoneParams;
-      this.cache.execCounts[p.cellId] = p.execCount;
-      const cell = this.cache.cells.find((c) => c.id === p.cellId);
-      if (cell) cell.execCount = p.execCount;
-      // L-3：run 完成后自动 introspect 并广播 kernel.schemas——前端 store.schemas
-      // 随每次执行刷新（FixCard 的"traceback + N schemas"附着不再恒 0）。
-      // fire-and-forget：失败（内核重启中/已死）只落 stderr，不打断执行主流程。
-      this.introspectAndBroadcast().catch((err: unknown) => {
+  private onKernelStatus(p: string, params: { state: string; queueDepth: number }): void {
+    const ctx = this.ctxByPath(p);
+    if (!ctx) return;
+    ctx.ended = params.state === 'dead' ? true : false;
+    if (this.isFocus(ctx)) this.deps.broadcast('kernel.status', params);
+  }
+
+  private onKernelCrash(p: string): void {
+    const ctx = this.ctxByPath(p);
+    if (!ctx) return;
+    ctx.ended = true;
+    this.endSession(ctx, 'crash');
+  }
+
+  private onKernelEvent(p: string, method: string, params: unknown): void {
+    const ctx = this.ctxByPath(p);
+    if (!ctx) return;
+    this.accumulateOutput(ctx, method, params);
+    if (ctx.cache && method === 'run.done') {
+      const rp = params as RunDoneParams;
+      ctx.cache.execCounts[rp.cellId] = rp.execCount;
+      const cell = ctx.cache.cells.find((c) => c.id === rp.cellId);
+      if (cell) cell.execCount = rp.execCount;
+      // L-3：run 完成后自动 introspect 并（焦点时）广播 kernel.schemas——前端 store.schemas
+      // 随每次执行刷新。fire-and-forget：失败只落 stderr，不打断执行主流程。
+      this.introspectAndBroadcast(ctx).catch((err: unknown) => {
         process.stderr.write(
           `[bridge] run.done 后自动 introspect 失败: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       });
     }
+    // 仅焦点 notebook 的内核通知广播给前端（保持既有广播形状；后台在 switch 时随 state 回灌）
+    if (this.isFocus(ctx)) this.deps.broadcast(method, params);
   }
 
   /**
    * 从内核 run.* 通知流累积每 cell 的"最近一次输出"（agent.cellOutput 数据源）。
    * run.started 重置缓冲；stdout/stderr/mime/error 增量写入；累积时即按 8KB 截断（bound RSS）。
-   * 不依赖 this.cache —— repl（cellId="repl"）的输出也要能读。
+   * 不依赖 cache —— repl（cellId="repl"）的输出也要能读。
    */
-  private accumulateOutput(method: string, params: unknown): void {
+  private accumulateOutput(ctx: NotebookContext, method: string, params: unknown): void {
     const p = params as Record<string, unknown>;
     const cellId = typeof p['cellId'] === 'string' ? p['cellId'] : undefined;
     if (!cellId) return;
     switch (method) {
       case 'run.started':
-        this.outputs.set(cellId, {
+        ctx.outputs.set(cellId, {
           stdout: '',
           stderr: '',
           stdoutTrunc: false,
@@ -678,7 +914,7 @@ export class RpcRouter {
         return;
       case 'run.stdout':
       case 'run.stderr': {
-        const buf = this.ensureOutputBuffer(cellId);
+        const buf = this.ensureOutputBuffer(ctx, cellId);
         const text = typeof p['text'] === 'string' ? p['text'] : '';
         if (method === 'run.stdout') {
           const r = appendCapped(buf.stdout, text);
@@ -692,26 +928,26 @@ export class RpcRouter {
         return;
       }
       case 'run.mime': {
-        const buf = this.ensureOutputBuffer(cellId);
+        const buf = this.ensureOutputBuffer(ctx, cellId);
         const mime = typeof p['mime'] === 'string' ? p['mime'] : undefined;
         if (mime && !buf.mimeKeys.includes(mime)) buf.mimeKeys.push(mime);
         return;
       }
       case 'run.error': {
-        const buf = this.ensureOutputBuffer(cellId);
+        const buf = this.ensureOutputBuffer(ctx, cellId);
         const tb = typeof p['traceback'] === 'string' ? p['traceback'] : String(p['traceback'] ?? '');
         buf.traceback = tb.length > OUTPUT_CHAR_LIMIT ? tb.slice(0, OUTPUT_CHAR_LIMIT) + TRUNCATION_SUFFIX : tb;
         return;
       }
       case 'run.notify': {
         // P2.9 写事件：kind='file-write' 的 path 进缓存（agent.cellOutput.writes）。
-        // 透传前端由构造函数里的 broadcast 统一完成，这里只做累积。
+        // 透传前端由 onKernelEvent 的焦点广播统一完成，这里只做累积。
         if (p['kind'] !== 'file-write') return;
-        const path = p['path'];
-        if (typeof path !== 'string' || path === '') return;
-        const buf = this.ensureOutputBuffer(cellId);
-        if (buf.writes.length >= WRITES_PATH_LIMIT || buf.writes.includes(path)) return;
-        buf.writes.push(path);
+        const wpath = p['path'];
+        if (typeof wpath !== 'string' || wpath === '') return;
+        const buf = this.ensureOutputBuffer(ctx, cellId);
+        if (buf.writes.length >= WRITES_PATH_LIMIT || buf.writes.includes(wpath)) return;
+        buf.writes.push(wpath);
         return;
       }
       default:
@@ -719,17 +955,17 @@ export class RpcRouter {
     }
   }
 
-  private ensureOutputBuffer(cellId: string): OutputBuffer {
-    let buf = this.outputs.get(cellId);
+  private ensureOutputBuffer(ctx: NotebookContext, cellId: string): OutputBuffer {
+    let buf = ctx.outputs.get(cellId);
     if (!buf) {
       buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], writes: [] };
-      this.outputs.set(cellId, buf);
+      ctx.outputs.set(cellId, buf);
     }
     return buf;
   }
 
-  private log(kind: SessionEventKind, cellId?: string, payloadRef?: string): void {
-    this.session?.append({
+  private log(ctx: NotebookContext, kind: SessionEventKind, cellId?: string, payloadRef?: string): void {
+    ctx.session?.append({
       kind,
       actor: 'user',
       ...(cellId !== undefined ? { cellId } : {}),
@@ -740,30 +976,30 @@ export class RpcRouter {
   // ---------- 会话生命周期（P2.8，intent M9） ----------
 
   /** 开新会话（内核生命周期起点）：index 追加 live 条目 + 广播 session.started。 */
-  private beginSession(notebookPath: string): void {
+  private beginSession(ctx: NotebookContext): void {
     const session = this.sessions.begin({
-      notebookDir: path.dirname(notebookPath),
-      notebookPath,
-      cellCount: this.cache?.cells.length ?? 0,
+      notebookDir: path.dirname(ctx.path),
+      notebookPath: ctx.path,
+      cellCount: ctx.cache?.cells.length ?? 0,
     });
-    this.session = session;
+    ctx.session = session;
     this.deps.broadcast('session.started', {
       sessionId: session.id,
       startedAt: session.startedAt,
-      notebookPath,
+      notebookPath: ctx.path,
     });
   }
 
   /**
-   * 结束当前会话：snapshot.json（cells 全量 + 输出缓冲摘要）+ index.endedAt
+   * 结束一个 notebook 的当前会话：snapshot.json（cells 全量 + 输出缓冲摘要）+ index.endedAt
    * + 广播 session.ended。无活跃会话时 no-op。落盘失败只记 stderr（审计降级不崩主流程）。
    */
-  private endSession(reason: SessionEndReason): void {
-    const session = this.session;
+  private endSession(ctx: NotebookContext, reason: SessionEndReason): void {
+    const session = ctx.session;
     if (!session) return;
-    this.session = undefined;
+    ctx.session = undefined;
     try {
-      const meta = this.sessions.end(session, this.snapshotCells(), reason);
+      const meta = this.sessions.end(session, this.snapshotCells(ctx), reason);
       this.deps.broadcast('session.ended', {
         sessionId: session.id,
         endedAt: meta.endedAt ?? this.clock().toISOString(),
@@ -776,10 +1012,10 @@ export class RpcRouter {
     }
   }
 
-  /** 当前 cache 的快照 cells（输出摘要取自 outputs 缓存，字段已在累积期 8KB 截断）。 */
-  private snapshotCells(): SessionSnapshotCell[] {
-    return (this.cache?.cells ?? []).map((c) => {
-      const buf = this.outputs.get(c.id);
+  /** 一个上下文 cache 的快照 cells（输出摘要取自 outputs 缓存，字段已在累积期 8KB 截断）。 */
+  private snapshotCells(ctx: NotebookContext): SessionSnapshotCell[] {
+    return (ctx.cache?.cells ?? []).map((c) => {
+      const buf = ctx.outputs.get(c.id);
       return {
         id: c.id,
         code: c.code,
@@ -830,40 +1066,42 @@ export class RpcRouter {
 
   // ---------- session.*（P2.8） ----------
 
-  /** session.list：index.json 全量；live 条目的 cellCount 以当前缓存为准。 */
+  /** session.list：index.json 全量；live 条目的 cellCount 以焦点缓存为准。 */
   private sessionList(params: Record<string, unknown>): SessionMeta[] {
+    const focus = this.focusCtxOptional();
     const nb =
       typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
         ? params['notebookPath']
-        : this.notebookPath;
+        : focus?.path;
     if (!nb) {
       throw new RpcFault(ERR_INVALID_PARAMS, 'session.list 需要 {notebookPath}（当前无已打开 notebook）');
     }
     const metas = this.sessions.list(path.dirname(nb));
-    const liveId = this.session?.id;
-    if (liveId && this.cache) {
+    const liveId = focus?.session?.id;
+    if (liveId && focus?.cache) {
       const live = metas.find((m) => m.id === liveId);
-      if (live) live.cellCount = this.cache.cells.length;
+      if (live) live.cellCount = focus.cache.cells.length;
     }
     return metas;
   }
 
-  /** session.open：历史会话 = snapshot 只读投影；live id = 内存缓存现做投影（endedAt:null）。 */
+  /** session.open：历史会话 = snapshot 只读投影；live id = 焦点内存缓存现做投影（endedAt:null）。 */
   private sessionOpen(params: Record<string, unknown>): SessionOpenResult {
     const sessionId = strParam(params, 'sessionId');
+    const focus = this.focusCtxOptional();
     const nb =
       typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
         ? params['notebookPath']
-        : this.notebookPath;
+        : focus?.path;
     if (!nb) {
       throw new RpcFault(ERR_INVALID_PARAMS, 'session.open 需要 {notebookPath}（当前无已打开 notebook）');
     }
-    if (this.session && this.session.id === sessionId) {
+    if (focus?.session && focus.session.id === sessionId) {
       return {
         sessionId,
-        startedAt: this.session.startedAt,
+        startedAt: focus.session.startedAt,
         endedAt: null,
-        cells: this.snapshotCells(),
+        cells: this.snapshotCells(focus),
         readOnly: true,
       };
     }

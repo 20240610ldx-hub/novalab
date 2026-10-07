@@ -69,9 +69,19 @@ const waitNotif = (method, timeoutMs = 15000) =>
     }, 100);
   });
 
-const state = (await rpc('notebook.open', { path: DEMO })).result;
+// P3.1：notebook.open 响应升级为 {notebookId, state}
+const openRes = (await rpc('notebook.open', { path: DEMO })).result;
+if (!openRes?.notebookId) fail(`notebook.open 缺 notebookId: ${JSON.stringify(openRes)}`);
+const state = openRes.state;
 if (state?.cells?.length !== 3) fail(`notebook.open cells=${state?.cells?.length}`);
-console.log(`open ok: cells=${state.cells.length} edges=${state.dagEdges.length}`);
+console.log(`open ok: notebookId=${openRes.notebookId} cells=${state.cells.length} edges=${state.dagEdges.length}`);
+
+// P3.1：notebook.list 反映已打开的 tab（含 rssMB 字段形状）
+const list = (await rpc('notebook.list')).result;
+if (!Array.isArray(list) || list.length !== 1) fail(`notebook.list len=${list?.length}`);
+if (list[0].notebookId !== openRes.notebookId) fail('notebook.list notebookId 不匹配');
+if (!('rssMB' in list[0])) fail('notebook.list 缺 rssMB 字段');
+console.log(`list ok: n=${list.length} kernelState=${list[0].kernelState} rssMB=${list[0].rssMB}`);
 
 const [c1, c2, c3] = state.cells;
 const r1 = await rpc('cell.run', { cellId: c1.id, cascade: false });

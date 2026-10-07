@@ -60,7 +60,8 @@ async function call(method: string, params?: unknown): Promise<RpcResponse> {
 async function openNotebook(): Promise<NotebookState> {
   const res = await call('notebook.open', { path: NB_PATH });
   expect(res.error).toBeUndefined();
-  return res.result as NotebookState;
+  // P3.1：notebook.open 响应升级为 {notebookId, state}
+  return (res.result as { state: NotebookState }).state;
 }
 
 /** index 顺序最后一个（= 最新）会话的事件流。 */
