@@ -57,10 +57,11 @@ export function TabBar() {
   const [pathInput, setPathInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 挂载即拉一次 tab 列表（bridge 可能已有打开的 notebook）
+  // 连接建立后再拉 tab 列表（挂载即拉会抢跑 connectBridge，产生 console 噪声）
+  const bridgeConnected = useNotebook((s) => s.bridgeConnected);
   useEffect(() => {
-    void refreshList();
-  }, [refreshList]);
+    if (bridgeConnected) void refreshList();
+  }, [refreshList, bridgeConnected]);
 
   // ended（内核 dead / 会话结束）tab = view-only：同步 session.readOnly（复用只读护栏）。
   // 历史会话视图（viewingId）优先，不在此干预。
