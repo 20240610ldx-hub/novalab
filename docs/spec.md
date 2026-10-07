@@ -262,3 +262,40 @@ SessionModal = 该日志 + 当前 cells 的只读投影（segments = 按 >30min 
 - py：pytest——dag 提取黄金集（含 comprehension/walrus/match 边角）、失效传递性、幽灵变量删除、serialize 往返（marimo 文件互操作样本放 `py/tests/fixtures/`，取自 refs/marimo 示例）。
 - bridge：vitest——protocol 契约（TS/py 共享 JSON fixtures）、PreviewSerializer 截断断言（>4KB 必截）、MCP 工具 schema 快照。
 - app：vitest+RTL——Diff 状态机（Tab/Esc/edited-staged）、stale 徽章派生；playwright e2e——intent §8 演示脚本全自动跑通。
+
+---
+
+## 15. 交互控件协议（P3.3）
+
+> **Owner 裁决（2026-10-07）：同意控件级联绕过 mark-only 默认**——§15.3 第一条为最终语义。
+
+目标：marimo `mo.ui` 风格的原生交互控件（slider / checkbox / text / date / table 选择），绑定即反应式重跑；同时是 P4.2 App View 的骨架。
+
+### 15.1 内核侧（py/novakernel/ui.py，新模块）
+
+- 控件工厂：`nk.ui.slider(start, stop, step?, value?, label?)`、`checkbox(value?)`、`text(value?)`、`date(value?)`、`table(df, selection?)`——返回 `Control` 实例（`.value` 属性为当前值）。
+- `Control` 是**活对象**：驻留 cell 的 defs；内核持有 registry `{controlId: Control}`，controlId = `<cellId>::<变量名>`。
+- cell 重跑 = 控件重建（值回 spec 默认；旧 controlId 注销）——简单可预测，文档声明。
+
+### 15.2 渲染通道（复用 run.mime，不新增通知）
+
+- cell 收尾表达式或显式 `control` 变量 → run.mime `application/vnd.novalab.control+json`：
+  `{controlId, kind, spec:{...}, value}`；前端 `ControlRenderer` 按 kind 渲染交互部件（components/controls/，暗色 tokens）。
+- 非收尾用法（控件赋值给变量但 cell 尾不返回）也发送：exec 后扫描本 cell 新 defs 中的 Control 实例统一上报（与 matplotlib figure 捕获同模式）。
+
+### 15.3 值回传与级联语义（关键决策）
+
+- 前端交互 → `control.set {controlId, value}`（bridge → 内核）：内核 mutate `Control.value`，**不发 run.mime 重绘**（前端已乐观更新），然后：
+  - 下游传递闭包**自动级联重跑**——控件交互是显式用户意图，**绕过 mark-only 默认**（StalePolicy 仅约束代码编辑触发的级联）；
+  - 例外：side-effect 下游 cell 不自动跑，标 stale + ⚡（与 cascade 开关 ask 档共用确认窗）；
+  - `cascade: auto|mark-only` 设置对控件无效（文档声明），避免"拖 slider 没反应"的反直觉。
+- 节流：slider 拖动按 80ms coalesce 发 control.set（bridge 侧），表格选择/checkbox 即时。
+
+### 15.4 隐私与 Agent
+
+- 控件值进入 schema（type=`Control[slider]`，value 过 PreviewSerializer）；Agent 可读值、**不可设值**（无 control.set 工具——写通道仅人类 UI）。
+- App View（P4.2）= 隐藏代码区 + 仅渲染控件与输出，协议零改动。
+
+### 15.5 不做（本阶段）
+
+- 控件持久化进 .py（值不存盘，重开回默认）；跨 cell 共享同一 Control 实例（一 cell 一实例）；自定义控件 API。
