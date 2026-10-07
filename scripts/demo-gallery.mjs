@@ -1,25 +1,31 @@
 /**
  * L 线：交互状态画廊 —— 真机证据截图（docs/demos/states/*.png）。
  *
- * 用法（仓库根，需先起服务）：
- *   pnpm dev:bridge   # ws://127.0.0.1:7788
- *   pnpm dev:app      # http://localhost:5199 (strictPort)
+ * 用法（仓库根；dev 服务已在跑就复用，没跑就自起自停）：
  *   node scripts/demo-gallery.mjs [--skip-agent] [状态前缀过滤，如 03 11]
+ *   （自起 = pnpm dev:bridge ws://127.0.0.1:7788 + pnpm dev:app
+ *     http://localhost:5199 (strictPort)；脚本退出前 taskkill 整树，
+ *     复用的既有服务不动。）
  *
  * 产出：每态一张 fullPage png（暗色、viewport 1440x900；主列为内部滚动，
  * 内容溢出时临时增高视口拍全后还原——fullPage 对本布局才有意义）。
  *
  * 幂等性：
- * - demos/gallery-*.py 夹具每次运行重写；
+ * - demos/gallery-*.py 夹具每次运行重写（含 P3.3 控件夹具 gallery-controls.py）；
  * - demos/demo.py 的任何编辑（02 态 0.9↔1.9 toggle，与 integration-smoke 同款）
  *   先经 UI cell.save 还原、脚本结束再按启动时快照字节级兜底还原；
- * - demos/.novalab 残留（sessions/ui.json）容忍，不清理；
- * - 09 态新建的 demos/gallery-created.py 允许存在（fs.writeFile 覆盖写）。
+ * - demos/.novalab 残留（sessions/ui.json、15 态导出 .ipynb 与回转 .py——文件名
+ *   含会话 id，逐次运行不冲突）容忍，不清理；
+ * - 09 态新建的 demos/gallery-created.py 允许存在（fs.writeFile 覆盖写）；
+ * - P3.1 多 tab 语境下 bridge 上下文跨状态存活：每个自开新页的状态先
+ *   closeAllTabs（notebook.list → notebook.close）保证单 tab 干净截图。
  *
  * 前置校验：bridge ping + vite HTTP 200，任一不就绪立即退出并提示。
  */
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +43,7 @@ const BRIDGE_URL = 'ws://127.0.0.1:7788';
 const DEMO_PY = join(DEMOS, 'demo.py');
 const ERROR_PY = join(DEMOS, 'gallery-error.py');
 const WRITE_PY = join(DEMOS, 'gallery-write.py');
+const CONTROLS_PY = join(DEMOS, 'gallery-controls.py');
 
 const argv = process.argv.slice(2);
 const SKIP_AGENT = argv.includes('--skip-agent');
@@ -105,6 +112,99 @@ plt.xlabel("day")
 plt.ylabel("celsius")
 `;
 
+/* P3.3 控件夹具（14 态）：slider(阈值) + checkbox(normalize) 定义格 +
+ * 引用 .value 的下游计算格（control.set → DAG 级联重跑，spec §15.3）。 */
+const CONTROLS_FIXTURE = `# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+# [novalab] width=compact | app_view=false | kernel_python="3.13"
+
+# %% [cell-id: f1a2b3c4]
+from novakernel import ui
+
+threshold = ui.slider(0, 100, value=42, label="阈值")
+normalize = ui.checkbox(True)
+
+# %% [cell-id: f5e6f7a8]
+scores = [12, 37, 45, 58, 63, 71, 88, 94]
+passed = [x for x in scores if x <= threshold.value]
+total = sum(passed)
+mode = "normalize" if normalize.value else "raw"
+print(f"threshold={threshold.value} mode={mode} passed_n={len(passed)} total={total}")
+`;
+
+/* ---------------- dev 服务：已在跑就复用、没跑就自起自停 ---------------- */
+
+const startedServers = [];
+
+function killStartedServers() {
+  for (const { child, name } of startedServers.splice(0)) {
+    if (child.exitCode !== null || child.killed) continue;
+    log(`停止自起的 ${name}（pid=${child.pid}，taskkill 整树）`);
+    try {
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      try {
+        child.kill('SIGKILL');
+      } catch { /* 忽略 */ }
+    }
+  }
+}
+
+/** TCP 探测（1s 超时）：端口活着即视为服务已在跑（复用，不杀不管）。 */
+function probePort(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host: '127.0.0.1', port });
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      s.destroy();
+      resolve(ok);
+    };
+    s.setTimeout(timeoutMs);
+    s.once('connect', () => finish(true));
+    s.once('error', () => finish(false));
+    s.once('timeout', () => finish(false));
+  });
+}
+
+async function waitForHttp(url, timeoutMs = 120000) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch { /* vite 未就绪 */ }
+    if (Date.now() - t0 > timeoutMs) throw new Error('vite 启动超时: ' + url);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+/** spawn pnpm <script>（shell:true；输出环形缓存，早退时打印尾部供诊断）。 */
+function startDev(script) {
+  const child = spawn('pnpm', [script], {
+    cwd: root,
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const tail = [];
+  const cap = (d) => {
+    tail.push(...String(d).split('\n'));
+    if (tail.length > 60) tail.splice(0, tail.length - 60);
+  };
+  child.stdout.on('data', cap);
+  child.stderr.on('data', cap);
+  child.on('exit', (code) => {
+    if (code !== 0 && code !== null) {
+      console.error(`[gallery] ${script} 早退 code=${code}，输出尾部:\n` + tail.join('\n'));
+    }
+  });
+  startedServers.push({ child, name: script });
+  return child;
+}
+
 /* ---------------- bridge WS 客户端（setup 用） ---------------- */
 
 class BridgeClient {
@@ -126,7 +226,7 @@ class BridgeClient {
           resolve();
         });
         s.on('error', () =>
-          n > 20 ? reject(new Error('bridge 未就绪: ' + this.url)) : setTimeout(() => tryConnect(n + 1), 500),
+          n > 60 ? reject(new Error('bridge 未就绪: ' + this.url)) : setTimeout(() => tryConnect(n + 1), 500),
         );
       };
       tryConnect(0);
@@ -186,9 +286,11 @@ async function openNotebook(page, file) {
   if (await banner.count()) throw new Error('前端降级横幅出现：bridge 未连接');
 }
 
-/** 主列内部滚动 → 溢出时临时增高视口，fullPage 拍全后还原 1440x900。 */
+/** 主列内部滚动 → 溢出时临时增高视口，fullPage 拍全后还原 1440x900。
+ *  选择器限 main 直接子级：SessionModal（15 态）主体同为 .flex-1.overflow-y-auto
+ *  且 DOM 上嵌在 main 内，不限定会 strict-mode 冲突。 */
 async function shoot(page, name) {
-  const scroller = page.locator('main .flex-1.overflow-y-auto');
+  const scroller = page.locator('main > div.flex-1.overflow-y-auto').first();
   if (await scroller.count()) {
     for (let pass = 0; pass < 2; pass++) {
       const extra = await scroller.evaluate((el) => Math.max(0, el.scrollHeight - el.clientHeight));
@@ -230,6 +332,94 @@ async function runCellWs(bridge, cellId) {
   return rep;
 }
 
+/* ---------------- P3 多 tab / inspector / 控件助手 ---------------- */
+
+/** 关光 bridge 侧全部已打开 notebook（P3.1 上下文跨状态存活 → 每态干净起点）。 */
+async function closeAllTabs(bridge) {
+  const list = await bridge.rpc('notebook.list').catch(() => []);
+  for (const t of list ?? []) {
+    await bridge.rpc('notebook.close', { notebookId: t.notebookId }).catch(() => {});
+  }
+}
+
+/**
+ * 清 stale-live 会话索引（画廊卫生，15 态前置）：bridge 被硬杀（taskkill/崩溃/
+ * Ctrl-C）时 index.json 留下未 ended 的 live 条目——它们无 snapshot、UI 打不开，
+ * 却会被前端 refreshSessions 的 find(首个 live) 抢成 currentId，export.ipynb 随即
+ * 报 unknown sessionId。调用前提：已 closeAllTabs（活着的会话都已正规 ended），
+ * 此刻索引中任何无 endedAt 的条目必为死进程残留，剔除安全。
+ */
+function reconcileStaleSessions(notebookDir) {
+  const idx = join(notebookDir, '.novalab', 'sessions', 'index.json');
+  if (!fs.existsSync(idx)) return 0;
+  let entries;
+  try {
+    entries = JSON.parse(fs.readFileSync(idx, 'utf8'));
+  } catch {
+    return 0; // 损坏索引 bridge 侧本就宽容为空，不动
+  }
+  if (!Array.isArray(entries)) return 0;
+  const kept = entries.filter((m) => m && typeof m === 'object' && typeof m.endedAt === 'string');
+  const removed = entries.length - kept.length;
+  if (removed > 0) {
+    fs.writeFileSync(idx, JSON.stringify(kept, null, 2) + '\n', 'utf8');
+    log(`已剔除 ${removed} 条 stale-live 会话索引（硬杀 bridge 残留）`);
+  }
+  return removed;
+}
+
+/** 等 TabBar tab 数 ≥ n（新 tab = 内核 spawn，uv 冷/热启动给足余量）。 */
+async function waitTabs(page, n, timeoutMs = 60000) {
+  const t0 = Date.now();
+  for (;;) {
+    const c = await page.locator('[role="tab"]').count();
+    if (c >= n) return c;
+    if (Date.now() - t0 > timeoutMs) throw new Error(`等待 TabBar ${n} 个 tab 超时（现 ${c}）`);
+    await page.waitForTimeout(300);
+  }
+}
+
+/** TabBar「+」→ 路径输入 → Enter（= 前端 notebook.open，新内核并行保活）。 */
+async function addTab(page, file) {
+  await page.locator('button[aria-label="new tab"]').click();
+  const input = page.locator('input[placeholder="path/to/notebook.py"]');
+  await input.waitFor({ timeout: 5000 });
+  await input.fill(file);
+  await input.press('Enter');
+}
+
+/**
+ * 状态栏 ⠿ 把手「双击」展开 inspector（P3.2）。dragStore 判定 = 两次
+ * pointerdown 间隔 <350ms 且无真拖动；playwright dblclick 的间隔不受控，
+ * 故直接连发两次 dispatchEvent('pointerdown')（同一 tick，确定性 <350ms）。
+ */
+async function openInspectorViaHandle(page) {
+  const handle = page.locator('span[title^="drag to expand variable inspector"]');
+  await handle.waitFor({ timeout: 10000 });
+  const box = await handle.boundingBox();
+  const clientY = box ? box.y + box.height / 2 : 0;
+  await handle.dispatchEvent('pointerdown', { clientY });
+  await handle.dispatchEvent('pointerdown', { clientY });
+  await page.waitForSelector('section[data-testid="inspector"]', { timeout: 10000 });
+}
+
+/**
+ * UI 事件设 slider 值：先试 playwright fill；range input 不支持时退化为
+ * 原生 value setter + bubbling input 事件（React onChange 合成路径）。
+ * 两者都走控件 80ms 节流 → control.set → 内核 mutate + DAG 级联。
+ */
+async function setRangeValue(locator, value) {
+  try {
+    await locator.fill(String(value));
+  } catch {
+    await locator.evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, String(value));
+  }
+}
+
 /* ---------------- 状态实现 ---------------- */
 
 const states = [];
@@ -238,6 +428,7 @@ function state(id, name, fn, opts = {}) {
 }
 
 state('01', '01-open-idle', async (ctx) => {
+  await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
   // sidebar 文件树可见（root = demos/）
@@ -251,6 +442,7 @@ state('01', '01-open-idle', async (ctx) => {
 
 state('02', '02-stale', async (ctx) => {
   const { bridge } = ctx;
+  await closeAllTabs(bridge);
   const original = fs.readFileSync(DEMO_PY, 'utf8');
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
@@ -289,6 +481,7 @@ state('02', '02-stale', async (ctx) => {
 
 state('03', '03-error-fixcard', async (ctx) => {
   const { bridge } = ctx;
+  await closeAllTabs(bridge);
   const page = await ctx.newPage();
   await openNotebook(page, ERROR_PY);
 
@@ -348,6 +541,7 @@ state(
 
 state('04', '04-diff-staged', async (ctx) => {
   const { bridge } = ctx;
+  await closeAllTabs(bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
 
@@ -377,6 +571,7 @@ state('04', '04-diff-staged', async (ctx) => {
 
 state('05', '05-ask-dialog', async (ctx) => {
   const { bridge } = ctx;
+  await closeAllTabs(bridge);
   const page = await ctx.newPage();
   await openNotebook(page, WRITE_PY);
 
@@ -438,6 +633,7 @@ state('06', '06-writes-matplotlib', async (ctx) => {
 
 state('07', '07-repl', async (ctx) => {
   const { bridge } = ctx;
+  await closeAllTabs(bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
 
@@ -490,6 +686,7 @@ state('08', '08-readonly-session', async (ctx) => {
 });
 
 state('09', '09-sidebar-actions', async (ctx) => {
+  await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
   await page.waitForSelector('[role="tree"][aria-label="workspace files"] [role="treeitem"]', {
@@ -511,6 +708,7 @@ state('09', '09-sidebar-actions', async (ctx) => {
 });
 
 state('10', '10-settings', async (ctx) => {
+  await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
   await page.locator('button[title="设置（provider 管理）"]').click();
@@ -519,6 +717,188 @@ state('10', '10-settings', async (ctx) => {
   await page.getByText('明文仅存于本机浏览器 localStorage').waitFor({ timeout: 10000 });
   await page.waitForTimeout(300);
   await shoot(page, '10-settings');
+  await page.close();
+});
+
+/* ---------------- P3 新状态（12–15） ---------------- */
+
+state('12', '12-multi-tab', async (ctx) => {
+  const { bridge } = ctx;
+  await closeAllTabs(bridge);
+  const page = await ctx.newPage();
+  await openNotebook(page, DEMO_PY);
+  await waitTabs(page, 1);
+
+  // 第二个 tab：TabBar + → 路径输入 → notebook.open（demo.py 内核不杀，并行保活）
+  await addTab(page, WRITE_PY);
+  await waitTabs(page, 2);
+  // 每 tab 一枚内核状态点（●，idle 绿）
+  const dots = page.locator('[role="tab"] span[aria-hidden="true"]:text-is("●")');
+  if ((await dots.count()) < 2) throw new Error('TabBar 内核状态点缺失（<2 枚 ●）');
+
+  // 切到第二 tab → notebook.switch 回灌全量 state → 渲染其 cells
+  await page.locator('[role="tab"]:has-text("gallery-write.py")').click();
+  await page.waitForSelector('[role="tab"][aria-selected="true"]:has-text("gallery-write.py")', {
+    timeout: 30000,
+  });
+  await page.waitForSelector('section[data-cell-id="d1e2f3a4"] .cm-editor', { timeout: 30000 });
+  await page.waitForSelector('section[data-cell-id="d9e0f1a2"] .cm-editor', { timeout: 15000 });
+  await shoot(page, '12-multi-tab');
+  await page.close();
+});
+
+state('13', '13-inspector', async (ctx) => {
+  const { bridge } = ctx;
+  // 不清 tab：demo.py 若已从 12 态保活则直接聚焦复用（TabBar 双 tab 同框无碍）
+  const page = await ctx.newPage();
+  await openNotebook(page, DEMO_PY);
+
+  // 跑首两格 → df/total 入命名空间；run.done 后 bridge 自动 introspect →
+  // kernel.schemas 广播 → store.schemas（M 线 L-3 通道）
+  for (const id of ['a1b2c3d4', 'b2c3d4e5']) {
+    const rep = await runCellWs(bridge, id);
+    if (!rep.ok) throw new Error(`run ${id} 失败: ${JSON.stringify(rep)}`);
+  }
+  await page.waitForSelector('section[data-cell-id="b2c3d4e5"] span:text-is("[1]")', { timeout: 15000 });
+
+  // 双击状态栏 ⠿ 把手 → inspector 抽屉展开
+  await openInspectorViaHandle(page);
+  // 表格含 df / total 行（type/shape/preview 列有实义内容）
+  const dfRow = page.locator('[data-testid="inspector-row-df"]');
+  await dfRow.waitFor({ timeout: 15000 });
+  await page.waitForSelector('[data-testid="inspector-row-total"]', { timeout: 10000 });
+  const dfText = (await dfRow.textContent()) ?? '';
+  if (!/DataFrame/.test(dfText)) throw new Error('inspector df 行缺 type/shape/preview: ' + dfText);
+  const totalText = (await page.locator('[data-testid="inspector-row-total"]').textContent()) ?? '';
+  if (!/Series|total/.test(totalText)) throw new Error('inspector total 行内容异常: ' + totalText);
+  await shoot(page, '13-inspector');
+  await page.close();
+});
+
+state('14', '14-controls', async (ctx) => {
+  const { bridge } = ctx;
+  await closeAllTabs(bridge);
+  const page = await ctx.newPage();
+  await openNotebook(page, CONTROLS_PY);
+
+  // 运行两格：控件定义格（run.mime control 载荷）+ 下游计算格
+  const r1 = await runCellWs(bridge, 'f1a2b3c4');
+  if (!r1.ok) throw new Error('控件定义格失败: ' + JSON.stringify(r1));
+  const r2 = await runCellWs(bridge, 'f5e6f7a8');
+  if (!r2.ok) throw new Error('下游计算格失败: ' + JSON.stringify(r2));
+  await page.waitForSelector('section[data-cell-id="f1a2b3c4"] button[aria-expanded]', { timeout: 15000 });
+  await expandOutput(page, 'f1a2b3c4');
+  await expandOutput(page, 'f5e6f7a8');
+
+  // 控件渲染态：slider(阈值, 42) + checkbox(normalize, 勾选) + 下游 stdout
+  const slider = page.locator('input[type="range"][aria-label="阈值"]');
+  await slider.waitFor({ timeout: 15000 });
+  if ((await slider.inputValue()) !== '42') {
+    throw new Error('slider 初值应为 42，实际 ' + (await slider.inputValue()));
+  }
+  const checkbox = page.locator('input[type="checkbox"][aria-label="normalize"]');
+  await checkbox.waitFor({ timeout: 10000 });
+  if (!(await checkbox.isChecked())) throw new Error('checkbox 初值应为勾选');
+  await page.waitForSelector('section[data-cell-id="f5e6f7a8"] pre:has-text("threshold=42")', {
+    timeout: 15000,
+  });
+  await shoot(page, '14-controls');
+
+  // UI 事件设 slider=77 → control.set（80ms 节流）→ 内核 mutate + 级联重跑下游
+  await setRangeValue(slider, 77);
+  await page.waitForSelector('section[data-cell-id="f5e6f7a8"] pre:has-text("threshold=77")', {
+    timeout: 25000,
+  });
+  // 无 stale 残留：旧输出已替换、两格均无 stale 徽章
+  const staleLeft = await page.locator('section[data-cell-id="f5e6f7a8"] pre:has-text("threshold=42")').count();
+  if (staleLeft > 0) throw new Error('级联后旧输出 threshold=42 残留');
+  for (const id of ['f1a2b3c4', 'f5e6f7a8']) {
+    const stale = await page.locator(`section[data-cell-id="${id}"] span:text-is("stale")`).count();
+    if (stale > 0) throw new Error(`级联后 ${id} 仍有 stale 徽章`);
+  }
+  await shoot(page, '14b-controls-cascade');
+  await page.close();
+});
+
+state('15', '15-session-modal', async (ctx) => {
+  const { bridge } = ctx;
+  await closeAllTabs(bridge);
+  const page = await ctx.newPage();
+  await openNotebook(page, DEMO_PY);
+  // live 会话带 cells/outputs（导出走富缓存）
+  for (const id of ['a1b2c3d4', 'b2c3d4e5', 'c3d4e5f6']) {
+    const rep = await runCellWs(bridge, id);
+    if (!rep.ok) throw new Error(`run ${id} 失败: ${JSON.stringify(rep)}`);
+  }
+  await page.waitForSelector('section[data-cell-id="c3d4e5f6"] span:text-is("[1]")', { timeout: 15000 });
+
+  // SessionBar「⧉ Sessions」入口 → SessionModal
+  await page.locator('button[title^="Session notebook —"]').click();
+  const dialog = page.locator('[role="dialog"][aria-label="Session notebook"]');
+  await dialog.waitFor({ timeout: 10000 });
+  const headers = dialog.locator('section button[aria-expanded]');
+  await headers.first().waitFor({ timeout: 15000 });
+
+  // 展开一个 ended（只读）会话段 → 只读 cell 精简行（找不到 ended 段则退回首段）
+  const nSeg = await headers.count();
+  let expandedIdx = -1;
+  for (let i = 0; i < nSeg; i++) {
+    const h = headers.nth(i);
+    if ((await h.locator('span:text-is("live")').count()) > 0) continue;
+    await h.click();
+    const sec = dialog.locator('section').nth(i);
+    await sec.locator('div.border-t').first().waitFor({ timeout: 10000 }).catch(() => {});
+    expandedIdx = i;
+    break;
+  }
+  if (expandedIdx < 0) {
+    await headers.first().click();
+    ctx.notes.push('15: 无 ended 会话段可展开（首段代替）——分组头证据仍有效');
+  }
+  await page.waitForTimeout(600); // 快照行渲染稳定
+  await shoot(page, '15-session-modal');
+
+  // footer「.ipynb」导出 → 断言 .novalab/sessions/*.ipynb 落盘（node 侧 fs）
+  const status = dialog.locator('footer p[aria-live="polite"]');
+  await dialog.locator('footer button:text-is(".ipynb")').click();
+  await status
+    .filter({ hasText: '已导出' })
+    .waitFor({ timeout: 20000 })
+    .catch(async () => {
+      const txt = (await status.textContent().catch(() => '')) ?? '';
+      throw new Error('export.ipynb 未成功，footer 状态: ' + txt);
+    });
+  const msg = (await status.textContent()) ?? '';
+  const m = msg.match(/已导出 (.+?)（(\d+) cells · (\d+) outputs）/);
+  if (!m) throw new Error('导出消息格式异常: ' + msg);
+  const ipynbPath = m[1];
+  if (!fs.existsSync(ipynbPath)) throw new Error('导出 .ipynb 未落盘: ' + ipynbPath);
+  if (!ipynbPath.includes(path.join('.novalab', 'sessions'))) {
+    throw new Error('导出路径不在 .novalab/sessions: ' + ipynbPath);
+  }
+  ctx.notes.push(`15: export.ipynb 落盘 ${path.relative(root, ipynbPath)}（${m[2]} cells · ${m[3]} outputs）`);
+
+  // import 回转：同一 .ipynb → 生成 .py（wx 排他）→ 前端自动 openNotebook 新 tab
+  await dialog.locator('input[aria-label="import .ipynb 路径"]').fill(ipynbPath);
+  await dialog.locator('button:text-is("import .ipynb")').click();
+  const pyPath = ipynbPath.replace(/\.ipynb$/, '.py');
+  const t0 = Date.now();
+  for (;;) {
+    if (fs.existsSync(pyPath)) break;
+    if (Date.now() - t0 > 20000) throw new Error('import 回转 .py 未落盘: ' + pyPath);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  const base = pyPath.split(/[\\/]/).pop();
+  await page.locator(`[role="tab"]:has-text("${base}")`).waitFor({ timeout: 60000 });
+
+  // 关模态 → 新 tab（选中态）+ 导入 notebook 的 cells 同框 = 15b 证据
+  await dialog.locator('button[aria-label="关闭"]').click();
+  await dialog.waitFor({ state: 'detached', timeout: 5000 });
+  await page.waitForSelector(`[role="tab"][aria-selected="true"]:has-text("${base}")`, { timeout: 15000 });
+  await page.waitForSelector('section[data-cell-id] .cm-editor', { timeout: 40000 });
+  await page.waitForTimeout(600);
+  await shoot(page, '15b-import-done');
+  ctx.notes.push(`15b: import.ipynb 回转 ${path.relative(root, pyPath)}（新 tab 打开）`);
   await page.close();
 });
 
@@ -534,15 +914,36 @@ async function main() {
   // 夹具每次重写
   fs.writeFileSync(ERROR_PY, ERROR_FIXTURE);
   fs.writeFileSync(WRITE_PY, WRITE_FIXTURE);
+  fs.writeFileSync(CONTROLS_PY, CONTROLS_FIXTURE);
   // 09 态新建的 notebook：fs.writeFile 不覆盖已存在文件（EXIST），
   // 每次运行前删掉自己的 gallery-created.py 保证真"新建"且截图无报错。
   fs.rmSync(join(DEMOS, 'gallery-created.py'), { force: true });
   const demoOriginal = fs.readFileSync(DEMO_PY, 'utf8');
 
+  // dev 服务：已在跑就复用；没跑就自起（退出前自停，见 killStartedServers）
+  if (await probePort(7788)) {
+    log('bridge 已在跑（:7788）→ 复用');
+  } else {
+    log('bridge 未跑 → 自起 pnpm dev:bridge');
+    startDev('dev:bridge');
+  }
+  if (await probePort(5199)) {
+    log('app 已在跑（:5199）→ 复用');
+  } else {
+    log('app 未跑 → 自起 pnpm dev:app');
+    startDev('dev:app');
+  }
+  await waitForHttp(APP_URL);
+  log('vite HTTP 200', APP_URL);
+
   const bridge = new BridgeClient(BRIDGE_URL);
   await bridge.connect();
   await bridge.rpc('ping');
   log('bridge 已连接', BRIDGE_URL);
+
+  // 起跑线卫生：关掉遗留上下文 + 清 stale-live 索引（见 reconcileStaleSessions 注释）
+  await closeAllTabs(bridge);
+  reconcileStaleSessions(DEMOS);
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -605,6 +1006,12 @@ async function main() {
       if (d.status === 'proposed') await bridge.rpc('diff.reject', { diffId: d.diffId }).catch(() => {});
     }
   } catch { /* 忽略 */ }
+  // 关掉本脚本打开的全部 notebook：会话正规 ended，index.json 不留 stale-live
+  // （自起 bridge 随后被 taskkill 硬杀也不产生残留）。必须先于 demo.py 兜底
+  // 还原：notebook.close 的 persistToDisk 会让内核 save_file 重写 .py。
+  try {
+    await closeAllTabs(bridge);
+  } catch { /* 忽略 */ }
   // demo.py 字节级兜底还原（02 已经 UI 还原，这里防御中途失败）
   try {
     if (fs.readFileSync(DEMO_PY, 'utf8') !== demoOriginal) {
@@ -636,10 +1043,19 @@ async function main() {
     console.log('\n==== 页面 console 错误（去重前 12 条，供遗留 bug 记录） ====');
     for (const e of uniq) console.log('- ' + e);
   }
+  killStartedServers();
   process.exit(failed.length > 0 ? 1 : 0);
 }
 
+// 自起服务的兜底回收：正常结束 / 致命错误 / Ctrl-C / 进程退出
+process.on('exit', killStartedServers);
+process.on('SIGINT', () => {
+  killStartedServers();
+  process.exit(130);
+});
+
 main().catch((err) => {
   console.error('GALLERY_FATAL:', err);
+  killStartedServers();
   process.exit(2);
 });
