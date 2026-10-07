@@ -4,7 +4,9 @@
 - 文件头：PEP 723 ``# /// script`` 块 + ``# [novalab] k=v | k2=v2`` 配置行
   （未知键忽略，原样保留以向前兼容）；
 - cell 分隔：``# %% [cell-id: <8hex>]``；
-- 无 marker 的手写 .py（含 marimo 导出文件）宽容解析为**单 cell**（id 新生成）；
+- 无 marker 的手写 .py 宽容解析为**单 cell**（id 新生成）；若是真 marimo 文件
+  （检出 ``@app.cell`` / ``app = marimo.App``）则走 convert.marimo_to_novalab
+  **真转换**（P3.6：拓扑序多 cell，转换失败仍降级单 cell）；
 - 首个 marker 之前的正文（若有）也宽容地成为一个新 id cell；
 - read → write → read 往返无损：cell 代码文本逐字节一致；write 幂等
   （write(parse(write(x))) == write(x)）。
@@ -31,6 +33,10 @@ __all__ = [
 
 CELL_MARKER_RE = re.compile(r"^# %% \[cell-id: ([0-9a-fA-F]{8})\][ \t]*$")
 NOVALAB_CONFIG_RE = re.compile(r"^# \[novalab\](.*)$")
+# 真 marimo 文件特征（S1 侦察：@app.cell 装饰器式 + marimo.App 头）
+_MARIMO_HINT_RE = re.compile(
+    r"^@app\.(?:cell|function|class_definition)\b|^app\s*=\s*marimo\.App\b", re.M
+)
 
 DEFAULT_HEADER_LINES = [
     "# /// script",
@@ -103,7 +109,14 @@ def parse(text: str) -> Notebook:
 
     cells: list[Cell] = []
     if not markers:
-        # 宽容降级：无 marker 的手写 .py = 单 cell（新 id）
+        # 真 marimo（@app.cell 装饰器式）→ convert 真转换；失败或非 marimo → 单 cell 降级
+        if _MARIMO_HINT_RE.search(text):
+            try:
+                from . import convert  # 延迟导入：convert 顶层 import serialize，避免循环
+
+                return parse(convert.marimo_to_novalab(text))
+            except Exception:
+                pass  # 宽容：语法错误/非 marimo → 落入单 cell 降级
         body = "\n".join(lines[i:]).strip("\n")
         cells.append(Cell(new_cell_id(), body))
     else:

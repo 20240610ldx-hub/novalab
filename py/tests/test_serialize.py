@@ -1,7 +1,8 @@
 """test_serialize.py — NovaLab .py 格式读写（spec §4）。
 
-往返无损（逐字节一致）只对**我们自己的格式**承诺；refs/marimo 示例按 S1 侦察结论
-做"宽容导入"测试：解析不崩溃、代码文本不丢失（整文件单 cell），不解析 @app.cell 语义。
+往返无损（逐字节一致）只对**我们自己的格式**承诺；refs/marimo 示例自 P3.6 起走
+convert.marimo_to_novalab **真转换**（多 cell、拓扑序、新 id），非 marimo 的手写
+不规范 .py 仍宽容降级为单 cell。
 """
 
 import re
@@ -122,26 +123,29 @@ def test_file_roundtrip_on_disk(tmp_path):
     assert raw == text2.encode("utf-8")  # LF、UTF-8、无 BOM
 
 
-# --------------------------------------------------------------- marimo 宽容导入
+# --------------------------------------------------------------- marimo 导入
 # S1 结论：真 marimo .py 是 @app.cell 装饰器式，与本格式互不直读。
-# 这里只验证"宽容导入"：解析不崩溃、代码文本不丢失、写入本格式后往返无损。
+# P3.6 起：检测到 marimo 特征 → convert.marimo_to_novalab 真转换（多 cell、拓扑序、
+# 新 8hex id）；非 marimo 的手写 .py 仍单 cell 降级。转换后写入本格式往返无损。
 
-MARIMO_FIXTURES = [
-    "marimo_compound_interest.py",
-    "marimo_stop_execution.py",
-    "marimo_console_outputs.py",
-]
+MARIMO_FIXTURES = {
+    "marimo_compound_interest.py": 6,
+    "marimo_stop_execution.py": 3,
+    "marimo_console_outputs.py": 2,
+}
 
 
-def test_marimo_fixtures_lenient_import(tmp_path):
-    for fname in MARIMO_FIXTURES:
+def test_marimo_fixtures_true_conversion():
+    for fname, n_cells in MARIMO_FIXTURES.items():
         src = (FIXTURES / fname).read_text(encoding="utf-8")
         nb = serialize.parse(src)  # 不崩溃
-        assert len(nb.cells) >= 1, fname
-        # 代码文本不丢失：所有非头部正文都在 cells 里
+        assert len(nb.cells) == n_cells, fname
         joined = "\n".join(c.code for c in nb.cells)
-        assert "import marimo" in joined or "marimo" in joined, fname
-        assert "@app.cell" in joined, fname
+        # 真转换：装饰器/头/run guard 不进 cell 体，代码主体保留
+        assert "@app.cell" not in joined, fname
+        assert "app.run()" not in joined, fname
+        assert "import marimo as mo" in joined, fname
+        assert all(HEX8.match(c.id) for c in nb.cells), fname
         # 转成本格式后 read→write→read 无损
         text = serialize.write(nb.cells, header_lines=nb.header_lines)
         nb2 = serialize.parse(text)
@@ -154,13 +158,32 @@ def test_marimo_fixture_pep723_header_recognized():
     nb = serialize.parse(src)
     assert nb.header_lines[0].strip() == "# /// script"
     assert any("dependencies" in ln for ln in nb.header_lines)
-    # 头部不进 cell 代码
+    # 头部不进 cell 代码；拓扑序后 import cell（mo/plt 的定义者）排第一
     assert not nb.cells[0].code.startswith("# /// script")
-    assert nb.cells[0].code.startswith("import marimo")
+    assert nb.cells[0].code.startswith("import marimo as mo")
 
 
 def test_marimo_fixture_without_header():
     src = (FIXTURES / "marimo_stop_execution.py").read_text(encoding="utf-8")
     nb = serialize.parse(src)
+    # 无 PEP723 头的 marimo 文件也走真转换：3 cell（import mo / button / mo.stop）
+    assert len(nb.cells) == 3
+    assert nb.cells[0].code == "import marimo as mo"
+    assert "mo.ui.run_button()" in nb.cells[1].code
+    assert "mo.stop(" in nb.cells[2].code
+
+
+def test_marimo_lookalike_string_falls_back_to_single_cell():
+    # 字符串里含 @app.cell 字样但无 marimo.App 头 → 转换拒绝 → 宽容单 cell
+    src = 'S = """\n@app.cell\ndef _(x):\n    return\n"""\nprint(S)\n'
+    nb = serialize.parse(src)
     assert len(nb.cells) == 1
-    assert nb.cells[0].code.strip("\n") == src.strip("\n")  # 整文件单 cell，无损
+    assert "@app.cell" in nb.cells[0].code
+
+
+def test_broken_marimo_falls_back_to_single_cell():
+    # 有 marimo 特征但语法错误 → 转换失败 → 宽容单 cell，不崩溃
+    src = "import marimo\napp = marimo.App()\n\n@app.cell\ndef _(:\n    x = 1\n"
+    nb = serialize.parse(src)
+    assert len(nb.cells) == 1
+    assert "@app.cell" in nb.cells[0].code
