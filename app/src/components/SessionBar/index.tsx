@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { bridge } from '../../bridge/client';
 import { useNotebook } from '../../store/notebook';
 import {
   SESSION_CELL_LIMIT,
@@ -9,6 +8,7 @@ import {
   useSession,
   type SessionMeta,
 } from '../../store/session';
+import { SessionModal } from '../SessionModal';
 
 /* ------------------------------------------------------------------ */
 /* P2.8 SessionBar（spec 附录 A-2 #12/#13/#14）                          */
@@ -18,7 +18,9 @@ import {
 /* - 右 pill（SessionStatusPill，替换原 LivePill 位）：`live` /            */
 /*   `Ended HH:MM`，下拉 = 同一会话列表；kernel dead 时附 restart 行；     */
 /* - 截断横幅（>500 cells）：fixed 顶部居中（挂载位置不影响视觉位置，      */
-/*   同 DiffTray 先例），导出按钮接 export.ipynb（bridge 现回 -32600 P3）。 */
+/*   同 DiffTray 先例），导出按钮走 store exportIpynb（P3.4：-32600/-32601  */
+/*   降级「接线 pending」，router 接线在 P3.1 合入后由 orchestrator 统一接）；*/
+/* - `⧉ Sessions` 入口按钮 → SessionModal（P3.4）。                        */
 /* ------------------------------------------------------------------ */
 
 function fmt(iso: string | null | undefined): string {
@@ -122,13 +124,14 @@ function makePickSession(close: () => void): (sessionId: string) => void {
   };
 }
 
-/** header 左 pill：notebook 名 + 会话切换下拉（A-2 #13）。 */
+/** header 左 pill：notebook 名 + 会话切换下拉（A-2 #13）+ SessionModal 入口（P3.4）。 */
 export function SessionBar() {
   const notebookPath = useNotebook((s) => s.notebookPath);
   const sessions = useSession((s) => s.sessions);
   const currentId = useSession((s) => s.currentId);
   const viewingId = useSession((s) => s.viewingId);
   const refreshSessions = useSession((s) => s.refreshSessions);
+  const openModal = useSession((s) => s.openModal);
   const [open, setOpen] = useState(false);
 
   // 打开下拉时拉最新列表（live cellCount / 新 ended 会话）
@@ -142,7 +145,7 @@ export function SessionBar() {
   const label = viewing ? fmt(viewing.startedAt) : fileName ? `${fileName} · python` : 'NovaLab';
 
   return (
-    <div className="relative">
+    <div className="relative flex items-center gap-1.5">
       <button
         type="button"
         onClick={toggle}
@@ -156,6 +159,17 @@ export function SessionBar() {
         )}
         <span aria-hidden className="text-[9px] text-[var(--muted)]">▼</span>
       </button>
+      {/* P3.4：SessionModal 入口（segments 折叠分组 + .ipynb 导出/导入） */}
+      <button
+        type="button"
+        onClick={openModal}
+        disabled={!notebookPath}
+        title="Session notebook — 会话浏览 · .ipynb 导出/导入"
+        className="flex items-center gap-1 rounded-full bg-[var(--panel)] px-2.5 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--border)] hover:text-[var(--text)] disabled:cursor-default disabled:opacity-60"
+      >
+        <span aria-hidden>⧉</span>
+        <span>Sessions</span>
+      </button>
       {open && notebookPath && (
         <SessionMenu
           sessions={sessions}
@@ -167,6 +181,8 @@ export function SessionBar() {
       )}
       {/* A-2 #14 截断横幅：fixed 顶部居中（挂载点不影响视觉位置） */}
       <TruncationBanner />
+      {/* P3.4 SessionModal：fixed 覆盖层，modalOpen=false 时渲染 null */}
+      <SessionModal />
     </div>
   );
 }
@@ -232,27 +248,31 @@ export function SessionStatusPill() {
   );
 }
 
-/** >500 cells 横幅 + export.ipynb 按钮（bridge 现回 -32600：tooltip 标 P3）。 */
+/** >500 cells 横幅 + export.ipynb 按钮（走 store action：-32600/-32601 降级「接线 pending」，P3.4）。 */
 function TruncationBanner() {
   const viewingId = useSession((s) => s.viewingId);
   const historyTotal = useSession((s) => s.historyTotal);
+  const exportState = useSession((s) => s.exportState);
   if (!viewingId) return null;
   const text = truncationBanner(historyTotal);
   if (!text) return null;
+  const pending = exportState.status === 'pending-wiring';
   return (
     <div className="fixed left-1/2 top-2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-md border border-[var(--accent-run)] bg-[var(--panel)] px-4 py-2 text-[12px] shadow-lg">
       <span>{text}</span>
       <button
         type="button"
-        title={`export .ipynb — P3 feature（export.ipynb 暂返回 -32600；完整日志见 ${SESSION_CELL_LIMIT}+ 导出）`}
+        title={
+          pending
+            ? '接线 pending —— export.ipynb 尚未接入 router（P3.1 合入后生效）'
+            : `export .ipynb — 完整日志见 ${SESSION_CELL_LIMIT}+ 导出（nbformat 4.5）`
+        }
         onClick={() => {
-          bridge.rpc('export.ipynb', { sessionId: viewingId }).catch((err: unknown) => {
-            console.error('export.ipynb（P3）:', err);
-          });
+          void useSession.getState().exportIpynb(viewingId);
         }}
         className="rounded border border-[var(--border)] px-2 py-0.5 text-[var(--muted)] hover:border-[var(--accent-run)]"
       >
-        export .ipynb
+        export .ipynb{pending ? '（接线 pending）' : ''}
       </button>
     </div>
   );

@@ -164,6 +164,109 @@ export function normalizeSessionMetas(payload: unknown): SessionMeta[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* P3.4 SessionModal：segments selector + export/import 降级             */
+/* ------------------------------------------------------------------ */
+
+/** 会话内子段切分阈值：>30min 间隔（spec §11 segments 定义）。 */
+export const SEGMENT_GAP_MS = 30 * 60 * 1000;
+
+/**
+ * segment = 会话（SessionModal 分组单位）。若提供会话内时间戳序列
+ * （timestampsBySession：事件级 ts，如未来 session.tail 接线），相邻间隔
+ * >gapMs 时在会话内再切子段（parts>1，partStarts 携带各子段起点）；
+ * 无时间戳 → 恒 parts=1（快照 cells 不带 ts，宽容退化）。
+ */
+export interface SessionSegment {
+  sessionId: string;
+  startedAt: string;
+  endedAt?: string;
+  cellCount: number;
+  source: 'local' | 'agent';
+  /** live = 无 endedAt。 */
+  live: boolean;
+  parts: number;
+  /** 各子段起点 ISO 时间（长度 = parts；首元素 = 会话内首个有效 ts 或 startedAt）。 */
+  partStarts: string[];
+}
+
+/** 纯函数 selector：sessions（+ 可选会话内 ts）→ 段落列表（最新在前，与 SessionMenu 同序）。 */
+export function buildSegments(
+  sessions: readonly SessionMeta[],
+  timestampsBySession?: Readonly<Record<string, readonly string[]>>,
+  gapMs: number = SEGMENT_GAP_MS,
+): SessionSegment[] {
+  const ordered = [...sessions].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+  return ordered.map((m) => {
+    const live = m.endedAt === undefined;
+    const ts = (timestampsBySession?.[m.id] ?? [])
+      .map((t) => ({ iso: t, ms: Date.parse(t) }))
+      .filter((t) => Number.isFinite(t.ms))
+      .sort((a, b) => a.ms - b.ms);
+    const partStarts: string[] = [];
+    if (ts.length > 0) {
+      partStarts.push(ts[0]!.iso);
+      for (let i = 1; i < ts.length; i++) {
+        if (ts[i]!.ms - ts[i - 1]!.ms > gapMs) partStarts.push(ts[i]!.iso);
+      }
+    }
+    return {
+      sessionId: m.id,
+      startedAt: m.startedAt,
+      ...(m.endedAt !== undefined ? { endedAt: m.endedAt } : {}),
+      cellCount: m.cellCount,
+      source: m.source,
+      live,
+      parts: Math.max(1, partStarts.length),
+      partStarts: partStarts.length > 0 ? partStarts : [m.startedAt],
+    };
+  });
+}
+
+/** modal 头部计数：`N sessions · M cells` 的数据源。 */
+export function modalSummary(sessions: readonly SessionMeta[]): { sessionCount: number; cellCount: number } {
+  return {
+    sessionCount: sessions.length,
+    cellCount: sessions.reduce((n, s) => n + (Number.isFinite(s.cellCount) ? s.cellCount : 0), 0),
+  };
+}
+
+/**
+ * rpc 失败是否为「接线 pending」（P3.1 合入前 export.ipynb 回 -32600 "P3 feature"，
+ * import.ipynb 未注册回 -32601 "method not found: …"）。BridgeClient 把服务端
+ * error.message 包成 Error（code 丢失），故按 message 特征识别；接线后自然消失。
+ */
+export function isWiringPending(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /P3 feature/i.test(msg) || /method not found/i.test(msg) || /-32600|-32601/.test(msg);
+}
+
+/** export/import 按钮的状态机（降级不 throw，全部落 store 供 UI 渲染）。 */
+export type TransferStatus = 'idle' | 'working' | 'ok' | 'pending-wiring' | 'error';
+
+export interface TransferState {
+  status: TransferStatus;
+  message: string | null;
+  /** 成功产物路径（export → .ipynb；import → .py）。 */
+  path: string | null;
+  /** import 降级警告（magic/outputs/markdown）。 */
+  warnings: string[];
+}
+
+export const idleTransfer: TransferState = { status: 'idle', message: null, path: null, warnings: [] };
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err ?? '');
+}
+
+/** rpc 失败 → TransferState 的统一降级（wiring pending / 其他 error）。 */
+export function degradeTransfer(err: unknown): TransferState {
+  if (isWiringPending(err)) {
+    return { status: 'pending-wiring', message: '接线 pending —— bridge router 尚未接通（P3.1 合入后生效）', path: null, warnings: [] };
+  }
+  return { status: 'error', message: errText(err), path: null, warnings: [] };
+}
+
+/* ------------------------------------------------------------------ */
 /* Store                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -190,6 +293,16 @@ interface SessionStore {
   /** 历史快照截断前 cell 总数（横幅阈值判断）。 */
   historyTotal: number;
 
+  /* ---- P3.4 SessionModal ---- */
+  modalOpen: boolean;
+  /** 展开会话的快照缓存（session.open → 截断后 cells + 截断前 total）。 */
+  snapshotLoading: Record<string, boolean>;
+  snapshotCells: Record<string, SessionSnapshotCell[]>;
+  snapshotTotals: Record<string, number>;
+  /** export.ipynb / import.ipynb 按钮状态（含接线 pending 降级）。 */
+  exportState: TransferState;
+  importState: TransferState;
+
   syncRoot: () => Promise<void>;
   setRootDir: (dir: string) => Promise<void>;
   refreshSessions: (notebookPath?: string) => Promise<void>;
@@ -199,6 +312,16 @@ interface SessionStore {
   backToLive: () => Promise<void>;
   onStarted: (p: { sessionId?: string; startedAt?: string; notebookPath?: string }) => void;
   onEnded: (p: { sessionId?: string; endedAt?: string }) => void;
+
+  /* ---- P3.4 SessionModal actions ---- */
+  openModal: () => void;
+  closeModal: () => void;
+  /** 展开会话时惰性拉快照（已缓存则跳过；live 会话由 router 内存投影兜底）。 */
+  loadSnapshot: (sessionId: string) => Promise<void>;
+  /** 导出会话 .ipynb（export.ipynb rpc；-32600/-32601 → pending-wiring 降级）。 */
+  exportIpynb: (sessionId?: string | null) => Promise<void>;
+  /** 导入 .ipynb → 成功后 openNotebook 新 .py（import.ipynb rpc；同样降级）。 */
+  importNotebook: (sourcePath: string, targetPath?: string) => Promise<boolean>;
 }
 
 /** 最近一次已知 notebook 路径（session.* 通知不带路径时的 fallback）。 */
@@ -214,6 +337,12 @@ export const useSession = create<SessionStore>((set, get) => ({
   viewingId: null,
   viewingEndedAt: null,
   historyTotal: 0,
+  modalOpen: false,
+  snapshotLoading: {},
+  snapshotCells: {},
+  snapshotTotals: {},
+  exportState: idleTransfer,
+  importState: idleTransfer,
 
   syncRoot: async () => {
     try {
@@ -293,6 +422,100 @@ export const useSession = create<SessionStore>((set, get) => ({
       viewingEndedAt: null,
       historyTotal: 0,
     });
+  },
+
+  /* ---- P3.4 SessionModal ---- */
+
+  openModal: () => {
+    set({ modalOpen: true, exportState: idleTransfer, importState: idleTransfer });
+    void get().refreshSessions();
+  },
+
+  closeModal: () => set({ modalOpen: false }),
+
+  loadSnapshot: async (sessionId) => {
+    const s = get();
+    if (s.snapshotCells[sessionId] || s.snapshotLoading[sessionId]) return; // 已缓存/在途
+    const nb = useNotebook.getState().notebookPath ?? lastNotebookPath;
+    if (!nb) return;
+    set({ snapshotLoading: { ...get().snapshotLoading, [sessionId]: true } });
+    try {
+      const res = await bridge.rpc<SessionOpenPayload>('session.open', { sessionId, notebookPath: nb });
+      const cells = res?.cells ?? [];
+      const { shown, total } = truncateHistory(cells);
+      set({
+        snapshotLoading: { ...get().snapshotLoading, [sessionId]: false },
+        snapshotCells: { ...get().snapshotCells, [sessionId]: shown },
+        snapshotTotals: { ...get().snapshotTotals, [sessionId]: total },
+      });
+    } catch (err) {
+      console.error('session.open（SessionModal 快照）失败:', err);
+      set({
+        snapshotLoading: { ...get().snapshotLoading, [sessionId]: false },
+        snapshotCells: { ...get().snapshotCells, [sessionId]: [] },
+        snapshotTotals: { ...get().snapshotTotals, [sessionId]: 0 },
+      });
+    }
+  },
+
+  exportIpynb: async (sessionId) => {
+    const st = get();
+    const nb = useNotebook.getState().notebookPath ?? lastNotebookPath;
+    const sid = sessionId ?? st.viewingId ?? st.currentId;
+    if (!nb || !sid) {
+      set({ exportState: { ...idleTransfer, status: 'error', message: '无可导出会话（尚未打开 notebook 或无 live 会话）' } });
+      return;
+    }
+    set({ exportState: { ...idleTransfer, status: 'working' } });
+    try {
+      // 接线契约（P3.1 后 orchestrator 接）：{path, sessionId} → exporter.exportIpynb
+      const res = await bridge.rpc<{ path?: string; nbCells?: number; nbOutputs?: number }>('export.ipynb', {
+        path: nb,
+        sessionId: sid,
+      });
+      const p = typeof res?.path === 'string' ? res.path : null;
+      set({
+        exportState: {
+          status: 'ok',
+          message: `已导出 ${p ?? '.ipynb'}（${res?.nbCells ?? '?'} cells · ${res?.nbOutputs ?? '?'} outputs）`,
+          path: p,
+          warnings: [],
+        },
+      });
+    } catch (err) {
+      set({ exportState: degradeTransfer(err) }); // -32600/-32601 → pending-wiring（tooltip「接线 pending」）
+    }
+  },
+
+  importNotebook: async (sourcePath, targetPath) => {
+    if (typeof sourcePath !== 'string' || sourcePath.trim() === '') {
+      set({ importState: { ...idleTransfer, status: 'error', message: '输入 .ipynb 路径后再导入' } });
+      return false;
+    }
+    set({ importState: { ...idleTransfer, status: 'working' } });
+    try {
+      // 接线契约（P3.1 后 orchestrator 接）：{path, targetPath?} → importer.importIpynb
+      const res = await bridge.rpc<{ path?: string; cells?: unknown[]; warnings?: string[] }>('import.ipynb', {
+        path: sourcePath.trim(),
+        ...(targetPath ? { targetPath } : {}),
+      });
+      const p = res?.path;
+      if (typeof p !== 'string' || p === '') throw new Error('import.ipynb 响应缺少 path');
+      const warnings = Array.isArray(res?.warnings) ? res.warnings.filter((w): w is string => typeof w === 'string') : [];
+      await useNotebook.getState().openNotebook(p); // 成功 → 打开新 .py（只读视图自动退出）
+      set({
+        importState: {
+          status: 'ok',
+          message: `已导入 ${p}（${warnings.length} 条降级警告）`,
+          path: p,
+          warnings,
+        },
+      });
+      return true;
+    } catch (err) {
+      set({ importState: degradeTransfer(err) });
+      return false;
+    }
   },
 
   onStarted: (p) => {

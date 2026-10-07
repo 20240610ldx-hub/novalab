@@ -393,10 +393,10 @@ describe('RpcRouter · diff 暂存队列', () => {
 });
 
 describe('RpcRouter · 其他', () => {
-  it('export.ipynb → -32600 P3 feature', async () => {
+  it('export.ipynb 无 live notebook 且无 sessionId → -32602（全链路见 router.ipynb.test.ts）', async () => {
     setup();
     const res = await call('export.ipynb', { path: 'x', target: 'y' });
-    expect(res.error).toEqual({ code: -32600, message: 'P3 feature' });
+    expect(res.error?.code).toBe(-32602);
   });
 
   it('未知方法 → -32601', async () => {

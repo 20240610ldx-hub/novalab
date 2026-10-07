@@ -63,6 +63,11 @@ import { SessionStore, type ActiveSession } from './session-store';
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
+import { exportIpynb, IpynbError, type ExportCell } from './exporter';
+import { ImportError, importIpynb } from './importer';
+
+/** .ipynb 导出用：单条 mime 数据存储上限（超大图弃数据仅留键，防内存膨胀）。 */
+const MIME_DATA_LIMIT = 2_000_000;
 
 /**
  * agent.cellOutput 每字段的截断上限（spec §7：8KB）。
@@ -85,6 +90,8 @@ interface OutputBuffer {
   stderrTrunc: boolean;
   traceback?: string;
   mimeKeys: string[];
+  /** mime 数据（文本/base64），.ipynb 导出用；超 MIME_DATA_LIMIT 的条目弃数据仅留键。 */
+  mime: Record<string, string | string[]>;
   /** run.notify kind='file-write' 的路径（写入顺序，去重，≤WRITES_PATH_LIMIT）。 */
   writes: string[];
 }
@@ -320,7 +327,9 @@ export class RpcRouter {
       case 'session.open':
         return this.sessionOpen(params);
       case 'export.ipynb':
-        throw new RpcFault(ERR_INVALID_REQUEST, 'P3 feature');
+        return this.exportIpynb(params);
+      case 'import.ipynb':
+        return this.importIpynb(params);
       default:
         throw new RpcFault(ERR_METHOD_NOT_FOUND, `method not found: ${method}`);
     }
@@ -909,6 +918,7 @@ export class RpcRouter {
           stdoutTrunc: false,
           stderrTrunc: false,
           mimeKeys: [],
+          mime: {},
           writes: [],
         });
         return;
@@ -931,6 +941,12 @@ export class RpcRouter {
         const buf = this.ensureOutputBuffer(ctx, cellId);
         const mime = typeof p['mime'] === 'string' ? p['mime'] : undefined;
         if (mime && !buf.mimeKeys.includes(mime)) buf.mimeKeys.push(mime);
+        if (mime) {
+          const raw = p['data'];
+          const data = typeof raw === 'string' || Array.isArray(raw) ? raw : undefined;
+          const size = typeof data === 'string' ? data.length : Array.isArray(data) ? data.join('').length : 0;
+          if (data !== undefined && size <= MIME_DATA_LIMIT) buf.mime[mime] = data;
+        }
         return;
       }
       case 'run.error': {
@@ -958,7 +974,7 @@ export class RpcRouter {
   private ensureOutputBuffer(ctx: NotebookContext, cellId: string): OutputBuffer {
     let buf = ctx.outputs.get(cellId);
     if (!buf) {
-      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], writes: [] };
+      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], mime: {}, writes: [] };
       ctx.outputs.set(cellId, buf);
     }
     return buf;
@@ -1114,6 +1130,84 @@ export class RpcRouter {
       cells: found.snapshot.cells,
       readOnly: true,
     };
+  }
+
+  // ---------- .ipynb 导出/导入（P3.4 接线；exporter/importer 为纯模块，N6 线交付） ----------
+
+  /**
+   * export.ipynb {path?, sessionId?, target?}：
+   * live 会话（缺省 sessionId 或等于焦点当前会话）走富缓存（含 mime 数据）；
+   * 历史会话走 snapshot（文本形态输出，mime 仅键名故不含图像数据）。
+   */
+  private exportIpynb(params: Record<string, unknown>): { path: string; nbCells: number; nbOutputs: number } {
+    const nb =
+      typeof params['path'] === 'string' && params['path'] !== ''
+        ? params['path']
+        : this.focusCtxOptional()?.path;
+    if (!nb) throw new RpcFault(ERR_NO_NOTEBOOK, 'export.ipynb 需要 {path}（当前无已打开 notebook）');
+    const ctx = this.ctxByPath(nb);
+    const sessionId = typeof params['sessionId'] === 'string' ? params['sessionId'] : ctx?.session?.id;
+    let cells: ExportCell[];
+    if (ctx && (!sessionId || sessionId === ctx.session?.id)) {
+      cells = (ctx.cache?.cells ?? []).map((c) => {
+        const buf = ctx.outputs.get(c.id);
+        return {
+          id: c.id,
+          code: c.code,
+          execCount: c.execCount,
+          output: buf
+            ? {
+                stdout: buf.stdout,
+                stderr: buf.stderr,
+                traceback: buf.traceback ?? null,
+                mime: buf.mime,
+                writes: buf.writes,
+              }
+            : null,
+        };
+      });
+    } else if (sessionId) {
+      const found = this.sessions.open(path.dirname(nb), sessionId);
+      if (!found) throw new RpcFault(ERR_INVALID_PARAMS, `unknown sessionId: ${sessionId}`);
+      cells = found.snapshot.cells.map((c) => ({
+        id: c.id,
+        code: c.code,
+        execCount: c.execCount,
+        output: {
+          stdout: c.output?.stdout,
+          stderr: c.output?.stderr,
+          traceback: c.output?.traceback ?? null,
+          writes: c.output?.writes,
+        },
+      }));
+    } else {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'export.ipynb：无法定位会话（无 live notebook 且未传 sessionId）');
+    }
+    const target =
+      typeof params['target'] === 'string' && params['target'] !== ''
+        ? params['target']
+        : path.join(path.dirname(nb), '.novalab', 'sessions', `${sessionId ?? 'live'}.ipynb`);
+    try {
+      return exportIpynb({ cells, targetPath: target }, { notebookPath: nb, sessionId });
+    } catch (e) {
+      if (e instanceof IpynbError) throw new RpcFault(e.code, e.message);
+      throw e;
+    }
+  }
+
+  /** import.ipynb {path, targetPath?}：.ipynb → NovaLab .py 一次性转换（wx 排他不覆盖）。 */
+  private importIpynb(params: Record<string, unknown>): unknown {
+    const src = strParam(params, 'path');
+    const target =
+      typeof params['targetPath'] === 'string' && params['targetPath'] !== ''
+        ? params['targetPath']
+        : undefined;
+    try {
+      return importIpynb(src, target);
+    } catch (e) {
+      if (e instanceof ImportError) throw new RpcFault(e.code, e.message);
+      throw e;
+    }
   }
 }
 
