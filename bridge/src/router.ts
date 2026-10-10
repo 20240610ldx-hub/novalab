@@ -192,6 +192,8 @@ export interface RouterDeps {
   sessionStore?: SessionStore;
   /** provider 凭据加密存储（默认新建 ProvidersStore → <repoRoot>/.novalab；单测注入临时目录）。 */
   providersStore?: ProvidersStore;
+  /** bridge.mcpLaunch：外部 Agent 以 MCP 模式启动本 bridge 的命令行（Welcome 页"Connect…"展示）。 */
+  mcpLaunch?: string[];
 }
 
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
@@ -318,6 +320,8 @@ export class RpcRouter {
         return this.agentCellCode(params);
       case 'agent.cellOutput':
         return this.agentCellOutput(params);
+      case 'bridge.mcpLaunch':
+        return { mcpLaunch: this.deps.mcpLaunch ?? null };
       case 'ui.get':
         return this.uiGet(params);
       case 'ui.set':

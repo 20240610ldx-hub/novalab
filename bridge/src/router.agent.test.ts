@@ -313,3 +313,17 @@ describe('diff.stage 编译预检（P2.7）', () => {
     expect(res.error?.code).toBe(-32001);
   });
 });
+
+describe('bridge.mcpLaunch', () => {
+  it('未注入 → mcpLaunch null；注入后原样返回', async () => {
+    setup();
+    expect((await call('bridge.mcpLaunch')).result).toEqual({ mcpLaunch: null });
+    const r2 = new RpcRouter({
+      supervisor: sup!,
+      broadcast: () => {},
+      mcpLaunch: ['pnpm', '--dir', '/repo/bridge', 'exec', 'tsx', 'src/main.ts'],
+    });
+    const res = await r2.handle({ jsonrpc: '2.0', id: 1, method: 'bridge.mcpLaunch' });
+    expect(res.result).toEqual({ mcpLaunch: ['pnpm', '--dir', '/repo/bridge', 'exec', 'tsx', 'src/main.ts'] });
+  });
+});

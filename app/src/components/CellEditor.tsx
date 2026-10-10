@@ -133,6 +133,47 @@ function scanDoc(doc: EditorState['doc']): Mark[] {
   return marks.sort((a, b) => a.from - b.from || a.to - b.to);
 }
 
+/** 只读渲染用的一段着色文本（cls = '' 表示无着色）。 */
+export interface CodeToken {
+  text: string;
+  cls: string;
+}
+
+/**
+ * 纯文本 → 逐行着色 token（与编辑器 overlay 同一套 scanDoc 规则）。
+ * 供 SessionModal 等只读代码视图复用，保证与 CellEditor 观感一致。
+ */
+export function tokenizeLines(code: string): CodeToken[][] {
+  const lines = (code ?? '').split('\n');
+  const starts: number[] = [];
+  let pos = 0;
+  for (const l of lines) {
+    starts.push(pos);
+    pos += l.length + 1;
+  }
+  const doc = { lines: lines.length, line: (n: number) => ({ text: lines[n - 1]!, from: starts[n - 1]! }) };
+  const marks = scanDoc(doc as unknown as EditorState['doc']);
+  let mi = 0;
+  return lines.map((text, li) => {
+    const from = starts[li]!;
+    const to = from + text.length;
+    const out: CodeToken[] = [];
+    let cur = from;
+    while (mi < marks.length && marks[mi]!.to <= from) mi++;
+    for (let k = mi; k < marks.length && marks[k]!.from < to; k++) {
+      const m = marks[k]!;
+      const a = Math.max(m.from, cur);
+      const b = Math.min(m.to, to);
+      if (b <= a) continue;
+      if (a > cur) out.push({ text: text.slice(cur - from, a - from), cls: '' });
+      out.push({ text: text.slice(a - from, b - from), cls: m.cls });
+      cur = b;
+    }
+    if (cur < to) out.push({ text: text.slice(cur - from), cls: '' });
+    return out;
+  });
+}
+
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   for (const m of scanDoc(view.state.doc)) {

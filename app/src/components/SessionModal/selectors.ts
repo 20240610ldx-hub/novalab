@@ -90,3 +90,31 @@ export function snapshotHasOutput(cell: SessionSnapshotCell): boolean {
 export function execBadge(cell: SessionSnapshotCell, index: number): string {
   return `[${cell.execCount > 0 ? cell.execCount : index + 1}]`;
 }
+
+/* ---- v0.1.1：对齐 Claude Science Session notebook（分组行 / NOTEBOOK 段头） ---- */
+
+/** 会话 id → 8 位短 id（chip 展示；去掉非字母数字后取尾 8 位）。 */
+export function shortId(id: string): string {
+  const alnum = (id ?? '').replace(/[^A-Za-z0-9]/g, '');
+  return alnum.length <= 8 ? alnum : alnum.slice(-8);
+}
+
+/** 英文单复数（cell / cells、segment / segments）。 */
+export function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** 分组行标题：会话来源（local = NovaLab 本机内核；agent = 外部 Agent 发起）。 */
+export function groupTitle(seg: Pick<SessionSegment, 'source'>): string {
+  return seg.source === 'agent' ? 'Agent' : 'NovaLab';
+}
+
+/** 分组行元信息：`<短 id> · <开始时间> · N cells · M segments`。 */
+export function groupMeta(seg: SessionSegment): string {
+  return [
+    shortId(seg.sessionId),
+    segmentTime(seg.startedAt),
+    plural(seg.cellCount, 'cell'),
+    plural(seg.parts, 'segment'),
+  ].join(' · ');
+}

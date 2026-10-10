@@ -27,6 +27,9 @@
   --tab-active: #1d1d21; /* active tab pill = 提亮底（A-4 #6） */
   --gutter-fg: #6a6a72; /* CM6 行号（A-4 #8） */
   --active-line: rgba(255, 255, 255, 0.025);
+  /* v0.1.1 工作台：标题栏/活动栏/状态栏 = chrome；侧栏与 Agent 栏 = side（介于 chrome 与编辑区之间） */
+  --chrome: #0f0f11;
+  --side: #121214;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -55,6 +58,8 @@
   --tab-active: #ffffff;
   --gutter-fg: #b0b0b0;
   --active-line: rgba(0, 0, 0, 0.03);
+  --chrome: #ececec;
+  --side: #f4f4f4;
 }
 
 html,
@@ -205,4 +210,21 @@ span[title='最近一次运行失败'] {
 }
 [data-theme='light'] .nl-bi {
   color: #0e7490;
+}
+
+/* ---- v0.1.1 工作台分隔条（VS Code sash）：静止 = 1px 边框线；hover/拖拽/聚焦 = 琥珀高亮 ---- */
+.nl-sash::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background-color 120ms, width 120ms;
+}
+.nl-sash:hover::before,
+.nl-sash:focus-visible::before,
+.nl-sash:active::before {
+  width: 3px;
+  background: var(--accent-run);
 }

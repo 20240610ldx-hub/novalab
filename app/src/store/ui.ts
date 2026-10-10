@@ -1,6 +1,6 @@
 /**
  * UI 偏好 store（Q 线，spec 附录 A-3 #23 + A-4；P4.2 App View）：
- * - 顶栏 `Files | Notebook` 视图切换（localStorage novalab.view）；
+ * - （v0.1.1：`Files | Notebook` 顶栏切换已由工作台布局 store/layout.ts 取代）；
  * - 主题切换 dark/light（A-4：localStorage novalab.theme，默认 dark；
  *   落地 = document.documentElement.dataset.theme → styles.css token 覆盖）；
  * - P4.2 App View 模式（edit/app，localStorage novalab.appMode + URL ?view=app
@@ -12,36 +12,7 @@
 
 import { create } from 'zustand';
 
-export type AppView = 'files' | 'notebook';
-
-export const VIEW_KEY = 'novalab.view';
-
-/** 存储值 → 视图（未知/损坏值一律回退 notebook 主视图）。 */
-export function parseView(raw: string | null | undefined): AppView {
-  return raw === 'files' ? 'files' : 'notebook';
-}
-
-/** 读取持久化视图；storage 不可用（隐私模式/node）→ 'notebook'。 */
-export function loadView(storage: Pick<Storage, 'getItem'>): AppView {
-  try {
-    return parseView(storage.getItem(VIEW_KEY));
-  } catch {
-    return 'notebook';
-  }
-}
-
-/** 写入持久化视图；storage 不可用时静默忽略（内存态仍生效）。 */
-export function persistView(storage: Pick<Storage, 'setItem'>, view: AppView): void {
-  try {
-    storage.setItem(VIEW_KEY, view);
-  } catch {
-    /* 忽略 */
-  }
-}
-
 interface UiState {
-  view: AppView;
-  setView: (v: AppView) => void;
   theme: AppTheme;
   setTheme: (t: AppTheme) => void;
   /** P4.2 App View：edit = 编辑器主视图；app = 只读报告视图（隐藏代码）。 */
@@ -152,11 +123,6 @@ function initialAppMode(): AppMode {
 }
 
 export const useUi = create<UiState>((set) => ({
-  view: typeof localStorage !== 'undefined' ? loadView(localStorage) : 'notebook',
-  setView: (v) => {
-    if (typeof localStorage !== 'undefined') persistView(localStorage, v);
-    set({ view: v });
-  },
   theme: initialTheme,
   setTheme: (t) => {
     if (typeof localStorage !== 'undefined') persistTheme(localStorage, t);

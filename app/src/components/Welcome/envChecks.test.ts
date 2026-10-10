@@ -1,6 +1,6 @@
 /**
- * Onboarding 检查 reducer 单测（P4.4）：状态机迁移、skip 语义、
- * 图标映射、fixCommand 裁决、localStorage flag 惯式。纯函数无 DOM。
+ * Welcome 环境自检 reducer 单测（P4.4 → v0.1.1 迁入 Welcome）：状态机迁移、skip 语义、
+ * 图标映射、fixCommand 裁决、探针文件名。纯函数无 DOM。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -10,22 +10,11 @@ import {
   allSettled,
   checksReducer,
   fixCommand,
-  hasOnboarded,
   initialChecks,
-  markOnboarded,
   probeFileName,
   statusIcon,
   type ChecksState,
-} from './logic';
-
-function fakeStorage(initial: Record<string, string> = {}) {
-  const map = new Map(Object.entries(initial));
-  return {
-    getItem: (k: string) => map.get(k) ?? null,
-    setItem: (k: string, v: string) => void map.set(k, v),
-    dump: () => Object.fromEntries(map),
-  };
-}
+} from './envChecks';
 
 describe('checksReducer', () => {
   it('初始态：四项全 pending、无 error', () => {
@@ -94,30 +83,8 @@ describe('fixCommand', () => {
   });
 });
 
-describe('onboarded flag', () => {
-  it('缺失 = 首启（false）；markOnboarded 写 novalab.onboarded 后 true', () => {
-    const s = fakeStorage();
-    expect(hasOnboarded(s)).toBe(false);
-    markOnboarded(s);
-    expect(s.dump()['novalab.onboarded']).toBe('1');
-    expect(hasOnboarded(s)).toBe(true);
-  });
-
-  it('storage 抛异常：hasOnboarded 视为已引导（不骚扰）、mark 静默', () => {
-    const throwing = {
-      getItem: () => {
-        throw new Error('denied');
-      },
-      setItem: () => {
-        throw new Error('denied');
-      },
-    };
-    expect(hasOnboarded(throwing)).toBe(true);
-    expect(() => markOnboarded(throwing)).not.toThrow();
-  });
-
-  it('探针文件名带时间戳（.tmp 后缀、点前缀隐藏文件）', () => {
-    expect(probeFileName(123)).toBe('.novalab-onboard-probe-123.tmp');
-    expect(probeFileName()).toMatch(/^\.novalab-onboard-probe-\d+\.tmp$/);
+describe('probeFileName', () => {
+  it('工作区内隐藏临时文件名，带时间戳防并发碰撞', () => {
+    expect(probeFileName(1700000000000)).toBe('.novalab-onboard-probe-1700000000000.tmp');
   });
 });

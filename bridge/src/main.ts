@@ -121,6 +121,10 @@ const router = new RpcRouter({
   multi: supervisor,
   broadcast,
   providersStore,
+  // Welcome「Connect…」：packaged = sidecar node + bundle；dev = pnpm tsx（仓库内）
+  mcpLaunch: process.env.NOVALAB_PACKAGED
+    ? [process.execPath, process.argv[1] ?? 'bridge.mjs']
+    : ['pnpm', '--dir', path.join(repoRoot, 'bridge'), 'exec', 'tsx', 'src/main.ts'],
   // P1.8：外部 .py 变更热重载（生产用 chokidar 事件源；单测在 RouterDeps 注入假源）
   watcherFactory: createChokidarEventSource,
 });
