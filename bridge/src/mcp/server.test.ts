@@ -72,7 +72,7 @@ describe('MCP server · 注册面', () => {
         ],
         [
           "get_cell_output",
-          "获取指定 cell 最近一次运行的 {stdout, stderr, traceback, mimeKeys, writes}，各字段截断 8KB；writes 为该次运行检测到写模式打开的文件路径列表（上限 50）",
+          "获取指定 cell 最近一次运行的隐私安全摘要 {traceback, mimeKeys}；stdout、stderr 与文件路径不会发送给 Agent",
         ],
         [
           "propose_code_change",
@@ -163,12 +163,12 @@ describe('MCP server · callTool → router', () => {
     expect(code.code).toBe('print(y)');
   });
 
-  it('execute_cell + get_cell_output：run 报告与输出缓存', async () => {
+  it('execute_cell + get_cell_output：run 报告与隐私安全输出摘要', async () => {
     await connect();
     const report = (await callToolJson('execute_cell', { cellId: 'a' })) as { ok: boolean };
     expect(report.ok).toBe(true);
-    const out = (await callToolJson('get_cell_output', { cellId: 'a' })) as { stdout: string };
-    expect(out.stdout).toBe('fake output for a\n');
+    const out = (await callToolJson('get_cell_output', { cellId: 'a' })) as Record<string, unknown>;
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
   });
 
   it('propose_code_change：staged diff id；编译预检拒绝 → {rejected, reason}', async () => {

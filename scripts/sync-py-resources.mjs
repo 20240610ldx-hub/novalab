@@ -116,6 +116,7 @@ function copyUvSidecar() {
   const dest = path.join(srcTauri, 'binaries', `uv-${triple}${exeExt}`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(uvPath, dest);
+  if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
   console.log(`[sync-py] uv ${version}: ${uvPath} → ${dest} (${humanMB(dest)})`);
 }
 

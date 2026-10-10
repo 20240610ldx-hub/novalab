@@ -13,7 +13,8 @@
 //!   `<resource>/bridge-dist/bridge.mjs`（esbuild 单文件 bundle，scripts/build-bridge.mjs
 //!   生成），并注入：
 //!   * `NOVALAB_PACKAGED=1`        —— bridge supervisor 走 packaged 分支（首启自装 venv）
-//!   * `NOVALAB_PY_DIR=<resource>/py-resources/py` —— novakernel 项目目录（uv sync 目标）
+//!   * `NOVALAB_PY_SOURCE_DIR=<resource>/py-resources/py` —— 只读内核资源
+//!   * `NOVALAB_PY_DIR=<appData>/py-resources/py` —— 可写运行时副本（uv sync 目标）
 //!   * `NOVALAB_UV_BIN=<resource>/binaries/uv-<triple>.exe` —— sidecar uv
 //!   payload 落盘位置以 tauri NSIS 实际布局为准（P4.1b 实测 installer.nsi）：
 //!   sidecar 扁平落 $INSTDIR 且剥掉 triple 后缀（node.exe / uv.exe，与主 exe 同目录，
@@ -34,10 +35,8 @@ use tauri::Manager;
 /// tolerates a manually-started bridge — see spec §2).
 struct BridgeChild(Mutex<Option<Child>>);
 
-/// P4.1b 打包目标是 Windows x64 NSIS；sidecar 文件名嵌 target triple
-/// （tauri-utils `external_binaries()` 命名约定，triple 由 tauri-build 经
-/// `cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE` 提供）。非 Windows x64 的 packaged
-/// 分支直接判 None 回落 dev spawn（不在本期范围）。
+/// sidecar 文件名嵌 target triple（tauri-utils `external_binaries()` 命名约定，
+/// triple 由 tauri-build 经 `cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE` 提供）。
 const SIDCAR_TRIPLE: &str = env!("TAURI_ENV_TARGET_TRIPLE");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,7 +60,7 @@ pub fn run() {
 /// Packaged 构建走 sidecar 分支；dev（或 packaged payload 缺失时回落）走 pnpm 分支。
 fn spawn_bridge(app: &tauri::AppHandle) {
     if std::env::var("NOVALAB_BRIDGE").as_deref() == Ok("external") {
-        eprintln!("[novalab] NOVALAB_BRIDGE=external — not spawning bridge; assuming it is already running on ws://127.0.0.1:7788");
+        eprintln!("[novalab] NOVALAB_BRIDGE=external — not spawning bridge; assuming a Bridge is already running (frontend discovers /bridge-info)");
         return;
     }
 
@@ -116,10 +115,6 @@ fn sidecar_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
 }
 
 fn resolve_packaged_layout(app: &tauri::AppHandle) -> Option<PackagedLayout> {
-    // 非 Windows x64 的 sidecar 布局不在 P4.1b 范围。
-    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        return None;
-    }
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let resource_dir = app
         .path()
@@ -129,9 +124,7 @@ fn resolve_packaged_layout(app: &tauri::AppHandle) -> Option<PackagedLayout> {
 
     let node = find_first(&dirs, |d| sidecar_candidates(d, "node"))?;
     let uv = find_first(&dirs, |d| sidecar_candidates(d, "uv"))?;
-    let bridge_script = find_first(&dirs, |d| {
-        vec![d.join("bridge-dist").join("bridge.mjs")]
-    })?;
+    let bridge_script = find_first(&dirs, |d| vec![d.join("bridge-dist").join("bridge.mjs")])?;
     let py_dir = find_first(&dirs, |d| {
         let p = d.join("py-resources").join("py");
         if p.is_dir() {
@@ -166,11 +159,12 @@ fn spawn_packaged_bridge(app: &tauri::AppHandle, layout: PackagedLayout) {
     let mut cmd = Command::new(&layout.node);
     cmd.arg(&layout.bridge_script)
         .env("NOVALAB_PACKAGED", "1")
-        .env("NOVALAB_PY_DIR", &layout.py_dir)
+        .env("NOVALAB_PY_SOURCE_DIR", &layout.py_dir)
         .env("NOVALAB_UV_BIN", &layout.uv);
     // 凭据/全局数据落 Tauri appData（packaged 下 $INSTDIR 上级不可靠）
     if let Ok(data_dir) = app.path().app_data_dir() {
-        cmd.env("NOVALAB_DATA_DIR", data_dir);
+        cmd.env("NOVALAB_DATA_DIR", &data_dir)
+            .env("NOVALAB_PY_DIR", data_dir.join("py-resources").join("py"));
     }
     // GUI 应用无控制台：null stdio + CREATE_NO_WINDOW，防 node 弹出黑窗。
     cmd.stdin(Stdio::null())
@@ -191,7 +185,7 @@ fn spawn_packaged_bridge(app: &tauri::AppHandle, layout: PackagedLayout) {
     match cmd.spawn() {
         Ok(child) => {
             eprintln!(
-                "[novalab] bridge sidecar spawned (pid {}) — ws://127.0.0.1:7788",
+                "[novalab] bridge sidecar spawned (pid {}) — frontend will discover /bridge-info",
                 child.id()
             );
             let state = app.state::<BridgeChild>();
@@ -241,7 +235,7 @@ fn spawn_dev_bridge(app: &tauri::AppHandle) {
     match cmd.spawn() {
         Ok(child) => {
             eprintln!(
-                "[novalab] bridge spawned (pid {}) from {} — ws://127.0.0.1:7788",
+                "[novalab] bridge spawned (pid {}) from {} — frontend will discover /bridge-info",
                 child.id(),
                 root.display()
             );

@@ -348,7 +348,7 @@ export interface SessionEndedParams {
 // set 的 apiKey 省略或空串 = 保留既有密文（前端编辑不回传 key）。
 // 存储 .novalab/providers.json（0600），损坏 → 空态降级不抛（bridge/src/providers-store.ts）。
 // LLM 请求本身不走 rpc：前端 SDK baseURL 指向 bridge 侧 HTTP 代理
-// http://127.0.0.1:7789/llm/<providerId>/v1（bridge/src/llm-proxy.ts，SSE 流式透传，
+// http://127.0.0.1:<discovered-port>/llm/<providerId>/v1（bridge/src/llm-proxy.ts，SSE 流式透传，
 // 真 key 由代理按 kind 注入上游请求头）。
 
 /** provider 协议类型（与前端 providers.ts ProviderId 一致）。 */

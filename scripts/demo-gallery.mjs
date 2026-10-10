@@ -3,7 +3,7 @@
  *
  * 用法（仓库根；dev 服务已在跑就复用，没跑就自起自停）：
  *   node scripts/demo-gallery.mjs [--skip-agent] [状态前缀过滤，如 03 11]
- *   （自起 = pnpm dev:bridge ws://127.0.0.1:7788 + pnpm dev:app
+ *   （自起 = pnpm dev:bridge（端口通过 /bridge-info 发现） + pnpm dev:app
  *     http://localhost:5199 (strictPort)；脚本退出前 taskkill 整树，
  *     复用的既有服务不动。）
  *
@@ -26,14 +26,12 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { BridgeClient, discoverBridge } from './bridge-client.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(join(root, 'bridge', 'package.json'));
-const { WebSocket } = require('ws');
 
 const DEMOS = join(root, 'demos');
 const STATES_DIR = join(root, 'docs', 'demos', 'states');
@@ -43,7 +41,6 @@ const STATES_DIR = join(root, 'docs', 'demos', 'states');
 const APP_PORT_DEFAULT = 5199;
 let APP_PORT = APP_PORT_DEFAULT;
 let APP_URL = `http://127.0.0.1:${APP_PORT}/`;
-const BRIDGE_URL = 'ws://127.0.0.1:7788';
 
 /** bind 试探（唯一与 vite bind 同语义的探测）：跨线残留的坏 IPv6 监听器
  * （Get-NetTCPConnection 里 State 为空、netstat 不可见、connect 立即 RST）
@@ -260,76 +257,6 @@ function startDevAppOn(port) {
     ['--filter', '@novalab/app', 'exec', 'vite', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
     `dev:app@${port}`,
   );
-}
-
-/* ---------------- bridge WS 客户端（setup 用） ---------------- */
-
-class BridgeClient {
-  constructor(url) {
-    this.url = url;
-    this.ws = null;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.notifications = [];
-  }
-
-  connect() {
-    return new Promise((resolve, reject) => {
-      const tryConnect = (n) => {
-        const s = new WebSocket(this.url);
-        s.on('open', () => {
-          this.ws = s;
-          s.on('message', (raw) => this._dispatch(raw));
-          resolve();
-        });
-        s.on('error', () =>
-          n > 60 ? reject(new Error('bridge 未就绪: ' + this.url)) : setTimeout(() => tryConnect(n + 1), 500),
-        );
-      };
-      tryConnect(0);
-    });
-  }
-
-  _dispatch(raw) {
-    const msg = JSON.parse(String(raw));
-    if (msg.id !== undefined && this.pending.has(msg.id)) {
-      const { resolve, reject } = this.pending.get(msg.id);
-      this.pending.delete(msg.id);
-      if (msg.error) reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-      else resolve(msg.result);
-      return;
-    }
-    if (msg.method) this.notifications.push({ method: msg.method, params: msg.params ?? null });
-  }
-
-  rpc(method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-    });
-  }
-
-  /** 从 mark（notifications.length 快照）之后等待满足 pred 的通知。 */
-  async waitNotif(method, pred = () => true, timeoutMs = 20000, mark = 0) {
-    const t0 = Date.now();
-    for (;;) {
-      for (let i = mark; i < this.notifications.length; i++) {
-        const n = this.notifications[i];
-        if (n.method === method && pred(n.params)) return n;
-      }
-      if (Date.now() - t0 > timeoutMs) throw new Error(`等待通知超时: ${method}`);
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-
-  close() {
-    try {
-      this.ws?.close();
-    } catch {
-      /* 忽略 */
-    }
-  }
 }
 
 /* ---------------- 通用 UI 助手 ---------------- */
@@ -1069,11 +996,9 @@ async function main() {
   const demoOriginal = fs.readFileSync(DEMO_PY, 'utf8');
 
   // dev 服务：已在跑就复用；没跑就自起（退出前自停，见 killStartedServers）
-  const bridgeState = await probePortState(7788);
-  if (bridgeState === 'up') {
-    log('bridge 已在跑（:7788）→ 复用');
-  } else if (bridgeState === 'hung') {
-    throw new Error(':7788 被失响应残留占住（TCP hang）——bridge 无法换端口（app 硬编码 ws://127.0.0.1:7788），请等残留退出或人工清理后重跑');
+  const bridgeState = await discoverBridge().catch(() => null);
+  if (bridgeState) {
+    log(`bridge 已在跑（:${bridgeState.wsPort}）→ 复用`);
   } else {
     log('bridge 未跑 → 自起 pnpm dev:bridge');
     startDev('dev:bridge');
@@ -1092,10 +1017,18 @@ async function main() {
   await waitForHttp(APP_URL);
   log('vite HTTP 200', APP_URL);
 
-  const bridge = new BridgeClient(BRIDGE_URL);
-  await bridge.connect();
+  const bridge = new BridgeClient();
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      await bridge.connect();
+      break;
+    } catch (err) {
+      if (attempt === 59) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   await bridge.rpc('ping');
-  log('bridge 已连接', BRIDGE_URL);
+  log('bridge 已连接', `:${bridge.info.wsPort}`);
 
   // 并发孪生（他线跑本共享脚本）时 bridge 单实例必互搅（closeAllTabs/kernel.restart
   // 跨 run 生效）——最多等 10min 让其跑完再起跑

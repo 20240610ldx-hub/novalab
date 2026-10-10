@@ -41,7 +41,7 @@ claude mcp add novalab -- pnpm --dir "D:/Notebook Agent/bridge" exec tsx src/mai
 | 工具 | 参数 | 返回 | 说明 |
 |---|---|---|---|
 | `get_notebook_context` | — | `{dagEdges, schemas, focusCellId, staleSet}` | 依赖拓扑 + 变量 schema（过 PreviewSerializer 4KB 硬截断）；**无原始数据** |
-| `get_cell_output` | `cellId` | `{stdout, stderr, traceback, mimeKeys}` | 最近一次运行输出，各字段截断 8KB |
+| `get_cell_output` | `cellId` | `{traceback, mimeKeys}` | 隐私安全摘要；stdout、stderr 与文件路径只留在本地 UI/session，不发送给 Agent |
 | `propose_code_change` | `targetCellId, action(update\|insert_below), newCode, rationale?` | `{diffId}` 或 `{rejected:true, reason}` | 只产生 staged diff；入队前编译预检（多重定义/DAG 环 → 拒绝并回 reason，供模型自纠） |
 | `execute_cell` | `cellId, cascade?` | run 报告 `{cellId, ok, cascaded, durationMs, traceback?}` | 与前端同一内核、同一执行队列 |
 | `list_cells` | — | `[{id, execCount, status, firstLine, defs, refs}]` | status ∈ idle / ok / stale / error |
@@ -57,5 +57,5 @@ claude mcp add novalab -- pnpm --dir "D:/Notebook Agent/bridge" exec tsx src/mai
 ## 安全边界
 
 - **Staged-only**：`propose_code_change` 永远只把 diff 放入暂存队列，前端弹行内审阅（Tab 采纳 / Esc 拒绝）；外部 Agent **不存在特权写入通道**——MCP 与前端 in-process 工具落到同一批 `router.invoke` 方法，无旁路。
-- **隐私截断（spec §8 / ADR-006）**：出进程数据白名单 = 代码文本、traceback、DAG 边、schema 元信息；任何 >4KB 字符串字段在 `agent.context` 出口被 PreviewSerializer 硬截断；cell 输出各字段截断 8KB。原始数据（DataFrame 全量、二进制、文件内容）不出进程。
+- **隐私契约（spec §8 / ADR-006）**：出进程数据白名单 = 代码文本、traceback、DAG 边、schema 元信息与 MIME 类型键；stdout/stderr、文件写入路径、DataFrame 全量、二进制和文件内容留在本地 UI/session。`agent.context` 的 schema 过 PreviewSerializer 4KB 硬截断，traceback 仍按 8KB 截断。
 - **编译预检**：stage 前把"应用该 diff 后的全量 cells"发给内核 `set_cells` 试探（纯静态分析、不执行），随后无条件回滚为原 cells；两次额外往返的成本可接受，换来无效提议不进审阅队列。

@@ -16,7 +16,7 @@ import { createOpenAICompat } from './openaiCompat';
  *     id='dev-env' 的 provider（seedDevEnvProvider），请求同样走代理。
  *
  * LLM 请求路径（L-1 终态）：SDK baseURL 统一指向 bridge LLM 代理
- * `http://127.0.0.1:7789/llm/<id>/v1`（apiKey 传 'proxy' 占位，真 key 由代理
+ * `http://127.0.0.1:<discovered-port>/llm/<id>/v1`（apiKey 传 'proxy' 占位，真 key 由代理
  * 按 kind 注入上游请求头，SSE 流式透传，见 bridge/src/llm-proxy.ts）。
  * bridge 未连接时自动回退 P4 前行为（用户 provider 直连 baseURL；dev 兜底走
  * vite 同源代理 /llm/v1，vite.config.ts 保留该兜底）。
@@ -54,7 +54,7 @@ export interface ProviderState {
 /** 旧版明文 localStorage 键（一次性迁移：读 → rpc set → removeItem）。 */
 export const PROVIDERS_STORAGE_KEY = 'novalab.providers';
 
-/** bridge LLM 代理（llm-proxy.ts；端口占用 bridge 侧 +1，前端约定默认口）。 */
+/** bridge LLM 代理的兼容默认值；连接后以 bridge discovery 返回的实际端口为准。 */
 export const LLM_PROXY_ORIGIN = 'http://127.0.0.1:7789';
 
 /** dev .env.local 兜底在加密存储里的固定 id（前端启动时播种；list 回灌时过滤）。 */
@@ -65,7 +65,7 @@ const PROXY_KEY_PLACEHOLDER = 'proxy';
 
 /** SettingsPanel 必须原文展示的存储说明（P4：明文警告 → 加密存储陈述）。 */
 export const STORAGE_WARNING =
-  '🔒 API Key 经本机 bridge（ws://127.0.0.1:7788）以 AES-256-GCM 加密落盘 —— keys encrypted at rest in .novalab/providers.json (0600)，永不回传前端（列表仅暴露 hasKey 掩码）；LLM 请求统一经 bridge 代理 http://127.0.0.1:7789/llm/<id>/v1，浏览器进程不持有明文 key。威胁模型：防 casual 披露（误共享/截图/备份泄露），不防同机决意攻击者（机器派生密钥可复算，见 bridge/src/secret.ts 注释）。';
+  '🔒 API Key 经本机 Bridge（端口由 bridge-info discovery 协商）以 AES-256-GCM 加密落盘 —— keys encrypted at rest in .novalab/providers.json (0600)，永不回传前端（列表仅暴露 hasKey 掩码）；LLM 请求统一经本机 Bridge 代理，浏览器进程不持有明文 key。威胁模型：防 casual 披露（误共享/截图/备份泄露），不防同机决意攻击者（机器派生密钥可复算，见 bridge/src/secret.ts 注释）。';
 
 /** tokenplan 端点支持的模型（2026-10-06 冒烟验证）。 */
 export const TOKENPLAN_MODELS = [
@@ -107,9 +107,9 @@ export function isProviderStorageRemote(): boolean {
   return bridgeReady;
 }
 
-/** 前端 SDK 的统一 baseURL：`http://127.0.0.1:7789/llm/<id>/v1`。 */
-export function proxyBaseURL(providerId: string): string {
-  return `${LLM_PROXY_ORIGIN}/llm/${encodeURIComponent(providerId)}/v1`;
+/** 前端 SDK 的统一 baseURL；连接后使用 discovery 返回的实际代理端口。 */
+export function proxyBaseURL(providerId: string, origin = LLM_PROXY_ORIGIN): string {
+  return `${origin}/llm/${encodeURIComponent(providerId)}/v1`;
 }
 
 /**
@@ -119,20 +119,26 @@ export function proxyBaseURL(providerId: string): string {
 export function requestTargetFor(
   config: Pick<ProviderConfig, 'id' | 'baseURL' | 'apiKey'>,
   remote: boolean,
+  proxyOrigin = LLM_PROXY_ORIGIN,
 ): { baseURL: string; apiKey: string } {
   return remote
-    ? { baseURL: proxyBaseURL(config.id), apiKey: PROXY_KEY_PLACEHOLDER }
+    ? { baseURL: proxyBaseURL(config.id, proxyOrigin), apiKey: PROXY_KEY_PLACEHOLDER }
     : { baseURL: config.baseURL, apiKey: config.apiKey };
 }
 
 export function createLanguageModel(config: ProviderConfig): LanguageModel {
-  const { baseURL, apiKey } = requestTargetFor(config, bridgeReady);
+  const { baseURL, apiKey } = requestTargetFor(
+    config,
+    bridgeReady,
+    bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN,
+  );
+  const proxyHeaders = bridgeReady ? bridge.getLlmProxyHeaders?.() : undefined;
   switch (config.kind) {
     case 'anthropic-compat':
-      return createAnthropic({ baseURL, apiKey })(config.model);
+      return createAnthropic({ baseURL, apiKey, ...(proxyHeaders ? { headers: proxyHeaders } : {}) })(config.model);
     case 'openai-compat':
       // deepseek / ollama / vLLM 等走 OpenAI 兼容协议（本地最小 provider，见 openaiCompat.ts）
-      return createOpenAICompat({ baseURL, apiKey })(config.model);
+      return createOpenAICompat({ baseURL, apiKey, ...(proxyHeaders ? { headers: proxyHeaders } : {}) })(config.model);
   }
 }
 
@@ -349,9 +355,11 @@ export function getDevLanguageModel(): LanguageModel | null {
     (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
   if (bridgeReady) {
     // P4 主路径：dev-env 已播种进 bridge 加密存储 → 走 LLM 代理（key 不再驻留浏览器请求）
+    const proxyHeaders = bridge.getLlmProxyHeaders?.();
     return createAnthropic({
-      baseURL: proxyBaseURL(DEV_ENV_PROVIDER_ID),
+      baseURL: proxyBaseURL(DEV_ENV_PROVIDER_ID, bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN),
       apiKey: PROXY_KEY_PLACEHOLDER,
+      ...(proxyHeaders ? { headers: proxyHeaders } : {}),
     })(model);
   }
   // 无 bridge 兜底（降级，原 L-1 主路径）：DEV（vite）走同源代理 /llm/v1 →

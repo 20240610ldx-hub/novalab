@@ -1,15 +1,16 @@
 /**
  * LLM 反向代理（P4 / ADR-008，feature-matrix L-1 尾段）：
- * HTTP server 127.0.0.1:7789（端口占用 +1，与 WS :7788 同纪律）。
+ * HTTP server 127.0.0.1:7789（端口占用 +1，与 WS 默认 :7788 同纪律）。
  *
  * 路由：`/llm/:providerId/*rest` → 查 ProvidersStore → 转发到 provider.baseURL：
  * - method / 请求体（pipe 流式）/ 状态码 / 响应体（**SSE 透传，不缓冲**）原样过；
  * - 真 key 只在这里注入上游请求头（按 kind 映射，见 forwardHeaders）；前端 SDK 只带
  *   'proxy' 占位，浏览器进程从头到尾不接触明文 key；
- * - CORS 仅放行本机前端 origin（DEFAULT_ALLOWED_ORIGINS）；无 Origin 头（curl/node）
- *   不拦——代理本就只 bind 127.0.0.1。
+ * - CORS 仅放行本机前端 origin；正式实例还要求 Bridge discovery token，避免同机
+ *   其他本地进程直接借代理读取已保存的 provider key。
  *
- * baseURL 拼接：前端 SDK baseURL 统一 `http://127.0.0.1:7789/llm/<id>/v1`，故 rest 以
+ * baseURL 拼接：前端 SDK baseURL 统一使用 discovery 返回的
+ * `http://127.0.0.1:<port>/llm/<id>/v1`，故 rest 以
  * `v1/` 开头时把存储 baseURL 的尾段 `/v1` 去重（joinUpstream），
  * `https://host/v1` + rest `v1/messages` → `https://host/v1/messages`。
  *
@@ -40,6 +41,30 @@ export const DEFAULT_ALLOWED_ORIGINS: readonly string[] = [
   'https://tauri.localhost',
 ];
 
+/**
+ * Browser origins allowed to discover/use the local bridge.
+ * Vite demo scripts may move between loopback ports, so local development
+ * ports are accepted without widening access beyond localhost.
+ */
+export function isAllowedOrigin(
+  origin: string | undefined,
+  allowedOrigins: ReadonlySet<string> | readonly string[] = DEFAULT_ALLOWED_ORIGINS,
+): origin is string {
+  if (!origin) return false;
+  const exact = allowedOrigins instanceof Set
+    ? allowedOrigins.has(origin)
+    : (allowedOrigins as readonly string[]).includes(origin);
+  if (exact) return true;
+  try {
+    const parsed = new URL(origin);
+    const loopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+    const port = Number(parsed.port);
+    return loopback && Number.isInteger(port) && port >= 5000 && port <= 5999;
+  } catch {
+    return false;
+  }
+}
+
 /** anthropic-compat 上游缺省协议版本（客户端已带则透传，不覆盖）。 */
 export const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 
@@ -57,6 +82,7 @@ const STRIP_REQUEST_HEADERS: ReadonlySet<string> = new Set([
   'authorization',
   'x-api-key',
   'api-key',
+  'x-novalab-bridge-token',
 ]);
 
 /** 上游响应里不回的逐跳头（其余 content-type/content-encoding 等原样透传）。 */
@@ -123,6 +149,8 @@ export interface LlmProxyOptions {
   basePort?: number;
   maxPortTries?: number;
   allowedOrigins?: readonly string[];
+  /** Bridge discovery token; when set every proxy request must present it. */
+  authToken?: string;
 }
 
 export interface LlmProxyHandle {
@@ -138,10 +166,11 @@ export function startLlmProxy(opts: LlmProxyOptions): LlmProxyHandle {
   const basePort = opts.basePort ?? LLM_PROXY_BASE_PORT;
   const maxTries = opts.maxPortTries ?? MAX_PORT_TRIES;
   const allowedOrigins = new Set(opts.allowedOrigins ?? DEFAULT_ALLOWED_ORIGINS);
+  const authToken = opts.authToken;
   const { store } = opts;
 
   const server = http.createServer((req, res) => {
-    handleRequest(req, res, store, allowedOrigins).catch((err: unknown) => {
+    handleRequest(req, res, store, allowedOrigins, authToken).catch((err: unknown) => {
       process.stderr.write(
         `[bridge] llm-proxy 请求处理异常: ${err instanceof Error ? err.message : String(err)}\n`,
       );
@@ -188,11 +217,11 @@ async function handleRequest(
   res: http.ServerResponse,
   store: ProvidersStore,
   allowedOrigins: ReadonlySet<string>,
+  authToken?: string,
 ): Promise<void> {
   const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-  // 无 Origin（curl / node 客户端）放行；有 Origin 必须在白名单
-  const cors = origin !== undefined && allowedOrigins.has(origin) ? origin : undefined;
+  const cors = isAllowedOrigin(origin, allowedOrigins) ? origin : undefined;
   const originRejected = origin !== undefined && cors === undefined;
 
   if (req.method === 'OPTIONS') {
@@ -205,6 +234,10 @@ async function handleRequest(
   }
   if (originRejected) {
     json(res, 403, { error: `origin not allowed: ${origin}` }, undefined);
+    return;
+  }
+  if (authToken && req.headers['x-novalab-bridge-token'] !== authToken) {
+    json(res, 401, { error: 'bridge authentication required' }, cors);
     return;
   }
 
@@ -287,7 +320,7 @@ function preflight(res: http.ServerResponse, req: http.IncomingMessage, cors: st
           'access-control-allow-headers':
             typeof requestHeaders === 'string' && requestHeaders !== ''
               ? requestHeaders
-              : 'content-type,accept,authorization,x-api-key,anthropic-version,anthropic-beta',
+              : 'content-type,accept,authorization,x-api-key,x-novalab-bridge-token,anthropic-version,anthropic-beta',
           'access-control-max-age': '86400',
           vary: 'Origin',
         }

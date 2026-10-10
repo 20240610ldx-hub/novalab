@@ -131,6 +131,7 @@ function copyNodeSidecar() {
   const dest = path.join(srcTauri, 'binaries', `node-${triple}${exeExt}`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(nodePath, dest);
+  if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
   console.log(`[build-bridge] node ${version}: ${nodePath} → ${dest} (${humanMB(dest)})`);
 }
 

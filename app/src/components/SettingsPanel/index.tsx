@@ -18,7 +18,7 @@ import { useI18n } from '../../i18n';
  * .novalab/providers.json（0600）—— apiKey 永不出桥（列表仅 hasKey 掩码，
  * 编辑时 key 留空 = 保留既有）；顶部常驻存储说明（settings.storageWarning，
  * 原文 = providers.STORAGE_WARNING，P4.3 迁入字典）。
- * 测试连接走 bridge LLM 代理（127.0.0.1:7789）：先把草稿落库，再以 'proxy'
+ * 测试连接走 bridge LLM 代理（端口由 discovery 协商）：先把草稿落库，再以 'proxy'
  * 占位 key 发起 generateText，真 key 由代理注入上游。
  * P4.3：标签/警告全部经 t()；语言切换（novalab.lang）。
  * P4.4：「重跑首启检查」入口（onRerunOnboarding → App → Onboarding rerun）。
@@ -96,7 +96,7 @@ export function SettingsPanel({ onRerunOnboarding }: SettingsPanelProps) {
       const model = createLanguageModel(cleaned);
       const res = await generateText({ model, prompt: 'ping' });
       const text = (res.text ?? '').trim();
-      const via = remote ? 'bridge proxy 127.0.0.1:7789' : 'direct (bridge not ready)';
+      const via = remote ? 'bridge proxy (discovered loopback)' : 'direct (bridge not ready)';
       setTest({ state: 'ok', msg: `${via} · ${text.length} chars${text ? `: "${text.slice(0, 40)}"` : ''}` });
     } catch (err) {
       setTest({ state: 'err', msg: err instanceof Error ? err.message : String(err) });

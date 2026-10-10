@@ -102,13 +102,10 @@ interface OutputBuffer {
   writes: string[];
 }
 
-/** agent.cellOutput / get_cell_output 结果形状（spec §7）。 */
+/** agent.cellOutput / get_cell_output 的出进程安全结果（spec §8）。 */
 export interface CellOutputSnapshot {
-  stdout: string;
-  stderr: string;
   traceback: string | null;
   mimeKeys: string[];
-  writes: string[];
 }
 
 /** agent.listCells 条目（spec §7 list_cells）。 */
@@ -856,7 +853,10 @@ export class RpcRouter {
     return { cellId, code: cell.code };
   }
 
-  /** get_cell_output：最近一次 run 的 stdout/stderr/traceback/mimeKeys/writes，字符字段截断 8KB、路径列表限 50 条。 */
+  /**
+   * get_cell_output：仅返回隐私白名单字段。
+   * stdout/stderr 和写入路径保留给本地 UI/session，不穿过 agent/MCP 出口。
+   */
   private agentCellOutput(params: Record<string, unknown>): CellOutputSnapshot {
     const ctx = this.focusCtx();
     const cache = ctx.cache!;
@@ -866,11 +866,8 @@ export class RpcRouter {
     }
     const buf = ctx.outputs.get(cellId);
     return {
-      stdout: capOutput(buf?.stdout ?? '', buf?.stdoutTrunc ?? false),
-      stderr: capOutput(buf?.stderr ?? '', buf?.stderrTrunc ?? false),
       traceback: buf?.traceback !== undefined ? capOutput(buf.traceback, false) : null,
       mimeKeys: buf ? [...buf.mimeKeys] : [],
-      writes: buf ? [...buf.writes] : [],
     };
   }
 

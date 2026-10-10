@@ -38,20 +38,17 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { BridgeClient, discoverBridge } from './bridge-client.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(join(root, 'bridge', 'package.json'));
-const { WebSocket } = require('ws');
 
 const DEMOS = join(root, 'demos');
 const REELS_DIR = join(root, 'docs', 'demos', 'reels');
 const TMP_DIR = join(REELS_DIR, '.tmp');
 const MATRIX_MD = join(root, 'docs', 'demos', 'feature-matrix.md');
-const BRIDGE_URL = 'ws://127.0.0.1:7788';
 /** 主端口被"僵尸监听"（TCP 占位但 HTTP 不应答）时自起的兜底端口扫描区间。 */
 const APP_PORT_PRIMARY = 5199;
 const APP_PORTS_FALLBACK = [5299, 5300, 5301, 5302, 5303];
@@ -238,61 +235,6 @@ async function ensureApp() {
     log(`:${port} 起不来（占用/僵尸 socket）→ 试下一端口`);
   }
   throw new Error(`app 无法就绪：:${APP_PORT_PRIMARY} 与兜底 ${APP_PORTS_FALLBACK.join('/')} 全部失败`);
-}
-
-/* ---------------- bridge WS 客户端（同画廊惯式） ---------------- */
-
-class BridgeClient {
-  constructor(url) {
-    this.url = url;
-    this.ws = null;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.notifications = [];
-  }
-
-  connect() {
-    return new Promise((resolve, reject) => {
-      const tryConnect = (n) => {
-        const s = new WebSocket(this.url);
-        s.on('open', () => {
-          this.ws = s;
-          s.on('message', (raw) => this._dispatch(raw));
-          resolve();
-        });
-        s.on('error', () =>
-          n > 60 ? reject(new Error('bridge 未就绪: ' + this.url)) : setTimeout(() => tryConnect(n + 1), 500),
-        );
-      };
-      tryConnect(0);
-    });
-  }
-
-  _dispatch(raw) {
-    const msg = JSON.parse(String(raw));
-    if (msg.id !== undefined && this.pending.has(msg.id)) {
-      const { resolve, reject } = this.pending.get(msg.id);
-      this.pending.delete(msg.id);
-      if (msg.error) reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-      else resolve(msg.result);
-      return;
-    }
-    if (msg.method) this.notifications.push({ method: msg.method, params: msg.params ?? null });
-  }
-
-  rpc(method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-    });
-  }
-
-  close() {
-    try {
-      this.ws?.close();
-    } catch { /* 忽略 */ }
-  }
 }
 
 /* ---------------- 通用 UI / 录制助手 ---------------- */
@@ -750,14 +692,23 @@ async function main() {
   const notes = [];
 
   // dev 服务：已在跑就复用；没跑就自起（退出前自停）；僵尸端口自动兜底
-  if (await probePort(7788)) log('bridge 已在跑（:7788）→ 复用');
+  const bridgeState = await discoverBridge().catch(() => null);
+  if (bridgeState) log(`bridge 已在跑（:${bridgeState.wsPort}）→ 复用`);
   else { log('bridge 未跑 → 自起 pnpm dev:bridge'); startDev(['dev:bridge'], 'dev:bridge'); }
   await ensureApp();
 
-  const bridge = new BridgeClient(BRIDGE_URL);
-  await bridge.connect();
+  const bridge = new BridgeClient();
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      await bridge.connect();
+      break;
+    } catch (err) {
+      if (attempt === 59) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   await bridge.rpc('ping');
-  log('bridge 已连接', BRIDGE_URL);
+  log('bridge 已连接', `:${bridge.info.wsPort}`);
   await closeAllTabs(bridge);
   reconcileStaleSessions(DEMOS);
   fs.writeFileSync(ERROR_PY, ERROR_FIXTURE); // 夹具先落盘（预热/d2 take 共用）

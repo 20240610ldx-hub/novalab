@@ -54,6 +54,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: node scripts/build-bridge.mjs
       - run: node scripts/sync-py-resources.mjs
+      # ---- 安装包运行时验收：实际启动 node/uv sidecar + bundled bridge + novakernel ----
+      # 使用工作区已同步的 .venv，避免验收阶段重复下载；Tauri 正式安装仍会
+      # 把 py-resources 复制到用户可写目录后按需执行 uv sync。
+      - run: uv sync --directory py --all-extras
+      - name: packaged startup smoke
+        run: node scripts/packaged-startup-smoke.mjs
+        env:
+          NOVALAB_SMOKE_PY_DIR: ${{ github.workspace }}/py
 
       # ---- Tauri 打包 + attach 到 GitHub Release（tag 触发时自动建 Release 草稿）----
       # 签名说明：
@@ -76,7 +84,6 @@ jobs:
           releaseBody: '见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。未配置签名 secrets 时产物不签名。'
           releaseDraft: true
           prerelease: false
-          # 仓库 tauri.conf.json 当前 bundle.active=false（P4 打包进行中），
-          # 这里以 --config 覆盖开启打包；Bridge sidecar 的捆绑方式属 P4 未决项，
-          # 产物暂不含 bridge 运行时，仅供打包流水线验证。
+          # 仓库 tauri.conf.json 当前 bundle.active=false，
+          # 这里以 --config 覆盖开启打包；Bridge/node/uv sidecar 已由上一步验收并捆绑。
           args: --bundles ${{ matrix.bundles }} --config '{"bundle":{"active":true}}'

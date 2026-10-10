@@ -10,7 +10,8 @@
  * 不 import router 本体 —— 本模块被 app 侧消费时必须保持零 bridge 运行时依赖（只依赖 zod）。
  *
  * 隐私边界（spec §8）：出进程数据的截断在 router 各 agent.* 出口实施
- * （agent.context 的 schemas 过 PreviewSerializer 4KB 硬截断；agent.cellOutput 各字段 8KB）。
+ * （agent.context 的 schemas 过 PreviewSerializer 4KB 硬截断；agent.cellOutput 只返回
+ * traceback 与 MIME 类型键，stdout/stderr/文件路径留在本地 UI/session）。
  */
 
 import { z } from 'zod';
@@ -68,7 +69,7 @@ export const agentToolMeta = {
   get_cell_output: {
     title: '读取 cell 输出',
     description:
-      '获取指定 cell 最近一次运行的 {stdout, stderr, traceback, mimeKeys, writes}，各字段截断 8KB；writes 为该次运行检测到写模式打开的文件路径列表（上限 50）',
+      '获取指定 cell 最近一次运行的隐私安全摘要 {traceback, mimeKeys}；stdout、stderr 与文件路径不会发送给 Agent',
   },
   propose_code_change: {
     title: '提议代码变更',

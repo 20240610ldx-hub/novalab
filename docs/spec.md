@@ -22,7 +22,7 @@
 |  ├─ AgentPanel (Vercel AI SDK useChat 流式 + One-click Fix 卡片)           |
 |  └─ Zustand store: cells / dag / staleSet / diffs / kernelStatus          |
 +-------------------------------------+-------------------------------------+
-                                      | WebSocket · JSON-RPC 2.0 (ws://127.0.0.1:7788)
+                                      | WebSocket · JSON-RPC 2.0 (loopback；/bridge-info discovery)
                                       v
 +---------------------------------------------------------------------------+
 |  Bridge (bridge/, node TS 独立进程)                                        |
@@ -168,7 +168,7 @@ kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
 方案书 4 核心 + 2 只读辅助。zod schema 单一来源在 `bridge/src/mcp/tools.ts`，前端 in-process 工具与 MCP server 共用同一 execute 实现。
 
 1. `get_notebook_context()` → `{dagEdges, schemas, focusCellId, staleSet}`（**无原始数据**）。
-2. `get_cell_output(cellId)` → 最近一次 `{stdout, stderr, traceback, mimeKeys}`（截断 8KB）。
+2. `get_cell_output(cellId)` → 最近一次隐私安全摘要 `{traceback, mimeKeys}`（traceback 截断 8KB）；stdout/stderr 与文件路径只供本地 UI/session 使用。
 3. `propose_code_change(targetCellId, action: update|insert_below, newCode, rationale)` → staged diff id；**禁止直接覆盖**（system prompt + 工具层双保险）。
 4. `execute_cell(cellId, cascade?)` → run 报告（含 cascaded ids 与每格成败）。
 5. `list_cells()` → `[{id, execCount, status, firstLine, defs, refs}]`。

@@ -152,16 +152,16 @@ describe('agent.cellOutput', () => {
     setup();
     await openNotebook();
     const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
-    expect(out).toEqual({ stdout: '', stderr: '', traceback: null, mimeKeys: [], writes: [] });
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
   });
 
-  it('从 run.* 通知流累积最近一次 stdout / traceback', async () => {
+  it('从 run.* 通知流累积隐私安全 traceback 摘要', async () => {
     setup();
     await openNotebook();
     await call('cell.run', { cellId: 'a' });
     const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
-    expect(out.stdout).toBe('fake output for a\n');
-    expect(out.stderr).toBe('');
+    expect('stdout' in out).toBe(false);
+    expect('stderr' in out).toBe(false);
     expect(out.traceback).toBeNull();
 
     // 失败运行 → traceback 进缓存
@@ -181,16 +181,16 @@ describe('agent.cellOutput', () => {
     expect(out.traceback!.endsWith(TRUNCATION_SUFFIX)).toBe(true);
   });
 
-  it('未知 cell → -32602；repl 输出可读', async () => {
+  it('未知 cell → -32602；repl 输出不穿过 Agent 出口', async () => {
     setup();
     await openNotebook();
     expect((await call('agent.cellOutput', { cellId: 'zz' })).error?.code).toBe(-32602);
     await call('kernel.repl', { code: 'print(1)' });
     const out = (await call('agent.cellOutput', { cellId: 'repl' })).result as CellOutputSnapshot;
-    expect(out.stdout).toBe('repl: print(1)\n');
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
   });
 
-  it('run.notify file-write 透传前端并累积进 writes（P2.9）', async () => {
+  it('run.notify file-write 透传前端但不进入 Agent 输出（P2.9）', async () => {
     setup();
     await openNotebook();
     fakes[0]!.notifyWrites = { cellId: 'a', paths: ['/tmp/out.csv', '/tmp/plot.png'] };
@@ -201,9 +201,9 @@ describe('agent.cellOutput', () => {
     expect(forwarded).toHaveLength(2);
     expect(forwarded[0]!.params).toEqual({ cellId: 'a', kind: 'file-write', path: '/tmp/out.csv' });
 
-    // 累积：agent.cellOutput 带上 writes
+    // 本地 UI 仍收到通知，但 Agent 出口不暴露路径
     const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
-    expect(out.writes).toEqual(['/tmp/out.csv', '/tmp/plot.png']);
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
   });
 
   it('writes 去重且封顶 50 条；重跑（run.started）清空', async () => {
@@ -213,12 +213,12 @@ describe('agent.cellOutput', () => {
     fakes[0]!.notifyWrites = { cellId: 'b', paths: [...many, '/tmp/dup.csv', '/tmp/dup.csv'] };
     await call('cell.run', { cellId: 'b' });
     const out = (await call('agent.cellOutput', { cellId: 'b' })).result as CellOutputSnapshot;
-    expect(out.writes).toHaveLength(WRITES_PATH_LIMIT);
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
 
     fakes[0]!.notifyWrites = { cellId: 'b', paths: ['/tmp/only.csv'] };
     await call('cell.run', { cellId: 'b' });
     const next = (await call('agent.cellOutput', { cellId: 'b' })).result as CellOutputSnapshot;
-    expect(next.writes).toEqual(['/tmp/only.csv']);
+    expect(next).toEqual({ traceback: null, mimeKeys: [] });
   });
 
   it('非 file-write kind / 缺 path 不进 writes，但仍透传', async () => {
@@ -230,7 +230,7 @@ describe('agent.cellOutput', () => {
     });
     sup!.emit('notification', { method: 'run.notify', params: { cellId: 'a', kind: 'file-write' } });
     const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
-    expect(out.writes).toEqual([]);
+    expect(out).toEqual({ traceback: null, mimeKeys: [] });
     // 透传与 kind 无关：router 对内核通知一律 broadcast
     expect(countNotes('run.notify')).toBe(2);
   });

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_ANTHROPIC_VERSION,
+  isAllowedOrigin,
   joinUpstream,
   startLlmProxy,
   type LlmProxyHandle,
@@ -358,6 +359,41 @@ describe('llm-proxy · CORS 白名单', () => {
     const res = await fetch(ctx.proxyURL('tp', 'v1/messages'), { method: 'POST', body: '{}' });
     expect(res.status).toBe(200);
     expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+});
+
+describe('llm-proxy · bridge token', () => {
+  it('正式代理拒绝缺失/错误 token，并剥离正确 token后转发', async () => {
+    const ctx = await setup([{ id: 'secure', apiKey: 'sk-secret' }]);
+    const handle = startLlmProxy({ store: ctx.store, basePort: 0, authToken: 'bridge-token' });
+    cleanups.push(() => handle.close());
+    const port = await handle.listening;
+    const url = `http://127.0.0.1:${port}/llm/secure/v1/messages`;
+    const preflight = await fetch(url, {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://127.0.0.1:5199',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'content-type,x-novalab-bridge-token',
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect((await fetch(url, { method: 'POST', body: '{}' })).status).toBe(401);
+    expect((await fetch(url, { method: 'POST', headers: { 'x-novalab-bridge-token': 'wrong' }, body: '{}' })).status).toBe(401);
+    const ok = await fetch(url, {
+      method: 'POST',
+      headers: { 'x-novalab-bridge-token': 'bridge-token' },
+      body: '{}',
+    });
+    expect(ok.status).toBe(200);
+    const echo = await echoOf(ok);
+    expect(echo.headers['x-novalab-bridge-token']).toBeUndefined();
+  });
+
+  it('允许画廊/备用 Vite loopback 端口，但拒绝外部 origin', () => {
+    expect(isAllowedOrigin('http://127.0.0.1:5299')).toBe(true);
+    expect(isAllowedOrigin('http://localhost:5399')).toBe(true);
+    expect(isAllowedOrigin('http://evil.example')).toBe(false);
   });
 });
 

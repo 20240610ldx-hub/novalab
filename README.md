@@ -29,7 +29,7 @@ NovaLab 把 marimo 式反应式执行语义、Claude Science Notebook 式交互�
 +--------------------------------------------------------------+
 |  React 19 前端 (app/)  CM6 编辑器 · 行内 Diff · AgentPanel    |
 +--------------------------------------------------------------+
-        |  WebSocket · JSON-RPC 2.0 (ws://127.0.0.1:7788)
+        |  WebSocket · JSON-RPC 2.0 (loopback；通过 /bridge-info discovery)
 +--------------------------------------------------------------+
 |  Bridge (bridge/, node TS 独立进程)                            |
 |  RPC router · KernelSupervisor(1 文件=1 内核进程)              |
@@ -65,7 +65,7 @@ VITE_NOVALAB_LLM_MODEL=claude-sonnet-4-5   # 可省略，有默认值
 三个终端：
 
 ```bash
-pnpm dev:bridge    # 终端 1：Bridge，ws://127.0.0.1:7788（内核进程由它按需自动 spawn）
+pnpm dev:bridge    # 终端 1：Bridge（默认 7788，冲突自动 +1；前端通过 /bridge-info 发现）
 pnpm dev:app       # 终端 2：前端，http://localhost:5199
 pnpm kernel        # 终端 3（可选）：手动起 novakernel 调试协议帧；日常不需要
 ```

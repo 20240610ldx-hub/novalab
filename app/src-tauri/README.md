@@ -10,7 +10,7 @@ vite dev server（`devUrl = http://localhost:5199`）；`frontendDist = ../dist`
 | 终端 | 命令 | 说明 |
 |---|---|---|
 | 1 | `pnpm --filter @novalab/app dev` | vite dev server @ http://localhost:5199（strictPort，必须先起） |
-| 2 | `pnpm --filter @novalab/bridge start` | bridge @ ws://127.0.0.1:7788（端口冲突自动 +1，见 spec §2） |
+| 2 | `pnpm --filter @novalab/bridge start` | bridge loopback（默认 7788，冲突自动 +1；前端经 `/bridge-info` 发现，见 spec §2） |
 | 3 | `cd app && pnpm exec tauri dev` | Tauri 窗口（编译 Rust，首跑较慢） |
 
 > 顺序建议 1 → 2 → 3：窗口打开时若 devUrl 未就绪会白屏/报错，刷新即可。
@@ -46,6 +46,8 @@ target/，故脚本必须先于 cargo/tauri build 跑，产物齐备才能编译
 pnpm --filter @novalab/app build        # 前端 dist（tauri.conf frontendDist）
 node scripts/build-bridge.mjs           # bridge → bridge-dist/bridge.mjs + binaries/node-<triple>.exe
 node scripts/sync-py-resources.mjs      # py/ → py-resources/py/ + binaries/uv-<triple>.exe
+uv sync --directory py --all-extras    # 本地 smoke 复用已就绪的 .venv
+node scripts/packaged-startup-smoke.mjs # sidecar → discovery/auth → notebook.open/cell.run
 cd app/src-tauri
 cargo build --release                   # tauri-build 拷 sidecar/resources 到 target/release/
 pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\":{\"active\":true}}'
@@ -80,7 +82,8 @@ python scripts/verify_bundle.py         # 断言反转为「payload 必含 sidec
   `resource_dir()`（Windows 上二者同目录）按序探测 sidecar（`binaries/` 子目录或扁平）
   与资源，spawn `node bridge.mjs`，注入：
   - `NOVALAB_PACKAGED=1`
-  - `NOVALAB_PY_DIR=<resource>/py-resources/py`
+  - `NOVALAB_PY_SOURCE_DIR=<resource>/py-resources/py`（只读资源）
+  - `NOVALAB_PY_DIR=<appData>/py-resources/py`（可写运行时副本，uv sync 目标）
   - `NOVALAB_UV_BIN=<resource>/binaries/uv-<triple>.exe`
   布局缺失 → 警告并回落 dev spawn。退出时 `taskkill /T /F` 杀 node→uv→python 整棵树。
 
@@ -92,7 +95,7 @@ pyDir 经 `resolveKernelSpawnSpec()` 读 `NOVALAB_UV_BIN`/`NOVALAB_PY_DIR`（缺
 bootstrap 在途时 `send()` 缓冲、spawn 后 flush（首启 load_file 不丢）。单测覆盖 env
 覆盖 + 回落 + 缓冲（注入假 runner/spawn，不真拉进程）。
 
-## P4.1 本地 release 构建验证（2026-10-07，已跑通）
+## P4.1 历史本地 release 构建记录（2026-10-07）
 
 ```powershell
 pnpm --filter @novalab/app build                # tsc -b 通过，vite → app/dist（~1s）
@@ -102,9 +105,8 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
 #   保持不动，CLI JSON 合并覆盖——与 .github/workflows/release.yml 同法。
 ```
 
-- **产物**：`target/release/bundle/nsis/NovaLab_0.0.1_x64-setup.exe`（2.36 MiB；
-  novalab.exe 8.7 MB，前端 dist 编译期嵌入，LZMA solid 压缩）。远低于典型
-  15–60 MB 预期，因为**不含 bridge/kernel sidecar**——见下方 P4 缺口。
+- **记录性质**：这次运行早于 sidecar 生成步骤，只验证了 Tauri 壳本身；当前发布流水线
+  会先生成并验收 node/uv/bridge/kernel sidecar，再执行打包。
 - **核验**：`python scripts/verify_bundle.py`（无需 7z：解析 bundler 生成的
   `target/release/nsis/x64/installer.nsi` 的 define/File 清单 + 扫描 exe 内明文
   asset key）。结论：payload 仅主程序；`INSTALLWEBVIEW2MODE=downloadBootstrapper`
@@ -122,8 +124,7 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
       首启 `uv python install`/`uv sync` 自装，失败回落 BYO=C 现状路径）。
       未引入 tauri_plugin_shell——lib.rs 直接 `std::process::Command` spawn
       sidecar（Rust 侧无需 shell 权限，capabilities 不动）。细节见上方 P4.1b 节。
-      遗留：安装目录若不可写（Program Files），首启 `uv sync` 到 py-resources/
-      可能因权限失败 → 回落 BYO；根治需把 py 资源/venv 迁 app-data（P4.2 候选）。
+      安装目录不可写时，Bridge 会把只读 py-resources 复制到 appData 后再执行首启 `uv sync`。
 - [x] **图标**：`tauri icon` 已生成全套（见 `icons/`），`bundle.icon` 已填；
       icons/README.md 的"空占位"描述已过时（本次已更新）。
 - [ ] **签名**：Windows 代码签名证书占位（tauri-action CI；secrets 未配 =
@@ -137,7 +138,7 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
 
 ## CI release.yml 备注
 
-**P4.1b 起 release.yml 必须新增 sidecar 生成步骤**：tauri.conf.json 已声明
+**当前 release.yml 已包含 sidecar 生成与真实启动验收步骤**：tauri.conf.json 已声明
 `externalBin`/`resources`，tauri-build 在 cargo 编译期就要求这些文件存在——
 缺了直接构建失败（windows 与 linux job 都是）。在 `pnpm --filter @novalab/app
 build` 之后、tauri-action 之前插入：
@@ -165,6 +166,10 @@ build` 之后、tauri-action 之前插入：
 rust-lld proxy）。③ sidecar 使产物体积大增（node ~88 MB + uv ~63 MB，NSIS
 LZMA 压缩后 setup 预计 60–140 MB），GitHub Release 附件与 actions 缓存时长
 会相应上涨。
+
+发布前的 `scripts/packaged-startup-smoke.mjs` 会直接启动本平台 sidecar，验证
+`/bridge-info` 发现、WS token 认证、`notebook.open` 与一次真实 `cell.run`；Windows
+与 Linux job 共用这条验收，不把“能编译”当作“能启动”。
 
 ## 目录
 

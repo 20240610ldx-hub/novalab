@@ -11,7 +11,7 @@ export const zh: Record<keyof typeof en, string> = {
   'app.workspaceTooltip': '尚无工作区（打开 notebook 后为其所在目录）',
   'app.open': '打开',
   'app.pathPlaceholder': 'path/to/notebook.py',
-  'app.bridgeDown': 'bridge 未连接 —— kernel / 运行 / 文件功能不可用（ws://127.0.0.1:7788）。请确认 bridge 进程已启动后刷新。',
+  'app.bridgeDown': 'bridge 未连接 —— kernel / 运行 / 文件功能不可用。请确认 bridge 进程已启动后刷新。',
   'app.toAppView': 'App View —— 只读报告视图（隐藏代码）',
   'app.toEditMode': '返回编辑视图',
 
@@ -68,9 +68,9 @@ export const zh: Record<keyof typeof en, string> = {
   'settings.title': '设置 · LLM Provider',
   'settings.close': '✕ 关闭',
   'settings.storageWarning':
-    '🔒 API Key 经本机 bridge（ws://127.0.0.1:7788）以 AES-256-GCM 加密落盘 —— keys encrypted at rest in .novalab/providers.json (0600)，永不回传前端（列表仅暴露 hasKey 掩码）；LLM 请求统一经 bridge 代理 http://127.0.0.1:7789/llm/<id>/v1，浏览器进程不持有明文 key。威胁模型：防 casual 披露（误共享/截图/备份泄露），不防同机决意攻击者（机器派生密钥可复算，见 bridge/src/secret.ts 注释）。',
+    '🔒 API Key 经本机 bridge（端口由 /bridge-info discovery 协商）以 AES-256-GCM 加密落盘 —— keys encrypted at rest in .novalab/providers.json (0600)，永不回传前端（列表仅暴露 hasKey 掩码）；LLM 请求统一经本机 bridge 代理，浏览器进程不持有明文 key。威胁模型：防 casual 披露（误共享/截图/备份泄露），不防同机决意攻击者（机器派生密钥可复算，见 bridge/src/secret.ts 注释）。',
   'settings.proxyNote':
-    '请求统一经 bridge LLM 代理（127.0.0.1:7789/llm/<id>/v1，SSE 流式透传）—— 浏览器不再直连 provider 端点，原 L-1 CORS 拦截消除。',
+    '请求统一经 bridge LLM 代理（loopback 端口由 discovery 协商，SSE 流式透传）—— 浏览器不再直连 provider 端点，原 L-1 CORS 拦截消除。',
   'settings.bridgeNotReady':
     ' 当前 bridge 未就绪：回退 P4 前直连（用户 provider 直连其 baseURL 可能被 CORS 拦截；dev 兜底走 vite 同源代理 /llm）。',
   'settings.noProvidersDev': '尚无用户 provider；当前使用 dev 兜底（.env.local VITE_NOVALAB_LLM_*）。',
@@ -99,7 +99,7 @@ export const zh: Record<keyof typeof en, string> = {
   'settings.save': '保存',
   'settings.test': '测试连接',
   'settings.testing': '测试中…',
-  'settings.testTitle': '先保存当前草稿到加密存储，再经 bridge 代理（127.0.0.1:7789）发起一句 generateText',
+  'settings.testTitle': '先保存当前草稿到加密存储，再经 bridge 代理发起一句 generateText',
   'settings.cancel': '取消',
   'settings.unnamed': '（未命名）',
   'settings.testOkPrefix': '✓ 连接成功',
@@ -117,7 +117,7 @@ export const zh: Record<keyof typeof en, string> = {
   /* ---- Onboarding（P4.4） ---- */
   'onboarding.title': '欢迎使用 NovaLab',
   'onboarding.intro': '首启环境自检 —— 逐项异步检查，行内显示结果。',
-  'onboarding.check.bridge': 'bridge 连接（ws://127.0.0.1:7788）',
+  'onboarding.check.bridge': 'bridge 连接（loopback discovery）',
   'onboarding.check.kernel': '内核 ping（bridge rpc）',
   'onboarding.check.deps': 'demo 依赖（pandas · matplotlib）',
   'onboarding.check.writable': '工作区可写（写探针临时文件后清理）',

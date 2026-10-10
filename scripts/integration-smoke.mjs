@@ -8,10 +8,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BridgeClient } from './bridge-client.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(join(root, 'bridge', 'package.json'));
-const { WebSocket } = require('ws');
 
 const DEMO = join(root, 'demos', 'demo.py');
 // smoke 的 cell.save 会落盘（幂等 toggle 改 pop 值）：进程退出时还原字节，保持仓库干净
@@ -28,66 +28,36 @@ const fail = (msg) => {
   process.exit(1);
 };
 
-const bridge = spawn(process.execPath, [require.resolve('tsx/cli'), join(root, 'bridge', 'src', 'main.ts')], {
+const bridgeProcess = spawn(process.execPath, [require.resolve('tsx/cli'), join(root, 'bridge', 'src', 'main.ts')], {
   cwd: join(root, 'bridge'),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
-bridge.stdout.on('data', (d) => process.stdout.write(`[bridge] ${d}`));
-bridge.stderr.on('data', (d) => process.stderr.write(`[bridge!] ${d}`));
+bridgeProcess.stdout.on('data', (d) => process.stdout.write(`[bridge] ${d}`));
+bridgeProcess.stderr.on('data', (d) => process.stderr.write(`[bridge!] ${d}`));
 
-const ws = await new Promise((resolve, reject) => {
-  const tryConnect = (n) => {
-    const s = new WebSocket('ws://127.0.0.1:7788');
-    s.on('open', () => resolve(s));
-    s.on('error', () => (n > 20 ? reject(new Error('bridge 未就绪')) : setTimeout(() => tryConnect(n + 1), 500)));
-  };
-  tryConnect(0);
-});
-
-let nextId = 1;
-const pending = new Map();
-const notifications = [];
-ws.on('message', (raw) => {
-  const msg = JSON.parse(String(raw));
-  if (msg.id !== undefined && pending.has(msg.id)) {
-    pending.get(msg.id)(msg);
-    pending.delete(msg.id);
-  } else {
-    notifications.push(msg);
+const bridge = new BridgeClient();
+let connected = false;
+for (let attempt = 0; attempt < 30 && !connected; attempt += 1) {
+  try {
+    await bridge.connect();
+    connected = true;
+  } catch {
+    if (attempt === 29) throw new Error('bridge 未就绪');
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
-});
-const rpc = (method, params = {}) =>
-  new Promise((resolve) => {
-    const id = nextId++;
-    pending.set(id, resolve);
-    ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-  });
-const waitNotif = (method, timeoutMs = 15000) =>
-  new Promise((resolve, reject) => {
-    const hit = notifications.find((n) => n.method === method);
-    if (hit) return resolve(hit);
-    const t0 = Date.now();
-    const iv = setInterval(() => {
-      const n = notifications.find((x) => x.method === method);
-      if (n) {
-        clearInterval(iv);
-        resolve(n);
-      } else if (Date.now() - t0 > timeoutMs) {
-        clearInterval(iv);
-        reject(new Error(`timeout waiting ${method}`));
-      }
-    }, 100);
-  });
+}
+const rpc = (method, params = {}) => bridge.rpc(method, params);
+const waitNotif = (method, timeoutMs = 15000) => bridge.waitNotif(method, () => true, timeoutMs);
 
 // P3.1：notebook.open 响应升级为 {notebookId, state}
-const openRes = (await rpc('notebook.open', { path: DEMO })).result;
+const openRes = await rpc('notebook.open', { path: DEMO });
 if (!openRes?.notebookId) fail(`notebook.open 缺 notebookId: ${JSON.stringify(openRes)}`);
 const state = openRes.state;
 if (state?.cells?.length !== 3) fail(`notebook.open cells=${state?.cells?.length}`);
 console.log(`open ok: notebookId=${openRes.notebookId} cells=${state.cells.length} edges=${state.dagEdges.length}`);
 
 // P3.1：notebook.list 反映已打开的 tab（含 rssMB 字段形状）
-const list = (await rpc('notebook.list')).result;
+const list = await rpc('notebook.list');
 if (!Array.isArray(list) || list.length !== 1) fail(`notebook.list len=${list?.length}`);
 if (list[0].notebookId !== openRes.notebookId) fail('notebook.list notebookId 不匹配');
 if (!('rssMB' in list[0])) fail('notebook.list 缺 rssMB 字段');
@@ -95,14 +65,14 @@ console.log(`list ok: n=${list.length} kernelState=${list[0].kernelState} rssMB=
 
 const [c1, c2, c3] = state.cells;
 const r1 = await rpc('cell.run', { cellId: c1.id, cascade: false });
-if (!r1.result?.ok) fail(`run c1: ${JSON.stringify(r1)}`);
+if (!r1?.ok) fail(`run c1: ${JSON.stringify(r1)}`);
 const r2 = await rpc('cell.run', { cellId: c2.id, cascade: false });
-if (!r2.result?.ok) fail(`run c2: ${JSON.stringify(r2)}`);
+if (!r2?.ok) fail(`run c2: ${JSON.stringify(r2)}`);
 const r3 = await rpc('cell.run', { cellId: c3.id, cascade: false });
-if (!r3.result?.ok) fail(`run c3: ${JSON.stringify(r3)}`);
+if (!r3?.ok) fail(`run c3: ${JSON.stringify(r3)}`);
 await waitNotif('run.done');
 
-const vars = (await rpc('kernel.vars')).result;
+const vars = await rpc('kernel.vars');
 const dfSchema = vars.schemas.find((s) => s.name === 'df');
 if (!dfSchema?.shape) fail('kernel.vars 缺 df schema');
 console.log(`vars ok: df shape=${dfSchema.shape} columns=${dfSchema.columns?.length}`);
@@ -115,10 +85,10 @@ const editedCode = c1.code.includes('1.9')
   : c1.code.replace('0.9', '1.9');
 if (editedCode === c1.code) fail('demo.py 缺少可 toggle 的 pop 值（0.9/1.9）');
 const saved = await rpc('cell.save', { cellId: c1.id, code: editedCode });
-if (!saved.result?.staleSet?.includes(c2.id)) fail(`cell.save staleSet=${JSON.stringify(saved.result?.staleSet)}`);
-console.log(`reactive ok: staleSet=${saved.result.staleSet.length} cells`);
+if (!saved?.staleSet?.includes(c2.id)) fail(`cell.save staleSet=${JSON.stringify(saved)}`);
+console.log(`reactive ok: staleSet=${saved.staleSet.length} cells`);
 
 console.log('INTEGRATION_SMOKE_OK');
-ws.close();
-bridge.kill();
+bridge.close();
+bridgeProcess.kill();
 process.exit(0);

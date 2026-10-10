@@ -10,7 +10,7 @@ export const en = {
   'app.workspaceTooltip': 'No workspace yet (set to the notebook\'s directory once one is open)',
   'app.open': 'Open',
   'app.pathPlaceholder': 'path/to/notebook.py',
-  'app.bridgeDown': 'bridge not connected — kernel / run / files unavailable (ws://127.0.0.1:7788). Make sure the bridge process is running, then refresh.',
+  'app.bridgeDown': 'bridge not connected — kernel / run / files unavailable. Make sure the bridge process is running, then refresh.',
   'app.toAppView': 'App View — read-only report (hide code)',
   'app.toEditMode': 'Back to edit view',
 
@@ -67,9 +67,9 @@ export const en = {
   'settings.title': 'Settings · LLM Provider',
   'settings.close': '✕ close',
   'settings.storageWarning':
-    '🔒 API keys are encrypted at rest by the local bridge (ws://127.0.0.1:7788) with AES-256-GCM — keys encrypted at rest in .novalab/providers.json (0600), never sent back to the frontend (the list only exposes a hasKey mask); all LLM requests go through the bridge proxy http://127.0.0.1:7789/llm/<id>/v1, the browser process never holds plaintext keys. Threat model: defends against casual disclosure (accidental sharing/screenshots/backup leaks), not a determined attacker on the same machine (machine-derived keys can be recomputed; see bridge/src/secret.ts).',
+    '🔒 API keys are encrypted at rest by the local bridge (loopback port discovered via /bridge-info) with AES-256-GCM — keys encrypted at rest in .novalab/providers.json (0600), never sent back to the frontend (the list only exposes a hasKey mask); all LLM requests go through the local bridge proxy, the browser process never holds plaintext keys. Threat model: defends against casual disclosure (accidental sharing/screenshots/backup leaks), not a determined attacker on the same machine (machine-derived keys can be recomputed; see bridge/src/secret.ts).',
   'settings.proxyNote':
-    'All requests go through the bridge LLM proxy (127.0.0.1:7789/llm/<id>/v1, SSE streaming passthrough) — the browser no longer talks to provider endpoints directly, so the former L-1 CORS block is gone.',
+    'All requests go through the bridge LLM proxy (loopback port negotiated via discovery, SSE streaming passthrough) — the browser no longer talks to provider endpoints directly, so the former L-1 CORS block is gone.',
   'settings.bridgeNotReady':
     ' Bridge not ready: falling back to pre-P4 direct connections (direct calls to the user provider\'s baseURL may be blocked by CORS; the dev fallback uses the vite same-origin proxy /llm).',
   'settings.noProvidersDev': 'No user providers yet; currently using the dev fallback (.env.local VITE_NOVALAB_LLM_*).',
@@ -98,7 +98,7 @@ export const en = {
   'settings.save': 'save',
   'settings.test': 'Test connection',
   'settings.testing': 'Testing…',
-  'settings.testTitle': 'Saves the current draft to encrypted storage first, then issues one generateText via the bridge proxy (127.0.0.1:7789)',
+  'settings.testTitle': 'Saves the current draft to encrypted storage first, then issues one generateText via the bridge proxy',
   'settings.cancel': 'cancel',
   'settings.unnamed': '(unnamed)',
   'settings.testOkPrefix': '✓ connection ok',
@@ -116,7 +116,7 @@ export const en = {
   /* ---- Onboarding（P4.4） ---- */
   'onboarding.title': 'Welcome to NovaLab',
   'onboarding.intro': 'First-launch environment self-check — each item runs in order and reports inline.',
-  'onboarding.check.bridge': 'bridge connection (ws://127.0.0.1:7788)',
+  'onboarding.check.bridge': 'bridge connection (loopback discovery)',
   'onboarding.check.kernel': 'kernel ping (bridge rpc)',
   'onboarding.check.deps': 'demo dependencies (pandas · matplotlib)',
   'onboarding.check.writable': 'workspace writable (write-probe cleanup)',

@@ -100,7 +100,7 @@ export function Onboarding({ rerun = false, onOpenChange }: OnboardingProps) {
     }
     if (cancelRef.current) return;
     if (!connected) {
-      apply({ type: 'fail', id: 'bridge', error: 'ws://127.0.0.1:7788 未连接' });
+      apply({ type: 'fail', id: 'bridge', error: 'bridge discovery 未连接' });
       for (const id of ['kernel', 'deps', 'writable'] as const) {
         apply({ type: 'skip', id, error: t('onboarding.skipped') });
       }
