@@ -106,6 +106,31 @@ describe('buildOutputs（五路映射）', () => {
     });
   });
 
+  it('text/html + text/plain → 同一 display_data bundle；html 按行数组（DataFrame 形态）', () => {
+    const html = '<div>\n<table border="1" class="dataframe">\n<tr><td>1</td></tr>\n</table>\n</div>';
+    const outs = buildOutputs({ mime: { 'text/plain': '   a\n0  1', 'text/html': html } });
+    expect(outs).toHaveLength(1);
+    expect(outs[0]).toEqual({
+      output_type: 'display_data',
+      metadata: {},
+      data: {
+        'text/plain': ['   a\n', '0  1'],
+        'text/html': ['<div>\n', '<table border="1" class="dataframe">\n', '<tr><td>1</td></tr>\n', '</table>\n', '</div>'],
+      },
+    });
+    // 行数组拼回即原文：标签/属性原样导出（不消毒、不转义）
+    expect(((outs[0]!['data'] as Record<string, string[]>)['text/html']!).join('')).toBe(html);
+  });
+
+  it('仅 text/html（无 text/plain）→ 仍产出 display_data；string[] 形态宽容接受', () => {
+    expect(buildOutputs({ mime: { 'text/html': '<b>x</b>' } })).toEqual([
+      { output_type: 'display_data', metadata: {}, data: { 'text/html': ['<b>x</b>'] } },
+    ]);
+    expect(buildOutputs({ mime: { 'text/html': ['<p>a</p>\n', '<p>b</p>'] } })).toEqual([
+      { output_type: 'display_data', metadata: {}, data: { 'text/html': ['<p>a</p>\n', '<p>b</p>'] } },
+    ]);
+  });
+
   it('traceback → error：ename/evalue 解析 + traceback 行数组', () => {
     const tb = 'Traceback (most recent call last):\n  File "<cell a>", line 1\nValueError: boom';
     const outs = buildOutputs({ traceback: tb });
