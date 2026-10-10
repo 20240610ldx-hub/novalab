@@ -24,6 +24,7 @@
 ### Added
 
 - RPC `bridge.mcpLaunch`：回报以 MCP 模式启动本 bridge 的命令行（Welcome「Connect…」展示）。
+- `scripts/bench.mjs`：intent §8 量化指标首次可重复测量（冷启动、cell 附加开销、bridge RSS、100 cell 滚动帧率）。
 
 ### Fixed
 

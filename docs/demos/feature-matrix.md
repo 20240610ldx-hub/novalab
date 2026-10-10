@@ -108,6 +108,7 @@
 |---|---|---|---|
 | G1 门：路线 B（自研内核）裁决 | plan §1 · ADR-001 | ✅ | docs/adr/001-kernel-route.md · docs/spike-s1-memo.md；`node scripts/integration-smoke.mjs` |
 | P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（P4.1 打包已验收） | plan §2 P1.7 行闭环记录；GitHub Actions Release run `38066573600`：Windows NSIS/MSI + Linux AppImage/deb 均成功，并通过 packaged startup smoke；后续 CI 增加构建后 bundle 产物检查 |
+| intent §8 量化指标（首次实测，2026-10-10） | intent §8 · plan §5b | ✅ 3 项 · 🟡 1 项 | `node scripts/bench.mjs --ui`（Ryzen 9 7940HX / Win11，dev 形态 tsx）：冷启动 spawn→WS→open 100 cell **1.3–1.4s**（<3s ✅）；cell 附加开销中位数 **0.9ms** / p95 **1.7ms**（<50ms ✅）；bridge RSS **≈100MB**（<150MB ✅）；100 cell 滚动 **57.9fps**、5 个 >20ms 长帧（headless 无 GPU，目标 60 🟡，需真机复核）。未含：Tauri 窗口首帧、重输出 notebook、安装包体积（37MB，目标 20MB ❌）。**注意**：以上为空闲机器、合入 main 鉴权改动之前的数；2026-10-11 在其他应用占满多核时复跑得冷启动 11–34s、附加开销 4–7ms——负载敏感，需在空闲机器上重测后才能作为验收数 |
 | P1.8 sidecar `.novalab/` + 热重载 + 崩溃恢复 | plan P1.8 | 🟡 | bridge watch.test.ts（28 例）· ui-store.test.ts（12 例）；崩溃横幅/dead-restart 行未真机拍 |
 
 ## 6. 未实现（P3/P4 排期）——诚实标注

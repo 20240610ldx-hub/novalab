@@ -173,7 +173,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 打开 `demo.py` → 编辑上游 cell → 下游自动标 stale → 运行级联转绿 → 人为制造 `KeyError` → Fix 卡片浮现（附 traceback+schema）→ 行内 Diff → `Tab` 采纳自动重跑转绿 → 底部 REPL 直接查询变量 → 导出 .ipynb。
 
 **量化指标**：冷启动（双击→可编辑）< 3s；cell 运行附加开销 < 50ms；100 cell 滚动 60fps；Bridge 常驻内存 < 150MB；安装包（P4）< 20MB。
-> 2026-10-10 现状：四项性能指标尚无基准脚本（未测）；v0.1.0 安装包 NSIS 37MB / MSI 55MB，另需首启联网下载约 450MB 运行时——"断网可跑"目前只对已完成首启的机器成立。见 plan §5b。
+> 2026-10-10 首次实测（`node scripts/bench.mjs --ui`，dev 形态）：冷启动 1.3s（不含 Tauri 窗口）、cell 附加开销中位数 0.9ms、bridge RSS ≈100MB 均达标；100 cell 滚动 57.9fps（headless，需真机复核）。v0.1.0 安装包 NSIS 37MB / MSI 55MB，另需首启联网下载约 450MB 运行时——"断网可跑"目前只对已完成首启的机器成立。见 plan §5b。
 
 ---
 

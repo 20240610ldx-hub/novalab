@@ -108,6 +108,7 @@ uv run --directory py pytest
 node scripts/integration-smoke.mjs            # bridge + kernel 端到端（起停自管）
 pnpm exec playwright install chromium         # 首次
 node scripts/demo-gallery.mjs --skip-agent    # 交互状态画廊（无 LLM 凭据态）
+node scripts/bench.mjs --ui                   # intent §8 量化指标（--ui 需 dev 服务在跑）
 ```
 
 详见 [CONTRIBUTING.md](CONTRIBUTING.md)（含 clean-room 纪律）与 [docs/plan.md](docs/plan.md)。
