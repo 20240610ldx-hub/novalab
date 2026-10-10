@@ -6,7 +6,7 @@ import {
   saveProviderState,
   type ProviderConfig,
 } from '../agent/providers';
-import type { AssembledPayload } from '../agent/payload';
+import type { AssembledPayload, ToolAuditEntry } from '../agent/payload';
 import type { TracebackFrame } from '../kernel/types';
 
 /**
@@ -35,6 +35,8 @@ interface AgentStore {
   lastPayload: AssembledPayload | null;
   /** FixCard 数据源：最近一次 run.error（notebook store 只读订阅转存）。 */
   lastError: LastRunError | null;
+  /** v0.1.1：本轮请求中 Agent 工具调用的出口记账（新请求 setLastPayload 时清空）。 */
+  toolAudit: ToolAuditEntry[];
 
   setSettingsOpen: (open: boolean) => void;
   upsertProvider: (config: ProviderConfig) => Promise<void>;
@@ -42,6 +44,7 @@ interface AgentStore {
   setActiveProvider: (id: string | null) => Promise<void>;
   setLastPayload: (payload: AssembledPayload | null) => void;
   setLastError: (err: LastRunError | null) => void;
+  recordToolResult: (entry: ToolAuditEntry) => void;
 }
 
 /**
@@ -65,6 +68,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   activeProviderId: initial.activeProviderId,
   lastPayload: null,
   lastError: null,
+  toolAudit: [],
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
@@ -88,7 +92,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     await persist({ providers: get().providers, activeProviderId: id });
   },
 
-  setLastPayload: (payload) => set({ lastPayload: payload }),
+  setLastPayload: (payload) => set({ lastPayload: payload, toolAudit: [] }),
+  recordToolResult: (entry) => set({ toolAudit: [...get().toolAudit, entry] }),
   setLastError: (err) => set({ lastError: err }),
 }));
 

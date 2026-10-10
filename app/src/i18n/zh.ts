@@ -128,4 +128,10 @@ export const zh: Record<keyof typeof en, string> = {
   'onboarding.start': '开始使用',
   'onboarding.later': '稍后重试',
   'onboarding.copyFix': '复制修复命令',
+  'chip.title': '点击审计实际发给模型的内容',
+  'chip.summary': 'context: {schemas} schemas · {tracebacks} traceback · {tools} 次工具返回',
+  'chip.outputsWithheld': 'cell 输出不出本机',
+  'chip.none': '尚未发送任何请求。',
+  'chip.lastRequest': '最近一次请求 · {sections} 段 · 共 {bytes} B（单段硬上限 4096 B）',
+  'chip.toolsHeader': '返回给模型的工具结果 · {count} 次 · 共 {bytes} B',
 } as const;

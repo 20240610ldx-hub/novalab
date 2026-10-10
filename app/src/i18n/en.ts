@@ -127,4 +127,10 @@ export const en = {
   'onboarding.start': 'Get started',
   'onboarding.later': 'Retry later',
   'onboarding.copyFix': 'copy fix command',
+  'chip.title': 'Click to audit exactly what was sent to the model',
+  'chip.summary': 'context: {schemas} schemas · {tracebacks} traceback · {tools} tool results',
+  'chip.outputsWithheld': 'cell outputs stay local',
+  'chip.none': 'No request sent yet.',
+  'chip.lastRequest': 'Last request · {sections} sections · {bytes} B (each section capped at 4096 B)',
+  'chip.toolsHeader': 'Tool results returned to the model · {count} · {bytes} B',
 } as const;
