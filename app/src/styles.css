@@ -95,6 +95,56 @@ body {
   color: var(--err-text);
 }
 
+/* ---- text/html 表格输出（ADR-011） ----
+ * 内核 HTML 经白名单重建后不带任何 class / style，观感全部由这里给：
+ * 套在中性面板内（复用 420px 内部滚动；宽表横向滚动），表头吸顶，
+ * 数值右对齐等宽数字（Jupyter DataFrame 惯例），颜色全走 token → 双主题自适应。
+ * 用 separate + spacing 0 而非 collapse：collapse 下吸顶表头的边框不随之吸附。 */
+.nl-out-html {
+  width: max-content;
+  min-width: 100%;
+  padding: 0 4px 4px;
+}
+.nl-out-html table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.nl-out-html th,
+.nl-out-html td {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  vertical-align: top;
+  white-space: nowrap;
+}
+/* 吸顶挂在 thead 而非 th：多级列索引有多行表头，逐 th 吸顶会叠在同一行位。 */
+.nl-out-html thead {
+  position: sticky;
+  top: 0;
+}
+.nl-out-html thead th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 500;
+}
+.nl-out-html tbody th {
+  color: var(--muted);
+  font-weight: 400;
+}
+.nl-out-html tbody tr:last-child > * {
+  border-bottom: none;
+}
+.nl-out-html tbody tr:hover > * {
+  background: var(--active-line);
+}
+.nl-out-html caption,
+.nl-out-html p {
+  padding: 6px 12px;
+  color: var(--muted);
+  text-align: left;
+}
+
 /* 细滚动条（#22）：webkit + firefox 双轨 */
 .nl-scroll-thin {
   scrollbar-width: thin;

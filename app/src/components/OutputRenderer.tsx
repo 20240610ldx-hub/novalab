@@ -1,10 +1,11 @@
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, createElement, useMemo, type ReactNode } from 'react';
 import type { CellOutput, MimeBundle, TracebackFrame } from '../kernel/types';
 import { ControlRenderer } from './controls/ControlRenderer';
 import { CONTROL_MIME } from './controls/logic';
+import { isRenderableHtml, parseSafeHtml, type SafeHtmlNode } from './htmlSanitize';
 
 /** MIME bundle 中前端认识的键；其余按"未知 mime"降级为灰字 key 列表。 */
-const KNOWN_MIME = new Set(['text/plain', 'image/png', CONTROL_MIME]);
+const KNOWN_MIME = new Set(['text/plain', 'text/html', 'image/png', CONTROL_MIME]);
 
 function mimeText(v: string | string[]): string {
   return Array.isArray(v) ? v.join('') : v;
@@ -18,6 +19,10 @@ function mimeText(v: string | string[]): string {
 /* （参考图 [76]：stdout 中性面板 + 红面板相继）。CellOutput 是累积串      */
 /* 形态（store/notebook.ts reducer 边界，Q 线不动），故分区粒度 =          */
 /* 流级别（stdout → stderr → traceback → mime），非逐 chunk 交错。        */
+/*                                                                     */
+/* 富表示优先（ADR-011，Jupyter richest-representation 语义）：同一收尾值  */
+/* 的 text/html 与 text/plain 只出一个分区——有 text/html 出 html 分区     */
+/* （text/plain 随分区携带作回落），否则出 text-plain。                    */
 /* ------------------------------------------------------------------ */
 
 export type OutputSegment =
@@ -25,6 +30,7 @@ export type OutputSegment =
   | { kind: 'stderr'; text: string }
   | { kind: 'traceback'; text: string; frames: TracebackFrame[] }
   | { kind: 'text-plain'; text: string }
+  | { kind: 'html'; html: string; fallbackText: string | null }
   | { kind: 'image'; data: string }
   | { kind: 'control'; data: unknown };
 
@@ -37,8 +43,12 @@ export function deriveOutputSegments(output: CellOutput): OutputSegment[] {
     segs.push({ kind: 'traceback', text: output.traceback.text, frames: output.traceback.frames ?? [] });
   }
   const mime = output.mime ?? {};
-  if (mime['text/plain'] !== undefined) {
-    segs.push({ kind: 'text-plain', text: mimeText(mime['text/plain']) });
+  const plain = mime['text/plain'] !== undefined ? mimeText(mime['text/plain']) : null;
+  const html = mime['text/html'] !== undefined ? mimeText(mime['text/html']) : '';
+  if (html !== '') {
+    segs.push({ kind: 'html', html, fallbackText: plain });
+  } else if (plain !== null) {
+    segs.push({ kind: 'text-plain', text: plain });
   }
   if (mime['image/png'] !== undefined) {
     segs.push({ kind: 'image', data: mimeText(mime['image/png']) });
@@ -70,6 +80,47 @@ function UnknownMimeKeys({ bundle }: { bundle: MimeBundle }) {
     <div className="px-1 text-[12px] text-[var(--muted)]">
       unrendered mime: {unknown.join(', ')}
     </div>
+  );
+}
+
+/** 白名单树 → React 元素（标签名与属性只来自 htmlSanitize 的白名单，文本走 React 转义）。 */
+function renderSafeHtml(nodes: SafeHtmlNode[]): ReactNode[] {
+  return nodes.map((n, i) =>
+    typeof n === 'string'
+      ? n
+      : createElement(
+          n.tag,
+          { key: i, colSpan: n.colSpan, rowSpan: n.rowSpan },
+          ...(n.children.length > 0 ? [renderSafeHtml(n.children)] : []),
+        ),
+  );
+}
+
+/**
+ * text/html 分区（ADR-011）：DOMParser 解析 → 白名单重建 → 中性面板内渲染为真表格。
+ * 非表格型 / 消毒后无内容 → 回落 text/plain 面板 + 灰字注记（与未知 mime 同一降级观感）。
+ */
+function HtmlSegment({ html, fallbackText }: { html: string; fallbackText: string | null }) {
+  const safe = useMemo(() => parseSafeHtml(html), [html]);
+  if (!isRenderableHtml(safe)) {
+    return (
+      <>
+        {fallbackText !== null && (
+          <OutPanel>
+            <pre className="whitespace-pre-wrap break-words px-3 py-2">{fallbackText}</pre>
+          </OutPanel>
+        )}
+        <div className="px-1 text-[12px] text-[var(--muted)]">unrendered mime: text/html</div>
+      </>
+    );
+  }
+  return (
+    <OutPanel>
+      <div className="nl-out-html">{renderSafeHtml(safe.nodes)}</div>
+      {safe.truncated && (
+        <div className="px-3 pb-2 text-[12px] text-[var(--muted)]">html output truncated</div>
+      )}
+    </OutPanel>
   );
 }
 
@@ -137,6 +188,8 @@ function SegmentView({ seg }: { seg: OutputSegment }) {
           <pre className="whitespace-pre-wrap break-words px-3 py-2">{seg.text}</pre>
         </OutPanel>
       );
+    case 'html':
+      return <HtmlSegment html={seg.html} fallbackText={seg.fallbackText} />;
     case 'image':
       return (
         <img
@@ -154,7 +207,8 @@ function SegmentView({ seg }: { seg: OutputSegment }) {
 /**
  * MIME bundle 渲染（截图元素 5 的内容区，spec §10 + A-3 #20/#22）：
  * deriveOutputSegments 分区 → stdout/text-plain 中性面板、stderr/traceback
- * 红左框面板（各自内部滚动 max-height 420px）、image/png base64 img、
+ * 红左框面板（各自内部滚动 max-height 420px）、text/html 白名单重建为表格
+ * （ADR-011，有 html 时取代 text/plain）、image/png base64 img、
  * application/vnd.novalab.control+json → ControlRenderer（P3.3 交互控件）；
  * 未知 mime → 灰字 key 列表；末尾 wrote 通知行（P2.9 run.notify file-write）。
  */
