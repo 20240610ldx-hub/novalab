@@ -1,7 +1,7 @@
 # NovaLab 意图文档（Intent & 需求头脑风暴）
 
-> 状态：v0.1 头脑风暴初稿，待用户裁决第 7 节开放问题
-> 日期：2026-10-06
+> 状态：v0.1 已裁决（§7 全部拍板）；2026-10-10 增补 ADR-009（WS 鉴权）、ADR-010（工作台布局）与 M5 收紧
+> 日期：2026-10-06（初稿）· 2026-10-10（v0.1.1 修订）
 > 配套文档：[spec.md](spec.md)（技术规格）· [plan.md](plan.md)（实施计划）
 > 参考代码：`refs/marimo`（反应式内核）、`refs/codemirror-merge`（行内 Diff）、`refs/vercel-ai`（Agent SDK）
 
@@ -88,7 +88,7 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 - **M2 纯 .py 主存储**：自定 `# %% [cell-id]` cell 块格式 + 头部配置注释，git 友好、零 JSON 冲突；marimo 互操作 = 单向宽容导入 + 转换器导出（P3.6；S1 侦察修正：marimo 原生为 @app.cell 装饰器式、文件内无 id，与本格式互不直读）。
 - **M3 单元格编辑器**：CodeMirror 6 多实例、行号、Python 高亮、块内横滚、可折叠 output、执行计数徽章。
 - **M4 修错闭环**：traceback 自动捕获 → Agent One-click Fix 卡片 → 行内红绿 Diff → `Tab` 采纳（自动触发运行）/ `Esc` 撤销；Agent 写入永远 staged，禁止静默改文件。
-- **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。
+- **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。**2026-10-10 收紧**：cell 的 stdout/stderr 与写入路径不在白名单内（`print(df)` 即原始数据），Agent 工具 `get_cell_output` 只返回 traceback 与 MIME 类型键；审计须覆盖每次工具返回，不得以常量声称"0 rows sent"。
 - **M6 模型解耦**：设置面板填 Anthropic / OpenAI / DeepSeek / 本地 Ollama(vLLM) 的 base_url+key；离线模型可全脱网运行。
 - **M7 内核状态栏 + 底部 REPL**：复刻截图元素 6、7。
 - **M8 工作区文件管理**（2026-10-06 增补，Owner 指出缺基本功能）：左侧可折叠文件树（workspace root 可设、.py 双击打开、新建/重命名/删除带确认、路径越界拒绝）；交互参考 refs/jupyterlab `packages/filebrowser`，视觉 clean-room。
@@ -140,6 +140,15 @@ Bridge 从第一天就是独立进程（node），前端 `pnpm dev` 浏览器直
 ### ADR-008 开发自测端点与凭据纪律：**cc-switch tokenplan + gitignored .env.local**
 Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名为 `tokenplan` 的 URL 与 API Key（Anthropic 兼容代理）。凭据纪律：**项目永不自动读取任何凭据存储**（权限分类器亦拦截此类凭据探索）；两个值由 Owner 手动填入 `app/.env.local`（已 gitignore），`app/src/agent/providers.ts` 只读该文件；P2.1 设置面板上线后迁移 keychain/加密配置。
 
+### ADR-009 本机通道鉴权：**Origin 白名单 + 启动 token**（Owner 裁决 2026-10-10）
+背景：WebSocket 握手不受浏览器 CORS 约束，任意网页都能连 `ws://127.0.0.1:7788`，而该通道可执行任意 Python、读写工作区——与"数据不出门"直接冲突。
+- 选项 A：只校验 Origin。挡住远程网页与 DNS rebinding，挡不住同机其他进程与 loopback 上其他端口的页面。
+- 选项 B：只要求 token。需要安全的 token 分发渠道，浏览器侧仍应拒绝异域 Origin 作为纵深防御。
+- **结论：两层都做**。Bridge 在 loopback 上起 HTTP + WS：`GET /bridge-info` 与 WS upgrade 都要求 Origin 在白名单内（vite dev 的 localhost/127.0.0.1 5000–5999 端口、Tauri webview；**缺 Origin 同样拒绝**，因此 DNS rebinding 后的同源请求也拿不到 token）；`/bridge-info` 下发每次启动随机 token（或 `NOVALAB_BRIDGE_TOKEN`）与实际端口；WS 连上后 3 秒内首条消息必须是 `bridge.auth {token}`，否则以 1008 关闭，未认证连接收不到任何广播；LLM 代理校验请求头 `x-novalab-bridge-token`。剩余边界：与用户同权限的本地进程可伪造 Origin 头——等同于能读用户全部数据，不在防护范围内。
+
+### ADR-010 工作台布局：**VS Code / JupyterLab 式**（Owner 裁决 2026-10-10）
+取代 Q 线 A-3 #23 的顶栏 `Files | Notebook` 切换。上下两条细栏放必要操作与提示（标题栏：工作区 · 会话 pill · 布局/主题/App View；状态栏：连接 · 内核 · 隐私策略 · provider · cell 数）；左侧图标活动栏 → 可缩放的详细侧栏（资源管理器 / 会话 / 变量）；中间编辑区（Welcome 引导页 + notebook tabs）；右侧可缩放 Agent 栏。引导页采用 JupyterLab Welcome 样式（Start / Recent / Environment / Keyboard），首启模态并入其中。notebook 编辑区与 Session notebook 模态继续逐元素对齐 Claude Science（附录 A、A-2、A-3、A-5）。
+
 ---
 
 ## 7. 开放问题（头脑风暴交互点）— ✅ 2026-10-06 已全部裁决
@@ -164,6 +173,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 打开 `demo.py` → 编辑上游 cell → 下游自动标 stale → 运行级联转绿 → 人为制造 `KeyError` → Fix 卡片浮现（附 traceback+schema）→ 行内 Diff → `Tab` 采纳自动重跑转绿 → 底部 REPL 直接查询变量 → 导出 .ipynb。
 
 **量化指标**：冷启动（双击→可编辑）< 3s；cell 运行附加开销 < 50ms；100 cell 滚动 60fps；Bridge 常驻内存 < 150MB；安装包（P4）< 20MB。
+> 2026-10-10 现状：四项性能指标尚无基准脚本（未测）；v0.1.0 安装包 NSIS 37MB / MSI 55MB，另需首启联网下载约 450MB 运行时——"断网可跑"目前只对已完成首启的机器成立。见 plan §5b。
 
 ---
 

@@ -4,17 +4,48 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。发布前的开发历史按阶段（P1/P2/P3 波次）从 git log 手工摘要而成。
 
+## [Unreleased] - v0.1.1
+
+### Security
+
+- Bridge 通道鉴权（Origin 白名单 + 启动 token 两层）：Bridge 的 loopback HTTP/WS 服务只接受本机前端 Origin（缺 Origin 也拒绝）；`GET /bridge-info` 下发每次启动随机 token，WS 首条消息必须是 `bridge.auth {token}`，LLM 代理校验同一 token。此前任意网页都能连 `ws://127.0.0.1:7788` 执行 `kernel.repl`（任意 Python）与 `fs.*`。前端与脚本经 `/bridge-info` 发现实际端口（7788–7798）。
+
+### Privacy
+
+- `get_cell_output` 只返回 `{traceback, mimeKeys}`：cell 的 stdout/stderr（`print(df)` 即原始数据行）与写入路径不再穿过 Agent / MCP 出口。
+- 审计 chip 改为如实记账：首条消息逐段 + 每次工具返回（工具名 / 字节数 / 是否带输出原文 / 预览）；移除写死的 "0 rows sent"。
+
+### Changed
+
+- 工作台布局改为 VS Code / JupyterLab 式（Owner 裁决）：顶部细栏、左侧活动栏 + 可缩放侧栏（资源管理器 / 会话 / 变量）、编辑区（Welcome + notebook tabs）、可缩放 Agent 栏、底部状态栏；`Ctrl+B` / `Ctrl+Alt+B` 开合。原顶栏 `Files | Notebook` 切换移除，文件树回到侧栏。
+- 首启引导模态并入 Welcome 页（JupyterLab Welcome 样式：Start / Recent / Environment / Keyboard）；环境自检常驻，未打开 notebook / 工作区时显示"待检查"而非误报失败。
+- Session notebook 模态按 Claude Science 参考图重做：标题 + notebook chip + 计数、可折叠会话分组行、`NOTEBOOK python · N cells` 段头、带行号与语法着色的代码、`▶ output` 披露、`wrote` 行、右下 `⤓ .ipynb`；live 会话内联富输出（图像/表格）。
+
+### Added
+
+- RPC `bridge.mcpLaunch`：回报以 MCP 模式启动本 bridge 的命令行（Welcome「Connect…」展示）。
+
+### Fixed
+
+- CI 画廊连续失败：i18n 默认 en 后脚本仍按中文文案定位（08/10/15 态）；画廊改为钉 en 并新增 Welcome 态。
+- Session notebook 被标题栏 transform 容器截断（改为 portal 渲染）。
+
 ## [0.1.0] - 2026-10-07
 
-### 进行中（P4）
+首个公开发布。四平台产物：Windows NSIS / MSI，Linux deb / AppImage（**未签名**）。
 
-- Tauri 双平台打包流水线（`.github/workflows/release.yml`：Windows nsis+msi / Linux appimage+deb，tag 触发；签名 secrets 未配置时产物不签名）
-- 凭据存储迁移：`.env.local` → keychain/加密配置（0600 权限文件，见 SECURITY.md 威胁模型）
-- App View（隐藏代码的交互报告一键发布）
-- UI i18n（当前英文 UI + 中文文档）
-- 内核 dead→restart 等边缘态的真机画廊补拍（功能矩阵 🟡 项）
+### Added（P4 产品化）
 
-## [0.0.1] - 2026-10-07（开发期，未发布）
+- Tauri 打包流水线（`release.yml`，tag 触发）与 sidecar：node 跑 bridge 单文件 bundle，uv 首启安装 Python 与依赖（需联网，约 450MB）。
+- 凭据加密存储（AES-256-GCM，`<dataDir>/providers.json` 0600）+ 本机 LLM 代理 `127.0.0.1:7789`（浏览器不持有 key）。
+- App View（隐藏代码的只读交互报告，`?view=app`）、浅色主题、i18n 骨架（en / zh）、首启环境自检。
+- operon 可复现性 bundle 作为 showcase；内核 cwd 跟随 notebook 目录。
+
+### Known limitations
+
+- 安装包未签名；首启需联网下载运行时；部分界面文案尚未进入 i18n 字典。
+
+## [0.0.1] - 2026-10-07（开发期，未发布、未打 tag）
 
 ### P3 波次（2026-10-07）
 
@@ -71,5 +102,5 @@
 - monorepo scaffold（app/bridge/py/docs/refs 骨架）
 - intent/spec/plan 文档三件套、S1 marimo 侦察备忘（互操作性修正：`@app.cell` 与本格式互不直读 → 转换器方案）、G1 决策记录（路线 B）
 
-[0.1.0]: https://github.com/20240610ldx-hub/novalab/compare/v0.0.1...v0.1.0
-[0.0.1]: https://github.com/20240610ldx-hub/novalab/releases/tag/v0.0.1
+[Unreleased]: https://github.com/20240610ldx-hub/novalab/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/20240610ldx-hub/novalab/releases/tag/v0.1.0
