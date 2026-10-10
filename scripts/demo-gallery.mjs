@@ -719,7 +719,11 @@ state('08', '08-readonly-session', async (ctx) => {
   await page.waitForTimeout(1000);
 
   // 左 pill 下拉 → 选刚 ended 的会话
-  await page.locator('button[title="session switcher — 当前与历史会话"]').click();
+  await page
+    .locator(
+      'button[title="session switcher — current & past sessions"], button[title="会话切换器 —— 当前与历史会话"]',
+    )
+    .click();
   const endedEntry = page.locator('button:has(span:text-is("read-only"))').first();
   await endedEntry.waitFor({ timeout: 10000 });
   await endedEntry.click();
@@ -768,7 +772,9 @@ state('10', '10-settings', async (ctx) => {
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
   await page.locator('button[title="设置（provider 管理）"]').click();
-  await page.waitForSelector('h2:text-is("设置 · LLM Provider")', { timeout: 10000 });
+  await page.waitForSelector('h2:text-is("Settings · LLM Provider"), h2:text-is("设置 · LLM Provider")', {
+    timeout: 10000,
+  });
   // 存储说明原文（providers.ts STORAGE_WARNING，keychain 迁移后为加密落盘陈述）
   await page.getByText('keys encrypted at rest', { exact: false }).waitFor({ timeout: 10000 });
   await page.waitForTimeout(300);
@@ -939,7 +945,9 @@ state('15', '15-session-modal', async (ctx) => {
   ctx.notes.push(`15: export.ipynb 落盘 ${path.relative(root, ipynbPath)}（${m[2]} cells · ${m[3]} outputs）`);
 
   // import 回转：同一 .ipynb → 生成 .py（wx 排他）→ 前端自动 openNotebook 新 tab
-  await dialog.locator('input[aria-label="import .ipynb 路径"]').fill(ipynbPath);
+  await dialog
+    .locator('input[aria-label="import .ipynb path"], input[aria-label="import .ipynb 路径"]')
+    .fill(ipynbPath);
   await dialog.locator('button:text-is("import .ipynb")').click();
   const pyPath = ipynbPath.replace(/\.ipynb$/, '.py');
   const t0 = Date.now();
