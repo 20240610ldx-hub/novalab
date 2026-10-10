@@ -96,7 +96,7 @@
 | 项 | 锚点 | 状态 | 证据 |
 |---|---|---|---|
 | G1 门：路线 B（自研内核）裁决 | plan §1 · ADR-001 | ✅ | docs/adr/001-kernel-route.md · docs/spike-s1-memo.md；`node scripts/integration-smoke.mjs` |
-| P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（P4.1 打包已验收） | plan §2 P1.7 行闭环记录；GitHub Actions Release run `38066573600`：Windows NSIS/MSI + Linux AppImage/deb 均成功，并通过 packaged startup smoke |
+| P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（P4.1 打包已验收） | plan §2 P1.7 行闭环记录；GitHub Actions Release run `38066573600`：Windows NSIS/MSI + Linux AppImage/deb 均成功，并通过 packaged startup smoke；后续 CI 增加构建后 bundle 产物检查 |
 | P1.8 sidecar `.novalab/` + 热重载 + 崩溃恢复 | plan P1.8 | 🟡 | bridge watch.test.ts（28 例）· ui-store.test.ts（12 例）；崩溃横幅/dead-restart 行未真机拍 |
 
 ## 6. 未实现（P3/P4 排期）——诚实标注

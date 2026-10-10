@@ -172,7 +172,9 @@ LZMA 压缩后 setup 预计 60–140 MB），GitHub Release 附件与 actions �
 
 发布前的 `scripts/packaged-startup-smoke.mjs` 会直接启动本平台 sidecar，验证
 `/bridge-info` 发现、WS token 认证、`notebook.open` 与一次真实 `cell.run`；Windows
-与 Linux job 共用这条验收，不把“能编译”当作“能启动”。
+与 Linux job 共用这条验收，不把“能编译”当作“能启动”。tauri-action 完成后，
+Windows job 还会运行 `scripts/verify_bundle.py` 核验 NSIS payload 必含 sidecar/
+resources 且不含 `.venv`/凭据，Linux job 核验 AppImage 与 deb 文件均已生成且非空。
 
 ## 目录
 

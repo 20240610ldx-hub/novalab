@@ -87,3 +87,21 @@ jobs:
           # 仓库 tauri.conf.json 当前 bundle.active=false，
           # 这里以 --config 覆盖开启打包；Bridge/node/uv sidecar 已由上一步验收并捆绑。
           args: --bundles ${{ matrix.bundles }} --config '{"bundle":{"active":true}}'
+
+      # ---- 构建后产物验收：检查最终 bundle，而不只检查构建前 sidecar ----
+      - name: verify Windows bundle payload
+        if: matrix.platform == 'windows'
+        working-directory: app/src-tauri
+        run: python scripts/verify_bundle.py
+      - name: verify Linux bundle outputs
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimages=(app/src-tauri/target/release/bundle/appimage/*.AppImage)
+          debs=(app/src-tauri/target/release/bundle/deb/*.deb)
+          test "${#appimages[@]}" -gt 0
+          test "${#debs[@]}" -gt 0
+          test -s "${appimages[0]}"
+          test -s "${debs[0]}"
+          echo "LINUX_BUNDLE_OUTPUTS_OK appimage=${appimages[0]} deb=${debs[0]}"
