@@ -321,7 +321,7 @@ export function Welcome() {
                       </span>
                     </div>
                   ) : (
-                    <p>{t('welcome.connectUnavailable')}</p>
+                    <p>{connected ? t('welcome.connectOldBridge') : t('welcome.connectUnavailable')}</p>
                   )}
                 </div>
               )}
