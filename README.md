@@ -119,7 +119,7 @@ node scripts/demo-gallery.mjs --skip-agent    # 交互状态画廊（无 LLM 凭
 
 ## 路线
 
-P1 内核+编辑器+Bridge ✅ · P2 Agent 闭环+文件/会话管理 ✅ · P3 多 Tab+控件+互转 ✅ · **P4 进行中**：Tauri 打包流水线（CI 见 `.github/workflows/release.yml`）、凭据 keychain/加密存储迁移、App View、i18n。
+P1 内核+编辑器+Bridge ✅ · P2 Agent 闭环+文件/会话管理 ✅ · P3 多 Tab+控件+互转 ✅ · **P4 进行中**：Tauri 打包流水线与双平台真实启动验收已完成（CI 见 `.github/workflows/release.yml`）；剩余凭据 keychain/加密存储迁移、签名、App View、i18n、首启引导和公测发布页。
 
 ## License
 

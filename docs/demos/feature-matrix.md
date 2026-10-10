@@ -96,7 +96,7 @@
 | 项 | 锚点 | 状态 | 证据 |
 |---|---|---|---|
 | G1 门：路线 B（自研内核）裁决 | plan §1 · ADR-001 | ✅ | docs/adr/001-kernel-route.md · docs/spike-s1-memo.md；`node scripts/integration-smoke.mjs` |
-| P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（打包 ⛔ P4.1） | plan §2 P1.7 行闭环记录；app/src-tauri 存在；桌面打包未做 |
+| P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（P4.1 打包已验收） | plan §2 P1.7 行闭环记录；GitHub Actions Release run `38066573600`：Windows NSIS/MSI + Linux AppImage/deb 均成功，并通过 packaged startup smoke |
 | P1.8 sidecar `.novalab/` + 热重载 + 崩溃恢复 | plan P1.8 | 🟡 | bridge watch.test.ts（28 例）· ui-store.test.ts（12 例）；崩溃横幅/dead-restart 行未真机拍 |
 
 ## 6. 未实现（P3/P4 排期）——诚实标注
@@ -105,12 +105,12 @@
 |---|---|---|
 | schema 嗅探扩展 numpy/scipy/geopandas | P3.5 | 仅 pandas/基础类型（introspect.py） |
 | App View（隐藏代码交互报告） | P4.2 | 无 |
-| 打包流水线 + 签名 | P4.1 | 仅 devUrl 模式 |
+| 打包流水线 + 签名 | P4.1 | 打包流水线 ✅；签名 ⏳（未配置证书/secrets） |
 | 亮色主题（P4.3 提前，Q 线 A-4） | plan P4.3 | ✅ | [states/01-open-idle-light.png](states/01-open-idle-light.png)·[states/03-error-fixcard-light.png](states/03-error-fixcard-light.png)·[states/15-session-modal-light.png](states/15-session-modal-light.png)；styles.css `[data-theme='light']` token 集 + header sun/moon 钮（localStorage novalab.theme 默认 dark）；i18n 仍留 P4 见下行 |
 | i18n 骨架 | P4 | 暗色/浅色双主题已落地（Q 线）；UI 中英混排、无 i18n 框架（Q3 裁决 i18n 留 P4） |
 | 首启引导（uv 环境自检/修复向导） | P4.4 | 无 |
 | keychain/加密存储迁移 | P4 / ADR-008 | 现 localStorage 明文 + 设置面板常驻警告（[states/10-settings.png](states/10-settings.png)） |
-| LLM 代理（生产/Tauri CORS，L-1 尾段） | P4 | dev 已走 vite 同源代理 `/llm`（L-1 闭环）；用户自配 provider 在浏览器 dev 仍直连 baseURL（端点缺 CORS 头即被拦，设置面板警告区有提示）；生产/Tauri 构建直连 envBaseURL，待 bridge 侧 LLM 代理 |
+| LLM 代理（生产/Tauri CORS，L-1 尾段） | P4 | ✅ bridge `/llm/*` 代理 + token/origin 校验；前端生产/Tauri 通过 bridge 动态端口与 token 访问；dev 仍保留 vite 同源代理 `/llm` |
 | 公测发布页 + 开源整理 | P4.5 | 无 |
 | wasm 纯前端预览（Could） | 未排期 | 无 |
 | 多人协同 / 云同步 / 非 Python 内核 | Won't | 明确不做（intent §9） |
@@ -119,7 +119,7 @@
 
 | # | 现象 | 根因 → 修法 | 修复证据 |
 |---|---|---|---|
-| L-1 ✅ | 浏览器直连 tokenplan（aliyuncs MaaS anthropic-compat）被 CORS preflight 拦截（无 `Access-Control-Allow-Origin`）；node 侧同请求 HTTP 200 | 端点无 CORS 头 → dev 加 vite 同源代理：`app/vite.config.ts` server.proxy `/llm`（target = loadEnv 的 VITE_NOVALAB_LLM_BASE_URL 去尾 `/v1`，rewrite 去 `/llm` 前缀），`providers.ts` getDevLanguageModel DEV 用 baseURL `/llm/v1`；生产/Tauri 未代理 → §6 新遗留行 | [states/11-agent-stream.png](states/11-agent-stream.png)（Agent 流式非降级：消息流+reasoning 部件）；curl 探针 `/llm/v1/messages` 回上游 401 InvalidApiKey 证转发通 |
+| L-1 ✅ | 浏览器直连 tokenplan（aliyuncs MaaS anthropic-compat）被 CORS preflight 拦截（无 `Access-Control-Allow-Origin`）；node 侧同请求 HTTP 200 | 端点无 CORS 头 → dev 加 vite 同源代理：`app/vite.config.ts` server.proxy `/llm`；生产/Tauri 由 bridge `/llm/*` 代理并执行 token/origin 校验，前端通过 `/bridge-info` 动态发现端口与 token | [states/11-agent-stream.png](states/11-agent-stream.png)；`packaged-startup-smoke.mjs` 覆盖 bridge discovery/auth 与真实启动链路 |
 | L-2 ✅ | 内核 `_cells_payload()` 上报 `sideEffect`，但 bridge `CellInfo`/`normalizeCells`（protocol.ts/router.ts）丢弃 → CellHeader/CascadeAskDialog 的 `⚡ side-effect` 徽章恒不显示（违 spec §6.2 契约） | protocol.ts `CellInfo` 补 `sideEffect?: boolean` + router.ts `normalizeCells` 保留透传 | router.test.ts（notebook.open 响应 cells 含 sideEffect=true，夹具 cell 含 to_csv）；画廊备注"05: ⚡ side-effect 徽章已显示"+ [states/05-ask-dialog.png](states/05-ask-dialog.png) 重拍 |
 | L-3 ✅ | run 完成后前端不刷新 schemas → FixCard"traceback+相关 schemas 自动附着"只附 traceback（恒 0 schemas） | bridge router 在 run.done 后自动 introspect 并广播新通知 `kernel.schemas {schemas}`（protocol.ts 增 KernelSchemasParams）；app store connectBridge 增 case 写 store.schemas | [states/03-error-fixcard.png](states/03-error-fixcard.png)（按钮"修复（traceback + 1 schemas → Agent）"+ survey chip）；双端单测（bridge run.done→introspect+广播；app 通知→store.schemas） |
 | L-4 ✅ | REPL 纯 exec 无 displayhook：裸表达式（`df.shape`）不回显值，需 print 才有输出 | py runtime `exec_repl` displayhook：AST 拆分，末语句 Expr → eval 并发 run.mime {cellId:'repl', mime:'text/plain', data:repr}（repr 失败降级 str；None 不发；末句异常走 run.error 不回显） | [states/07-repl.png](states/07-repl.png)（[repl] cell 出现 output 披露区）；test_runtime.py 3 例（回显/赋值不回显/末句异常 run.error） |

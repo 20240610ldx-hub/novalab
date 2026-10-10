@@ -1,4 +1,4 @@
-# NovaLab Tauri 壳（P1.7 devUrl 模式 · P4.1 release 已本地验证）
+# NovaLab Tauri 壳（P1.7 devUrl 模式 · P4.1 release CI 已验收）
 
 Tauri v2 桌面壳，手工脚手架（未用 create-tauri-app）。dev 期 WebView 直连
 vite dev server（`devUrl = http://localhost:5199`）；`frontendDist = ../dist`
@@ -129,8 +129,10 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
       icons/README.md 的"空占位"描述已过时（本次已更新）。
 - [ ] **签名**：Windows 代码签名证书占位（tauri-action CI；secrets 未配 =
       不签名，安装时 SmartScreen 未知发布者提示）。
-- [ ] **bundle**：MSI（release.yml 已列 `nsis,msi`，本地未验证 WiX 路径）、
-      版本号策略（tauri.conf.json 0.0.1 与 git tag 无联动）、updater 占位。
+- [x] **bundle**：GitHub Actions Release run `38066573600` 已在 Windows
+      生成并完成 NSIS + MSI，在 Linux 生成并完成 AppImage + deb；两平台均先通过
+      `packaged-startup-smoke.mjs` 的真实 sidecar 启动验收。仍待补版本号策略
+      （tauri.conf.json 0.0.1 与 git tag 无联动）和 updater。
 - [ ] **WebView2 引导**：当前默认 `downloadBootstrapper`（安装时联网）。
       离线/企业分发可改 `bundle.windows.webviewInstallMode`：
       `embedBootstrapper`（+~2 MB）或 `offlineInstaller`（+~150 MB）。
@@ -158,9 +160,10 @@ build` 之后、tauri-action 之前插入：
 `*-x86_64-pc-windows-msvc.exe`，linux job 出 `*-x86_64-unknown-linux-gnu`。）
 
 本地验证与 release.yml 用同一覆盖法（`--bundles ... --config
-'{"bundle":{"active":true}}'`）。两点留意：
-① windows job 跑 `nsis,msi` 双 target——msi(WiX) 本地未验证，CI 首跑即其
-验证；若挂可临时降为 `nsis` 保 tag 发布链路。② tauri-action 以 args 数组
+'{"bundle":{"active":true}}'`）。GitHub Actions Release run
+`38066573600` 已验证 windows job 的 `nsis,msi` 双 target 和 linux job 的
+`appimage,deb` 双 target；若未来 WiX 或发行版依赖变动，应继续保留这两个 target
+的验收。tauri-action 以 args 数组
 直传 CLI（无 shell 引号层），单引号 JSON 在 GH runner 安全。
 `.cargo/config.toml` 的 rust-lld pin 在 CI 同样生效（rustup ≥1.28 自带
 rust-lld proxy）。③ sidecar 使产物体积大增（node ~88 MB + uv ~63 MB，NSIS
