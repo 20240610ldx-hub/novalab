@@ -234,6 +234,40 @@ describe('agent.cellOutput', () => {
     // 透传与 kind 无关：router 对内核通知一律 broadcast
     expect(countNotes('run.notify')).toBe(2);
   });
+
+  it('run.mime 回显（cell 收尾表达式 text/plain + text/html）：agent 只拿到键名，数据不出进程（spec §8）', async () => {
+    setup();
+    await openNotebook();
+    const SECRET = 'RAW-ROW-9f3c';
+    sup!.emit('notification', { method: 'run.started', params: { cellId: 'a' } });
+    sup!.emit('notification', {
+      method: 'run.mime',
+      params: { cellId: 'a', mime: 'text/plain', data: `  county\n0 ${SECRET}` },
+    });
+    sup!.emit('notification', {
+      method: 'run.mime',
+      params: { cellId: 'a', mime: 'text/html', data: `<table><tr><td>${SECRET}</td></tr></table>` },
+    });
+
+    // 前端通道：原样广播（UI 渲染需要数据）
+    expect(JSON.stringify(notes.filter((n) => n.method === 'run.mime'))).toContain(SECRET);
+
+    // agent 通道：get_cell_output 仅 mimeKeys；其余 agent.* 读面同样不含 mime 数据
+    const out = (await call('agent.cellOutput', { cellId: 'a' })).result as CellOutputSnapshot;
+    expect(out.mimeKeys).toEqual(['text/plain', 'text/html']);
+    expect(Object.keys(out).sort()).toEqual(['mimeKeys', 'traceback']);
+    for (const method of ['agent.cellOutput', 'agent.context', 'agent.listCells', 'agent.cellCode']) {
+      const res = await call(method, { cellId: 'a' });
+      expect(res.error).toBeUndefined();
+      expect(JSON.stringify(res.result)).not.toContain(SECRET);
+    }
+    // 会话快照投影（session.open 的 live 形态）同样只留键名
+    const started = notes.find((n) => n.method === 'session.started')!.params as { sessionId: string };
+    const session = await call('session.open', { notebookPath: NB_PATH, sessionId: started.sessionId });
+    expect(session.error).toBeUndefined();
+    expect(JSON.stringify(session.result)).toContain('text/html');
+    expect(JSON.stringify(session.result)).not.toContain(SECRET);
+  });
 });
 
 describe('diff.stage 编译预检（P2.7）', () => {

@@ -8,10 +8,15 @@
 - exec_cell：幽灵变量清除（旧 defs 中不再被新代码定义的名字）→ exec →
   成功提交 defs / 失败回滚该 cell 的 defs（其余 globals 就地变更不回滚，spec §12）→
   cascade 时按拓扑序重跑下游（副作用 cell 跳过；失败分支阻断）；
+  收尾裸表达式回显（L-5，Jupyter 语义）：末语句为裸表达式时对其 eval，非 None 值发
+  run.mime text/plain（repr）；对象提供 _repr_html_()（pandas DataFrame 等）时再发
+  text/html。值不绑定 `_`、不进 defs（DAG / 单赋值语义不变）；Control 仍只由 defs
+  扫描发射、matplotlib 产物仍只由 figure 捕获发 image/png（都不发 repr）；
 - exec_repl：直接操作同一 globals，通知 cellId 恒为 "repl"，不参与 DAG 归属；
   displayhook 语义（L-4）：末语句为裸表达式时对其 eval，并以
   run.mime {cellId:"repl", mime:"text/plain", data:repr} 回显（repr 失败降级 str；
   结果为 None 不发）；末语句异常照常走 run.error，不回显；
+  回显文本（cell / REPL 同一出口）单条超 DISPLAY_TEXT_LIMIT 字符截断；
 - 交互控件（spec §15，P3.3）：cell 成功执行后扫描本 cell 新 defs 中的 ui.Control
   实例 → registry 注册（controlId = "<cellId>::<变量名>"，cell 重跑 = 旧 controlId
   注销 + 重建回默认值）+ 发 run.mime application/vnd.novalab.control+json
@@ -55,6 +60,10 @@ _MISSING = object()
 REPL_ID = "repl"
 _FLUSH_INTERVAL_S = 0.016  # 16ms（spec §13 stdout 流合并）
 _FLUSH_CHUNK = 4096
+# 收尾表达式回显（run.mime text/plain | text/html）单条字符上限：防巨型 repr 经 stdio
+# JSON-lines 压垮 bridge / 前端。text/plain 超限截断 + 后缀；text/html 超限整条放弃。
+DISPLAY_TEXT_LIMIT = 1_000_000
+_DISPLAY_TRUNC_SUFFIX = "…[truncated]"  # 与 bridge preview.ts TRUNCATION_SUFFIX 同形
 
 
 class KernelError(Exception):
@@ -436,7 +445,7 @@ class Runtime:
         rec = CellRecord(id=REPL_ID, code=code, defs=an.defs, refs=an.refs)
         t0 = time.perf_counter()
         # L-4：displayhook —— 末语句裸表达式 eval 后以 run.mime text/plain 回显
-        res = self._run_cell(rec, attribute=False, emit_done=True, displayhook=True)
+        res = self._run_cell(rec, attribute=False, emit_done=True)
         report: dict = {
             "cellId": REPL_ID,
             "ok": res.ok,
@@ -514,7 +523,8 @@ class Runtime:
         """cell 重跑 = 旧 controlId 注销 + 重建（值回默认，spec §15.1）。
 
         committed 为该 cell 本次成功提交的 defs（已排序）：其中的 Control 实例
-        注册并发 run.mime；收尾裸表达式在 exec 模式不求值，不存在重复发射路径。
+        注册并发 run.mime；cell 收尾裸表达式求值为 Control 时回显路径直接跳过
+        （见 _run_cell），defs 扫描仍是唯一发射路径，不重复发。
         """
         self._unregister_cell_controls(cell_id)
         for name in committed:
@@ -579,7 +589,7 @@ class Runtime:
 
     @staticmethod
     def _compile_displayhook(code: str, filename: str):
-        """L-4 REPL displayhook 拆分（Jupyter/IPython 语义）。
+        """displayhook 拆分（Jupyter/IPython 语义；L-4 REPL + L-5 普通 cell 共用）。
 
         AST 解析后若末语句是裸表达式（ast.Expr）→ 返回 (前段 exec 码, 末表达式
         eval 码)；否则 (整体 exec 码, None)。切片保留 parse 时的原始 lineno，
@@ -592,24 +602,61 @@ class Runtime:
             return compile(head, filename, "exec"), compile(tail, filename, "eval")
         return compile(tree, filename, "exec"), None
 
-    def _emit_display_value(self, cell_id: str, value) -> None:
-        """displayhook 回显：run.mime {cellId, mime:'text/plain', data:repr(value)}。
+    @staticmethod
+    def _is_mpl_artist(value) -> bool:
+        """收尾值是 matplotlib 产物：Figure / Axes / Line2D… 或其非空 list/tuple
+        （`ax.plot(...)`、`plt.bar(...)` 的返回值）。
 
-        repr 抛异常（劣质 __repr__）降级 str；两者都失败则静默放弃——
-        回显只是展示层语义，不得把一次成功的执行变成 run.error。
+        图本身由 _capture_matplotlib 发 image/png，这类值的 repr 只是带内存地址的
+        噪声（每次重跑都变），不回显。未 import matplotlib 时恒 False（不触发导入）。
         """
+        mod = sys.modules.get("matplotlib.artist")
+        if mod is None:
+            return False
+        artist = mod.Artist
+        if isinstance(value, artist):
+            return True
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) > 0
+            and all(isinstance(v, artist) for v in value)
+        )
+
+    @staticmethod
+    def _display_bundle(value, *, rich: bool) -> list[tuple[str, str]]:
+        """displayhook 回显内容 [(mime, data)]，列表顺序即发射顺序。
+
+        text/plain = repr(value)（劣质 __repr__ 抛异常降级 str；都失败则无此条），
+        超 DISPLAY_TEXT_LIMIT 截断并追加后缀。rich（普通 cell）时对象若提供
+        _repr_html_()（pandas DataFrame 等）再附 text/html；HTML 截断会破坏标签
+        结构，超限整条放弃，由 text/plain 兜底。任何失败都静默——回显只是展示层
+        语义，不得把一次成功的执行变成 run.error。
+        """
+        bundle: list[tuple[str, str]] = []
         try:
             text = repr(value)
         except Exception:  # noqa: BLE001
             try:
                 text = str(value)
             except Exception:  # noqa: BLE001
-                return
-        self._emit("run.mime", {"cellId": cell_id, "mime": "text/plain", "data": text})
+                text = None
+        if isinstance(text, str):
+            if len(text) > DISPLAY_TEXT_LIMIT:
+                text = text[:DISPLAY_TEXT_LIMIT] + _DISPLAY_TRUNC_SUFFIX
+            bundle.append(("text/plain", text))
+        if rich:
+            try:
+                # 类对象本身（如 `pd.DataFrame`）取到的是未绑定方法：调用抛 TypeError → 无 html
+                html = getattr(value, "_repr_html_", None)
+                html = html() if callable(html) else None
+            except Exception:  # noqa: BLE001
+                html = None
+            # 非 str（Mock / 代理对象的万能 __getattr__）、空串（pandas 关闭 notebook repr）都不发
+            if isinstance(html, str) and html and len(html) <= DISPLAY_TEXT_LIMIT:
+                bundle.append(("text/html", html))
+        return bundle
 
-    def _run_cell(
-        self, rec: CellRecord, *, attribute: bool, emit_done: bool, displayhook: bool = False,
-    ) -> _CellRunResult:
+    def _run_cell(self, rec: CellRecord, *, attribute: bool, emit_done: bool) -> _CellRunResult:
         cell_id = rec.id
         filename = _cell_filename(cell_id)
         self.sources[filename] = rec.code.splitlines()
@@ -617,12 +664,8 @@ class Runtime:
         self._emit("run.started", {"cellId": cell_id})
         t0 = time.perf_counter()
 
-        eval_compiled = None
         try:
-            if displayhook:
-                compiled, eval_compiled = self._compile_displayhook(rec.code, filename)
-            else:
-                compiled = compile(rec.code, filename, "exec")
+            compiled, eval_compiled = self._compile_displayhook(rec.code, filename)
         except SyntaxError as e:
             tb_text = "".join(tbmod.format_exception(e)).rstrip()
             frames = [{
@@ -670,16 +713,28 @@ class Runtime:
                 self.stale.add(cell_id)
             return _CellRunResult(False, tb_text, None)
         else:
-            out.flush()
-            err.flush()
-            # displayhook（L-4）：exec 与末表达式 eval 都成功才回显；None 不发。
-            # 末表达式抛异常走上面的 run.error 路径，同样不回显。
-            # 收尾表达式是 Control（P3.3）：走控件 mime 同一发射路径，不再发 repr 回显。
+            # displayhook（L-4 REPL / L-5 cell）：exec 与末表达式 eval 都成功才回显；None 不发。
+            # 末表达式抛异常走上面的 run.error 路径，同样不回显。值只用于回显：不绑定 `_`、
+            # 不进 defs。attribute=True 即普通 cell：富回显（text/plain + text/html）。
+            bundle: list[tuple[str, str]] = []
+            repl_control = None
             if value is not _MISSING and value is not None:
                 if isinstance(value, _ui.Control):
-                    self._register_repl_control(value)
-                else:
-                    self._emit_display_value(cell_id, value)
+                    # P3.3：REPL 走控件 mime 同一发射路径；cell 的控件只由 defs 扫描
+                    # （_scan_controls）发射——两者都不再发 repr 回显。
+                    if not attribute:
+                        repl_control = value
+                elif not (attribute and self._is_mpl_artist(value)):
+                    # __repr__ / _repr_html_ 是用户代码：其 print 必须进本 cell 的
+                    # run.stdout，不能漏到真实 stdout（协议流）。
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        bundle = self._display_bundle(value, rich=attribute)
+            out.flush()
+            err.flush()
+            if repl_control is not None:
+                self._register_repl_control(repl_control)
+            for mime, data in bundle:
+                self._emit("run.mime", {"cellId": cell_id, "mime": mime, "data": data})
 
         self._capture_matplotlib(cell_id)
 

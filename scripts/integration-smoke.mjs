@@ -72,6 +72,23 @@ const r3 = await rpc('cell.run', { cellId: c3.id, cascade: false });
 if (!r3?.ok) fail(`run c3: ${JSON.stringify(r3)}`);
 await waitNotif('run.done');
 
+// L-5 普通 cell 收尾裸表达式回显：c1 `df`（DataFrame）→ text/plain + text/html；
+// c2 `total`（Series，无 _repr_html_）→ text/plain；c3 print → 无 mime。
+const mimesOf = (cellId) =>
+  bridge.notifications.filter((n) => n.method === 'run.mime' && n.params?.cellId === cellId).map((n) => n.params.mime);
+const m1 = mimesOf(c1.id).sort().join(',');
+if (m1 !== 'text/html,text/plain') fail(`c1 run.mime=${m1 || '(none)'}，应为 text/html,text/plain`);
+const m2 = mimesOf(c2.id).join(',');
+if (m2 !== 'text/plain') fail(`c2 run.mime=${m2 || '(none)'}，应为 text/plain`);
+if (mimesOf(c3.id).length !== 0) fail(`c3 不应有 run.mime: ${mimesOf(c3.id)}`);
+// 隐私（spec §8）：agent 读面只拿 mime 键名，DataFrame 单元格值（县名）不得出现
+const agentOut = await rpc('agent.cellOutput', { cellId: c1.id });
+if (agentOut?.mimeKeys?.slice().sort().join(',') !== 'text/html,text/plain') {
+  fail(`agent.cellOutput mimeKeys=${JSON.stringify(agentOut?.mimeKeys)}`);
+}
+if (JSON.stringify(agentOut).includes('沈阳')) fail('agent.cellOutput 泄漏了 mime 数据');
+console.log(`display ok: c1=[${m1}] c2=[${m2}] agent mimeKeys=${agentOut.mimeKeys.join(',')}`);
+
 const vars = await rpc('kernel.vars');
 const dfSchema = vars.schemas.find((s) => s.name === 'df');
 if (!dfSchema?.shape) fail('kernel.vars 缺 df schema');

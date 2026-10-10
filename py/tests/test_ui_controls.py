@@ -88,11 +88,12 @@ def test_slider_def_emits_control_mime_before_done():
 
 
 def test_trailing_bare_name_in_cell_emits_once():
-    # exec 模式收尾裸表达式不求值：defs 扫描是唯一发射路径，不重复发
+    # cell 收尾裸表达式求值为 Control：回显路径跳过，defs 扫描是唯一发射路径（不重复发、不发 repr）
     code = f"{IMPORT}\ns = ui.slider(0, 10)\ns"
     rt, col = make_runtime([{"id": "c1", "code": code}])
     assert rt.exec_cell("c1")["ok"]
     assert len(control_mimes(col, "c1")) == 1
+    assert len(col.of("run.mime", "c1")) == 1
 
 
 def test_repl_trailing_control_uses_same_path_no_repr():
