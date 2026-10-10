@@ -960,7 +960,7 @@ state('15', '15-session-modal', async (ctx) => {
   await page.locator(`[role="tab"]:has-text("${base}")`).waitFor({ timeout: 60000 });
 
   // 关模态 → 新 tab（选中态）+ 导入 notebook 的 cells 同框 = 15b 证据
-  await dialog.locator('button[aria-label="关闭"]').click();
+  await dialog.locator('button[aria-label="close"], button[aria-label="关闭"]').click();
   await dialog.waitFor({ state: 'detached', timeout: 5000 });
   await page.waitForSelector(`[role="tab"][aria-selected="true"]:has-text("${base}")`, { timeout: 15000 });
   await page.waitForSelector('section[data-cell-id] .cm-editor', { timeout: 40000 });
