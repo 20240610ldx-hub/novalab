@@ -148,6 +148,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 
 ### ADR-010 工作台布局：**VS Code / JupyterLab 式**（Owner 裁决 2026-10-10）
 取代 Q 线 A-3 #23 的顶栏 `Files | Notebook` 切换。上下两条细栏放必要操作与提示（标题栏：工作区 · 会话 pill · 布局/主题/App View；状态栏：连接 · 内核 · 隐私策略 · provider · cell 数）；左侧图标活动栏 → 可缩放的详细侧栏（资源管理器 / 会话 / 变量）；中间编辑区（Welcome 引导页 + notebook tabs）；右侧可缩放 Agent 栏。引导页采用 JupyterLab Welcome 样式（Start / Recent / Environment / Keyboard），首启模态并入其中。notebook 编辑区与 Session notebook 模态继续逐元素对齐 Claude Science（附录 A、A-2、A-3、A-5）。
+
 ### ADR-011 内核 text/html 输出渲染：**解析后白名单重建（仅表格 / 行内格式），不用 iframe、不引消毒依赖**
 > 状态：**提案，随实现一并提交，待 Owner 裁决**（ADR-009 / ADR-010 已裁决，本条尚未）。
 
@@ -158,7 +159,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 - 选项 D：直接 `dangerouslySetInnerHTML`。否。
 - **结论（提案）**：取 B。范围刻意收窄为"表格型 HTML"：消毒结果含 `<table>` 且有文本才以 HTML 渲染，否则回落 `text/plain` 面板并保留灰字 `unrendered mime: text/html`（与未知 mime 同一降级观感，不静默吞掉富表示的存在）。展示语义取 Jupyter richest-representation：有 `text/html` 即取代 `text/plain`，不并列显示。防护叠层：内核侧单条 1e6 字符上限（L-5）+ 前端 20 000 节点预算（超出截断并注记）。
 - 不变量：ADR-006 隐私边界不动——mime 数据只到前端广播与 .ipynb 导出缓冲，agent 读面仍只见 `mimeKeys`（bridge `router.agent.test.ts` 钉住）。
-- 后续（不在本条范围）：① Tauri CSP 落地后本方案无需放宽（不需要 `unsafe-inline`），二者叠加；② 需要保真富输出（Styler 着色、plotly）时另立 ADR 评估"每输出独立 sandbox iframe + 显式信任开关"；③ bridge `exporter.ts` 导出 .ipynb 时仍丢 `text/html`（只出 text/plain 与 image/png）。
+- 后续（不在本条范围）：① Tauri CSP 落地后本方案无需放宽（不需要 `unsafe-inline`），二者叠加；② 需要保真富输出（Styler 着色、plotly）时另立 ADR 评估"每输出独立 sandbox iframe + 显式信任开关"；③ ~~.ipynb 导出丢 `text/html`~~ 已随本批补上（live 会话导出含 text/html，原样不消毒，交由 Jupyter 的信任模型）。
 
 ---
 

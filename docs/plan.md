@@ -85,11 +85,12 @@ P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（
 | H5 | Welcome 页（JupyterLab 式）取代首启模态；常驻环境自检；`bridge.mcpLaunch` 回报 MCP 命令 | ✅ |
 | H6 | Session notebook 对齐 Claude Science（spec 附录 A-5） | ✅ |
 | H7 | 文档同步：intent / spec / plan / 功能矩阵 / CHANGELOG / README / SECURITY | ✅ |
-| H8 | 量化指标基准脚本 `scripts/bench.mjs`（intent §8） | ✅ |
+| H8 | 量化指标基准脚本 `scripts/bench.mjs`（intent §8） | ✅（数字需空闲机器重测） |
+| H9 | 普通 cell 尾表达式回显（L-5）、text/html 白名单表格渲染（ADR-011 提案）、.ipynb 导出含 text/html | ✅ |
 
 **下一步（按优先级）**
 1. **Owner 真实数据自用验收**：装 v0.1.1 安装包，用一份人口预测或 POI 清洗工作跑 intent §3 N1–N4，记录卡点（这是目前最缺的信号：发布页下载数为 0）。
-2. **普通 cell 尾表达式显示**（`df` 不出输出，Jupyter 用户第一反应即"坏了"）——已拆为独立任务。
+2. ~~普通 cell 尾表达式显示~~ ✅ 内核回显（L-5）+ 前端表格渲染（ADR-011 提案，**待 Owner 裁决**）+ .ipynb 导出含 text/html。
 3. ~~量化指标基准~~ ✅ `scripts/bench.mjs`（2026-10-10 首测：3 项达标，滚动 57.9fps 需真机复核）；剩余：Tauri 窗口首帧计时、重输出 notebook 场景、安装包体积（37MB vs 目标 20MB）。
 4. **首启离线/镜像安装**：可配 PyPI / python-build-standalone 镜像，或预置 wheel 的离线包；国内网络下首启是最大失败点。
 5. **i18n 深度迁移**：侧栏树、AgentPanel、FixCard 等仍为硬编码中文。
