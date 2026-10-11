@@ -472,6 +472,8 @@ state('01', '01-open-idle', async (ctx) => {
   await page.waitForSelector('[data-testid="welcome"]', { timeout: 10000 });
   await page.locator('[role="tab"]').first().click();
   await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
+  // Welcome 的依赖自检会让内核短暂 busy——等回 idle 再拍"open-idle"
+  await page.waitForSelector('[data-testid="status-kernel"]:has-text("live")', { timeout: 60000 });
   // A-3 #19：JetBrains Mono 真正加载（fontsource 打包，document.fonts 断言）
   const fontOk = await page.evaluate(async () => {
     // 冷启动竞态：check 前显式 load + ready（Q 线本地过是暖缓存运气，CI 必红）
