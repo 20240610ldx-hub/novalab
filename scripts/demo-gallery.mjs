@@ -264,13 +264,12 @@ function startDevAppOn(port) {
 const log = (...a) => console.log('[gallery]', ...a);
 
 async function openNotebook(page, file) {
-  // Q 线 A-3 #23：视图切换持久化于 localStorage（跨页共享 context）——强制
-  // notebook 视图再导航，防止前序状态（09 Files 视图）残留导致 cell 选择器落空。
+  // v0.1.1：语言钉 en（UI 默认语言；选择器按 en 文案/aria 书写，CI 与本机一致）+
+  // 工作台布局复位（侧栏 Explorer 展开、Agent 栏展开，跨页 context 不残留前序开合）。
   await page.addInitScript(() => {
     try {
-      localStorage.setItem('novalab.view', 'notebook');
-      // CI/新鲜 profile 无 onboarded flag → 首启引导模态拦截一切点击（ubuntu CI 14 态超时根因）
-      localStorage.setItem('novalab.onboarded', '1');
+      localStorage.setItem('novalab.lang', 'en');
+      localStorage.removeItem('novalab.layout');
     } catch {
       /* 忽略 */
     }
@@ -296,7 +295,7 @@ async function setTheme(page, theme) {
 
 /** A-4 浅色证据：切浅色（优先真点 header toggle 钮）→ 拍 <name>-light → 切回暗色。 */
 async function shootLight(page, name) {
-  const toggle = page.locator('button[aria-label="toggle theme"]');
+  const toggle = page.locator('[data-testid="toggle-theme"]');
   if (await toggle.count()) {
     await toggle.click();
     await page.waitForTimeout(300);
@@ -332,6 +331,15 @@ async function shoot(page, name) {
   await page.waitForTimeout(250);
   log(`📸 ${out}`);
   return out;
+}
+
+/** v0.1.1 工作台：确保左侧活动栏 Explorer 视图展开（文件树在侧栏）。 */
+async function ensureExplorer(page) {
+  const btn = page.locator('[data-testid="activity-explorer"]');
+  if ((await btn.getAttribute('aria-pressed')) !== 'true') await btn.click();
+  await page.waitForSelector('[data-testid="side-panel"] [role="tree"][aria-label="workspace files"] [role="treeitem"]', {
+    timeout: 15000,
+  });
 }
 
 /** output 披露区按需展开（幂等：aria-expanded=true 时不点）。 */
@@ -458,13 +466,14 @@ state('01', '01-open-idle', async (ctx) => {
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
   await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
-  // A-3 #23：顶栏分段控件 Files ↔ Notebook（rail 已移除，文件树在全幅 Files 视图）
-  await page.locator('button[title="Files 视图"]').click();
-  await page.waitForSelector('[role="tree"][aria-label="workspace files"] [role="treeitem"]', {
-    timeout: 15000,
-  });
-  await page.locator('button[title="Notebook 视图"]').click();
+  // v0.1.1 工作台：文件树在侧栏 Explorer；Welcome tab ↔ notebook tab 往返
+  await ensureExplorer(page);
+  await page.locator('[data-testid="tab-welcome"]').click();
+  await page.waitForSelector('[data-testid="welcome"]', { timeout: 10000 });
+  await page.locator('[role="tab"]').first().click();
   await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
+  // Welcome 的依赖自检会让内核短暂 busy——等回 idle 再拍"open-idle"
+  await page.waitForSelector('[data-testid="status-kernel"]:has-text("live")', { timeout: 60000 });
   // A-3 #19：JetBrains Mono 真正加载（fontsource 打包，document.fonts 断言）
   const fontOk = await page.evaluate(async () => {
     // 冷启动竞态：check 前显式 load + ready（Q 线本地过是暖缓存运气，CI 必红）
@@ -747,11 +756,8 @@ state('09', '09-sidebar-actions', async (ctx) => {
   await closeAllTabs(ctx.bridge);
   const page = await ctx.newPage();
   await openNotebook(page, DEMO_PY);
-  // A-3 #23：文件操作在全幅 Files 视图（顶栏分段控件切入；rail sidebar 已移除）
-  await page.locator('button[title="Files 视图"]').click();
-  await page.waitForSelector('[role="tree"][aria-label="workspace files"] [role="treeitem"]', {
-    timeout: 15000,
-  });
+  // v0.1.1：文件操作在左侧活动栏 Explorer 视图（侧栏树）
+  await ensureExplorer(page);
 
   // 文件树内新建 notebook（面板头 ＋◈ → 行内 prompt → Enter）
   await page.locator('button[title="新建 notebook（marimo 头模板）"]').click();
@@ -762,7 +768,7 @@ state('09', '09-sidebar-actions', async (ctx) => {
   await page.waitForSelector('[role="treeitem"]:has-text("gallery-created.py")', { timeout: 10000 });
   await page.waitForTimeout(400);
   // 面包屑（root 路径分段）同框可见
-  await page.locator('main >> text=demos').first().waitFor({ timeout: 5000 }).catch(() => {});
+  await page.locator('[data-testid="side-panel"] >> text=demos').first().waitFor({ timeout: 5000 }).catch(() => {});
   await shoot(page, '09-sidebar-actions');
   await page.close();
 });
@@ -898,7 +904,8 @@ state('15', '15-session-modal', async (ctx) => {
   await page.locator('button[title^="Session notebook —"]').click();
   const dialog = page.locator('[role="dialog"][aria-label="Session notebook"]');
   await dialog.waitFor({ timeout: 10000 });
-  const headers = dialog.locator('section button[aria-expanded]');
+  // v0.1.1：分组行 = [data-testid=session-group] 的直接子 button（cell 行的 output 披露钮不算）
+  const headers = dialog.locator('[data-testid="session-group"] > button[aria-expanded]');
   await headers.first().waitFor({ timeout: 15000 });
 
   // 展开一个 ended（只读）会话段 → 只读 cell 精简行（找不到 ended 段则退回首段）
@@ -907,14 +914,14 @@ state('15', '15-session-modal', async (ctx) => {
   for (let i = 0; i < nSeg; i++) {
     const h = headers.nth(i);
     if ((await h.locator('span:text-is("live")').count()) > 0) continue;
-    await h.click();
-    const sec = dialog.locator('section').nth(i);
-    await sec.locator('div.border-t').first().waitFor({ timeout: 10000 }).catch(() => {});
+    if ((await h.getAttribute('aria-expanded')) !== 'true') await h.click();
+    const sec = dialog.locator('[data-testid="session-group"]').nth(i);
+    await sec.locator('[data-testid="session-cell"]').first().waitFor({ timeout: 10000 }).catch(() => {});
     expandedIdx = i;
     break;
   }
   if (expandedIdx < 0) {
-    await headers.first().click();
+    if ((await headers.first().getAttribute('aria-expanded')) !== 'true') await headers.first().click();
     ctx.notes.push('15: 无 ended 会话段可展开（首段代替）——分组头证据仍有效');
   }
   await page.waitForTimeout(600); // 快照行渲染稳定
@@ -945,6 +952,8 @@ state('15', '15-session-modal', async (ctx) => {
   ctx.notes.push(`15: export.ipynb 落盘 ${path.relative(root, ipynbPath)}（${m[2]} cells · ${m[3]} outputs）`);
 
   // import 回转：同一 .ipynb → 生成 .py（wx 排他）→ 前端自动 openNotebook 新 tab
+  // v0.1.1：import 收进 footer 链接，点开后才出现路径输入
+  await dialog.locator('footer button:has-text("import .ipynb…")').click();
   await dialog
     .locator('input[aria-label="import .ipynb path"], input[aria-label="import .ipynb 路径"]')
     .fill(ipynbPath);
@@ -1178,6 +1187,41 @@ state('16', '16-showcase-operon', async (ctx) => {
   await expandOutput(page, 'a1b2c309');
   await page.waitForTimeout(800);
   await shoot(page, '16-showcase-operon');
+  await page.close();
+});
+
+/* ---------------- v0.1.1 工作台：Welcome 页（放最后跑：Recent / 工作区已有内容） ---------------- */
+
+state('00', '00-welcome', async (ctx) => {
+  await closeAllTabs(ctx.bridge);
+  const page = await ctx.newPage();
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('novalab.lang', 'en');
+      localStorage.removeItem('novalab.layout');
+    } catch {
+      /* 忽略 */
+    }
+  });
+  await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-testid="welcome"]', { timeout: 30000 });
+  // 环境自检落定（无 pending/running 行）
+  const env = page.locator('[data-testid="welcome-env"]');
+  await env.locator('li').first().waitFor({ timeout: 10000 });
+  const t0 = Date.now();
+  while ((await env.locator('li[data-status="pending"], li[data-status="running"]').count()) > 0) {
+    if (Date.now() - t0 > 20000) throw new Error('Welcome 环境自检 20s 未落定');
+    await page.waitForTimeout(300);
+  }
+  const bridgeOk = await env.locator('li[data-check="bridge"][data-status="ok"]').count();
+  if (!bridgeOk) throw new Error('Welcome：bridge 自检未通过');
+  // Connect…：bridge.info 回报 MCP 启动命令
+  await page.locator('[data-testid="welcome-connect"]').click();
+  await page.locator('[data-testid="welcome"] code:has-text("claude mcp add novalab")').waitFor({ timeout: 10000 });
+  await page.waitForTimeout(300);
+  await shoot(page, '00-welcome');
+  await shootLight(page, '00-welcome');
+  ctx.notes.push('00: Welcome 页（Start / Recent / Environment / Keyboard）+ Connect 命令由 bridge.info 回报');
   await page.close();
 });
 

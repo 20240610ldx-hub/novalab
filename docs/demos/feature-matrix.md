@@ -1,9 +1,9 @@
 # NovaLab 功能矩阵（真机证据版）
 
-> 生成：2026-10-07 · L 线（交互状态画廊）· P3 扩拍刷新（states 12–15b，多 tab/inspector/控件/SessionModal+导出导入）· **Q 线 A-3/A-4 刷新**（全态暗色重拍 + 01/03/15 浅色版 `*-light.png`，双主题 + Files/Notebook 视图切换 + 输出分区/复制钮/完整会话卡）
+> 生成：2026-10-07 · **v0.1.1 刷新 2026-10-10**（工作台布局全态重拍 + 00-welcome 新态；11 态因本机无 LLM 凭据未重拍，仍为旧布局截图）· L 线（交互状态画廊）· P3 扩拍刷新（states 12–15b，多 tab/inspector/控件/SessionModal+导出导入）· **Q 线 A-3/A-4 刷新**（全态暗色重拍 + 01/03/15 浅色版 `*-light.png`，双主题 + Files/Notebook 视图切换 + 输出分区/复制钮/完整会话卡）
 > 证据来源：
 > ① 真机截图 —— `scripts/demo-gallery.mjs`（node + playwright chromium headless，bridge/novakernel 均为真进程；viewport 1440×900、暗色默认、fullPage；主列为内部滚动，内容溢出时脚本临时增高视口拍全后还原；dev 服务已在跑复用、没跑自起自停；Q 线起 01 态附加 JetBrains Mono `document.fonts.check` 与复制钮 clipboard 读回断言）；截图在本目录 `states/`（浅色版 `*-light.png`），下表以 `states/xx.png` 相对链接引用；
-> ② 测试 —— py：`uv run --directory py pytest`（179 例）；bridge：`pnpm --filter @novalab/bridge exec vitest run`（161 例）；app：`pnpm --filter @novalab/app exec vitest run`（201 例，Q 线 +17：输出分区 6 · ui 视图/主题 7 · 会话卡 selector 4）；
+> ② 测试 —— py：`uv run --directory py pytest`（191 例）；bridge：`pnpm --filter @novalab/bridge exec vitest run`（236 例）；app：`pnpm --filter @novalab/app exec vitest run`（260 例，含 v0.1.1 布局 store · Welcome · 着色 · html 白名单）；
 > ③ 命令 —— `node scripts/integration-smoke.mjs`（bridge+kernel 端到端）、`node scripts/demo-gallery.mjs`（本画廊，幂等可重跑）。
 > 判据：✅ 已实现（有真机或测试证据）· 🟡 部分实现（主链路可用，子项缺证据/未接线）· ⛔ 未实现（排期见文末专节，不许写成已做）。
 > 计数：主表 57 行 = ✅ 50 · 🟡 7 · ⛔ 0。（D 线录屏闭环：D1/D2 拆为两行并 ⛔→✅，产物 docs/demos/reels/，node scripts/demo-reels.mjs 幂等重录）
@@ -16,7 +16,7 @@
 | M2 纯 .py 主存储（`# %% [cell-id]` + PEP723 头） | intent §5 M2 · spec §4 | ✅（marimo 转换器 P3.6 ✅） | [states/01-open-idle.png](states/01-open-idle.png)；py/tests/test_serialize.py（14 例）+ tests/fixtures/marimo_*.py 宽容导入；双向转换器 py/novakernel/convert.py CLI（`python -m novakernel.convert {to-nova\|to-marimo} IN OUT`）py/tests/test_convert.py（18 例） |
 | M3 单元格编辑器（CM6、行号、高亮、折叠 output、计数徽章） | intent §5 M3 · spec §10 | ✅ | [states/01-open-idle.png](states/01-open-idle.png)；偏差记录：高亮为逐行正则 overlay 而非 lezer TagSystem（plan P1.4 注） |
 | M4 修错闭环（traceback→FixCard→行内 Diff→Tab 采纳） | intent §5 M4 · spec §9/§12 | ✅ | UI 全链路真机：[states/03-error-fixcard.png](states/03-error-fixcard.png) + [states/04-diff-staged.png](states/04-diff-staged.png)；app diffLogic.test.ts（21 例）· notebook.test.ts；L-1 闭环后 Agent 段真机可跑（[states/11-agent-stream.png](states/11-agent-stream.png)：agent 流式+工具推理段；propose→行内 Diff 全形态未单拍，bridge router.agent.test.ts 17 例覆盖） |
-| M5 隐私边界（schema-only + 4KB 硬截断 + 发送审计） | intent §5 M5 · spec §8 | ✅ | bridge/src/preview.test.ts（7 例，含 1B–1MB fuzz 必 ≤4KB）；app payload.test.ts（12 例）；ContextChip 常驻"0 rows sent"见 [states/03-error-fixcard.png](states/03-error-fixcard.png) |
+| M5 隐私边界（schema-only + 4KB 硬截断 + 发送审计） | intent §5 M5 · spec §8 | ✅（v0.1.1 收紧） | bridge/src/preview.test.ts（7 例，1B–1MB fuzz 必 ≤4KB）；**v0.1.1**：get_cell_output 只回 `{traceback, mimeKeys}`（bridge router.agent.test.ts · mcp/server.test.ts 断言外部 MCP 同样拿不到 stdout/路径）；审计 chip 记录每次工具返回（app payload.test.ts auditToolResult）；状态栏隐私提示见 [states/03-error-fixcard.png](states/03-error-fixcard.png) |
 | M6 模型解耦（任意 provider；离线降级） | intent §5 M6 · ADR-008 | ✅（keychain 迁移 ⛔ P4） | [states/10-settings.png](states/10-settings.png)；app providers.test.ts（8 例）· openaiCompat.test.ts（6 例） |
 | M7 内核状态栏 + 底部 REPL（元素 6/7） | intent §5 M7 | ✅ | [states/07-repl.png](states/07-repl.png)（[repl] cell 回灌 + 裸表达式回显 output 区，L-4 闭环）+ 状态栏；[states/01-open-idle.png](states/01-open-idle.png) |
 | M8 工作区文件管理（树/新建/重命名/删除确认/越界拒绝） | intent §5 M8 | ✅ | [states/09-sidebar-actions.png](states/09-sidebar-actions.png)（菜单新建 notebook→入树）；[states/01-open-idle.png](states/01-open-idle.png)（树+面包屑）；bridge fs.test.ts（12 例，越界拒绝）· app sidebar/helpers.test.ts（13 例） |
@@ -34,7 +34,7 @@
 | 6 | 底部 `Python kernel · shared with the agent` + 拖拽把手 + idle | ✅（拖出/双击 inspector P3.2 已接线） | [states/01-open-idle.png](states/01-open-idle.png)；[states/13-inspector.png](states/13-inspector.png)（双击 ⠿ 把手展开抽屉：df/total 行 type/shape-len/preview + 过滤/排序钮）；app Inspector/helpers.test.ts（17 例） |
 | 7 | REPL 行 `>>> run code in this kernel…` | ✅ | [states/07-repl.png](states/07-repl.png) |
 | 8 | SessionModal（segments 折叠分组） | ✅ | [states/15-session-modal.png](states/15-session-modal.png)（`N sessions · M cells` 头部 + live/ended 段分组，展开段列只读 cell 行 `[n] + 首行代码 + 状态点`）；app SessionModal/store.test.ts（15 例）· selectors.test.ts（6 例） |
-| 9 | 分组头 + `.ipynb` ExportMenu | ✅ | [states/15-session-modal.png](states/15-session-modal.png)（footer `.ipynb` 导出钮 + 顶部 import 路径输入）；[states/15b-import-done.png](states/15b-import-done.png)（导出落盘 → import 回转新 tab）；bridge exporter.test.ts（14 例）· importer.test.ts（24 例）· router.ipynb.test.ts（2 例）；历史会话导出仅文本输出见 §7 N2 |
+| 9 | 分组头 + `.ipynb` ExportMenu | ✅ | [states/15-session-modal.png](states/15-session-modal.png)（footer `.ipynb` 导出钮 + 顶部 import 路径输入）；[states/15b-import-done.png](states/15b-import-done.png)（导出落盘 → import 回转新 tab）；bridge exporter.test.ts（16 例）· importer.test.ts（24 例）· router.ipynb.test.ts（2 例）；历史会话导出仅文本输出见 §7 N2 |
 | 10 | 整体暗色极简等宽视觉 tokens | ✅ | 全部 [states/*.png](states/)（styles.css 自建 tokens，clean-room ADR-004） |
 
 ## 3. 附录 A-2：第二批参考细节（spec §10 #11–18）
@@ -55,10 +55,10 @@
 | # | 细节 | 状态 | 证据 |
 |---|---|---|---|
 | 19 | JetBrains Mono 全界面（代码+UI 等宽） | ✅ | @fontsource/jetbrains-mono 400/500/700 离线打包（main.tsx import，styles.css --font-mono 首选生效）；画廊 01 态 `document.fonts.check('13px "JetBrains Mono"')` 断言 true（运行备注）；全部 states/ 重拍 |
-| 20 | stderr/traceback/RuntimeWarning = 红左竖框+红粉字面板，与 stdout 中性面板按 run 序堆叠 | ✅ | OutputRenderer.deriveOutputSegments 分区纯函数 app OutputRenderer.segments.test.ts（6 例）；[states/03-error-fixcard.png](states/03-error-fixcard.png)（KeyError 红面板）·[states/06-writes-matplotlib.png](states/06-writes-matplotlib.png)（stdout 中性面板）；累积串形态限制逐 chunk 交错见 §7 N4 |
+| 20 | stderr/traceback/RuntimeWarning = 红左竖框+红粉字面板，与 stdout 中性面板按 run 序堆叠 | ✅ | OutputRenderer.deriveOutputSegments 分区纯函数 app OutputRenderer.segments.test.ts（9 例）；[states/03-error-fixcard.png](states/03-error-fixcard.png)（KeyError 红面板）·[states/06-writes-matplotlib.png](states/06-writes-matplotlib.png)（stdout 中性面板）；累积串形态限制逐 chunk 交错见 §7 N4 |
 | 21 | 代码区右上复制按钮（clipboard 图标，hover 显现 + ✓ 反馈） | ✅ | 画廊 01 态 hover→点击→`navigator.clipboard.readText()` 读回与内核代码一致（运行备注）；CellEditor CopyButton 与 SessionModal 卡（#24）同源 |
 | 22 | 长输出内部滚动（面板 max-height 420px + 细滚动条） | 🟡 | styles.css `.nl-out-panel`（420px/overflow-y/细滚动条）；面板形态真机见 [states/03](states/03-error-fixcard.png)/[states/06](states/06-writes-matplotlib.png)；>420px 长输出真机场景未构造 |
-| 23 | 顶栏 `Files \| Notebook` 分段切换 + 左工作区标题 + Files 全幅文件视图（rail 移除） | ✅ | [states/01-open-idle.png](states/01-open-idle.png)（切换往返 + 树断言）·[states/09-sidebar-actions.png](states/09-sidebar-actions.png)（全幅 Files 视图新建动作 + 面包屑 + 最近打开右栏）；视图持久化 app store/ui.test.ts（7 例）；header 左 = fs.root 目录名 |
+| 23 | 顶栏 `Files \| Notebook` 分段切换 + 左工作区标题 + Files 全幅文件视图（rail 移除） | ↪ 已被 ADR-010 取代（v0.1.1） | 文件树回到左侧活动栏 Explorer 侧栏：[states/01-open-idle.png](states/01-open-idle.png) · [states/09-sidebar-actions.png](states/09-sidebar-actions.png)；布局持久化 app store/layout.test.ts |
 | 24 | SessionModal 完整只读 cell 卡（[n]/chip/error pill/右对齐内核名/红行代码/复制钮/输出面板/wrote 行） | ✅ | [states/15-session-modal.png](states/15-session-modal.png) + [states/15-session-modal-light.png](states/15-session-modal-light.png)（展开段完整卡）；快照 traceback→行号 app SessionModal/selectors.test.ts（+4 例）；折叠披露沿用 ▶/▼ output |
 
 ## 3B. A-4：浅色主题 + 结构细节（Owner 第三批四张浅色图，Q 线随 A-3 落地，P4.3 提前）
@@ -74,6 +74,17 @@
 | A4-7 | `[n]` 纯 muted 无框；语言 chip 中性 pill；`error (line N)` 实心红 pill 白字（双主题） | ✅ | [states/03-error-fixcard.png](states/03-error-fixcard.png)/[-light](states/03-error-fixcard-light.png)（实心红 pill）；CellHeader 禁改 → styles.css title 钩子覆盖 |
 | A4-8 | 行号 muted（浅 #b0b0b0） | ✅ | [states/01-open-idle-light.png](states/01-open-idle-light.png)（--gutter-fg） |
 | A4-T | 主题切换：header sun/moon 钮 → html[data-theme] + localStorage novalab.theme（默认 dark），模态/托盘随变量 | ✅ | 01/03 浅色版经 toggle 钮真点、15 浅色版 DOM 直达（画廊 shootLight/setTheme）；[states/15-session-modal-light.png](states/15-session-modal-light.png)；app store/ui.test.ts（theme 4 例） |
+
+## 3C. v0.1.1：加固与工作台（plan §5b，2026-10-10）
+
+| 项 | 锚点 | 状态 | 证据 |
+|---|---|---|---|
+| Bridge 鉴权：Origin 白名单 + 启动 token | intent ADR-009 · spec §2/§6.1 | ✅（main `0877485`） | `/bridge-info` discovery + `bridge.auth` 首条消息；bridge llm-proxy.test.ts（Origin / token 头）；`node scripts/integration-smoke.mjs` 经鉴权客户端全流程 |
+| cell 输出不出本机 + 工具出口审计 | intent M5（收紧）· spec §7/§8 | ✅ | 见 §1 M5 行；审计 chip 展开面板逐条列工具返回 |
+| 工作台布局（标题栏 / 活动栏 / 可缩放侧栏 / 编辑区 / Agent 栏 / 状态栏） | intent ADR-010 · spec §10 | ✅ | 全部 states/*.png 重拍；app layout.test.ts（宽度夹紧、VS Code 点击语义、持久化）；侧栏 Explorer [states/09-sidebar-actions.png](states/09-sidebar-actions.png) |
+| Welcome 页（Start / Recent / Environment / Keyboard），取代首启模态 | intent ADR-010 | ✅ | [states/00-welcome.png](states/00-welcome.png) · [states/00-welcome-light.png](states/00-welcome-light.png)（Connect 命令经 bridge.info 回报）；app Welcome/logic.test.ts · envChecks.test.ts |
+| Session notebook 对齐 Claude Science | spec 附录 A-5 | ✅ | [states/15-session-modal.png](states/15-session-modal.png)（分组行 · NOTEBOOK 段头 · 行号着色代码 · ⤓ .ipynb）· [15-light](states/15-session-modal-light.png)；app CellEditor.tokenize.test.ts · SessionModal/selectors.test.ts |
+| 画廊 CI 回绿（钉 en，选择器去中文文案依赖） | plan §5b H3 | ✅（本地 16/17，11 态无凭据降级为预期） | `node scripts/demo-gallery.mjs --skip-agent` |
 
 ## 4. P2 能力（plan §3）
 
@@ -97,6 +108,7 @@
 |---|---|---|---|
 | G1 门：路线 B（自研内核）裁决 | plan §1 · ADR-001 | ✅ | docs/adr/001-kernel-route.md · docs/spike-s1-memo.md；`node scripts/integration-smoke.mjs` |
 | P1.7 Tauri 壳 devUrl 模式 | plan P1.7 | ✅（P4.1 打包已验收） | plan §2 P1.7 行闭环记录；GitHub Actions Release run `38066573600`：Windows NSIS/MSI + Linux AppImage/deb 均成功，并通过 packaged startup smoke；后续 CI 增加构建后 bundle 产物检查 |
+| intent §8 量化指标（首次实测，2026-10-10） | intent §8 · plan §5b | ✅ 3 项 · 🟡 1 项 | `node scripts/bench.mjs --ui`（Ryzen 9 7940HX / Win11，dev 形态 tsx）：冷启动 spawn→WS→open 100 cell **1.3–1.4s**（<3s ✅）；cell 附加开销中位数 **0.9ms** / p95 **1.7ms**（<50ms ✅）；bridge RSS **≈100MB**（<150MB ✅）；100 cell 滚动 **57.9fps**、5 个 >20ms 长帧（headless 无 GPU，目标 60 🟡，需真机复核）。未含：Tauri 窗口首帧、重输出 notebook、安装包体积（37MB，目标 20MB ❌）。**注意**：以上为空闲机器、合入 main 鉴权改动之前的数；2026-10-11 在其他应用占满多核时复跑得冷启动 11–34s、附加开销 4–7ms——负载敏感，需在空闲机器上重测后才能作为验收数 |
 | P1.8 sidecar `.novalab/` + 热重载 + 崩溃恢复 | plan P1.8 | 🟡 | bridge watch.test.ts（28 例）· ui-store.test.ts（12 例）；崩溃横幅/dead-restart 行未真机拍 |
 
 ## 6. 未实现（P3/P4 排期）——诚实标注
@@ -104,14 +116,14 @@
 | 项 | 排期 | 现状 |
 |---|---|---|
 | schema 嗅探扩展 numpy/scipy/geopandas | P3.5 | 仅 pandas/基础类型（introspect.py） |
-| App View（隐藏代码交互报告） | P4.2 | 无 |
-| 打包流水线 + 签名 | P4.1 | 打包流水线 ✅；签名 ⏳（未配置证书/secrets） |
+| App View（隐藏代码交互报告） | P4.2 | ✅ v0.1.0（`?view=app`；见 [states/24-appview-light.png](states/24-appview-light.png)） |
+| 打包流水线 + 签名 | P4.1 | 打包 ✅ v0.1.0（NSIS/MSI/deb/AppImage）；**签名 ⛔**（secrets 未配） |
 | 亮色主题（P4.3 提前，Q 线 A-4） | plan P4.3 | ✅ | [states/01-open-idle-light.png](states/01-open-idle-light.png)·[states/03-error-fixcard-light.png](states/03-error-fixcard-light.png)·[states/15-session-modal-light.png](states/15-session-modal-light.png)；styles.css `[data-theme='light']` token 集 + header sun/moon 钮（localStorage novalab.theme 默认 dark）；i18n 仍留 P4 见下行 |
-| i18n 骨架 | P4 | 暗色/浅色双主题已落地（Q 线）；UI 中英混排、无 i18n 框架（Q3 裁决 i18n 留 P4） |
-| 首启引导（uv 环境自检/修复向导） | P4.4 | 无 |
-| keychain/加密存储迁移 | P4 / ADR-008 | 现 localStorage 明文 + 设置面板常驻警告（[states/10-settings.png](states/10-settings.png)） |
+| i18n 骨架 | P4 | ✅ 骨架 v0.1.0（en/zh 字典 + 键集相等单测，默认 en）；**深度迁移 🟡**：侧栏树、AgentPanel、FixCard 等仍有硬编码中文 |
+| 首启引导（uv 环境自检/修复向导） | P4.4 | ✅ v0.1.0 模态 → v0.1.1 并入 Welcome 常驻自检；**离线/镜像安装 ⛔** |
+| keychain/加密存储迁移 | P4 / ADR-008 | ✅ v0.1.0 bridge AES-256-GCM 加密落盘（providers.json 0600） |
 | LLM 代理（生产/Tauri CORS，L-1 尾段） | P4 | ✅ bridge `/llm/*` 代理 + token/origin 校验；前端生产/Tauri 通过 bridge 动态端口与 token 访问；dev 仍保留 vite 同源代理 `/llm` |
-| 公测发布页 + 开源整理 | P4.5 | 无 |
+| 公测发布页 + 开源整理 | P4.5 | ✅ v0.1.0 GitHub Release + Apache-2.0 |
 | wasm 纯前端预览（Could） | 未排期 | 无 |
 | 多人协同 / 云同步 / 非 Python 内核 | Won't | 明确不做（intent §9） |
 
@@ -123,8 +135,9 @@
 | L-2 ✅ | 内核 `_cells_payload()` 上报 `sideEffect`，但 bridge `CellInfo`/`normalizeCells`（protocol.ts/router.ts）丢弃 → CellHeader/CascadeAskDialog 的 `⚡ side-effect` 徽章恒不显示（违 spec §6.2 契约） | protocol.ts `CellInfo` 补 `sideEffect?: boolean` + router.ts `normalizeCells` 保留透传 | router.test.ts（notebook.open 响应 cells 含 sideEffect=true，夹具 cell 含 to_csv）；画廊备注"05: ⚡ side-effect 徽章已显示"+ [states/05-ask-dialog.png](states/05-ask-dialog.png) 重拍 |
 | L-3 ✅ | run 完成后前端不刷新 schemas → FixCard"traceback+相关 schemas 自动附着"只附 traceback（恒 0 schemas） | bridge router 在 run.done 后自动 introspect 并广播新通知 `kernel.schemas {schemas}`（protocol.ts 增 KernelSchemasParams）；app store connectBridge 增 case 写 store.schemas | [states/03-error-fixcard.png](states/03-error-fixcard.png)（按钮"修复（traceback + 1 schemas → Agent）"+ survey chip）；双端单测（bridge run.done→introspect+广播；app 通知→store.schemas） |
 | L-4 ✅ | REPL 纯 exec 无 displayhook：裸表达式（`df.shape`）不回显值，需 print 才有输出 | py runtime `exec_repl` displayhook：AST 拆分，末语句 Expr → eval 并发 run.mime {cellId:'repl', mime:'text/plain', data:repr}（repr 失败降级 str；None 不发；末句异常走 run.error 不回显） | [states/07-repl.png](states/07-repl.png)（[repl] cell 出现 output 披露区）；test_runtime.py 3 例（回显/赋值不回显/末句异常 run.error） |
+| L-5 ✅ | 普通 cell 收尾裸表达式不回显：demos/demo.py 的 `df` / `total` 运行后无 output 披露区，需 print 才有输出（Jupyter 用户预期 `df` 直接渲染） | py runtime `_run_cell` 对所有 cell 走 displayhook 拆分（与 L-4 同一机制）：末语句 Expr → eval，非 None 发 run.mime text/plain（repr）；对象有 `_repr_html_()`（DataFrame）再发 text/html。不绑定 `_`、不进 defs；Control 仍只由 defs 扫描发射、matplotlib Artist（`fig` / `ax.plot(...)`）仍只发 image/png；末句异常走 run.error（行号准确、defs 回滚）；回显文本单条上限 `DISPLAY_TEXT_LIMIT`=1e6 字符（plain 截断、html 超限放弃；REPL 同一出口）。**前端（intent ADR-011，提案）**：OutputRenderer 新增 html 分区——DOMParser 解析 → 白名单重建（表格族 + 行内格式，仅 colspan/rowspan 属性；无 innerHTML）→ 中性面板内渲染为真表格（表头吸顶、420px 内滚、宽表横滚、双主题走 token）；有 text/html 即取代 text/plain（Jupyter richest 语义），非表格型 / 消毒后无内容回落 text/plain + 灰字 `unrendered mime: text/html`；App View 同源受益，SessionModal 历史快照仍只列 mime 键名。live 会话 .ipynb 导出已含 text/html（bridge exporter.test.ts） | test_runtime.py 10 例（DataFrame html+plain / 赋值不发 / None 不发 / figure 只发 png / 行号 / 上限 / REPL 不变）；bridge router.agent.test.ts（agent 读面只见 mimeKeys）；integration-smoke `display ok` 行；app htmlSanitize.test.ts（7 例：DataFrame 形态 / script·img·iframe·svg·form 丢弃 / 未知标签解包 / span 属性校验 / 节点预算）+ OutputRenderer.segments.test.ts（html 取代 text-plain、分区顺序）；实机 demos/demo.py cell 1 暗 / 浅主题与 App View 目检 |
 | O-1 | 观察（非 bug）：`# %% [cell-id: …]` 要求 8 位 hex；非 hex id（如 `w1a2b3c4`）按 spec §4 宽容降级为整文件单 cell，静默换 id。画廊夹具首版触发过 | py/novakernel/serialize.py CELL_MARKER_RE | 画廊脚本注释（scripts/demo-gallery.mjs） |
 | N1 | P3.1 多 tab 设计遗留（非 bug）：后台 tab 不实时流式——非焦点内核的 run.*/kernel.status 仅刷 bridge 侧缓存，notebook.switch 时随全量 state 回灌前端；文件 watcher 仅监听焦点单路径（切 tab 时 watcher.watch 转移）；rssMB 为近似水位（pid = `uv run` 包装进程而非 python 本体，Windows 无 /proc → null） | 设计取舍：单焦点 WS 事件通道 + 单 watcher，P3.1 冻结 | bridge router.ts（多 ctx 缓存/switch 回灌注释、watcher 转移）· supervisor.ts rssMB 注释；[states/12-multi-tab.png](states/12-multi-tab.png) |
-| N2 | 历史会话 .ipynb 导出仅文本输出：snapshot 的 mime 只存键名（不含图像 base64），导出历史会话时 image/png 等 mime 数据丢失；live 会话导出走富缓存含 mime（画廊 15 态即 live 导出） | exporter 数据源 = snapshot 摘要（spec §11 快照形态） | bridge exporter.test.ts · router.ipynb.test.ts；画廊脚本 15 态导出断言 |
+| N2 | 历史会话 .ipynb 导出仅文本输出：snapshot 的 mime 只存键名（不含图像 base64），导出历史会话时 image/png 等 mime 数据丢失；live 会话导出走富缓存含 mime 数据（text/plain · text/html · image/png；画廊 15 态即 live 导出） | exporter 数据源 = snapshot 摘要（spec §11 快照形态） | bridge exporter.test.ts · router.ipynb.test.ts；画廊脚本 15 态导出断言 |
 | N3 | 交互控件值不存盘（spec §15.5 明确不做）：control.set 仅 mutate 内核内存对象，重开 notebook 值回默认；控件级联绕过 mark-only（Owner 裁决），side-effect 下游仅标 stale | spec §15.5 排期外 | [states/14-controls.png](states/14-controls.png)+[states/14b-controls-cascade.png](states/14b-controls-cascade.png)（slider 42→77 级联：下游 [2] 重跑、旧输出无残留）；py tests/test_ui_controls.py（23 例）· app controls/logic.test.ts（20 例） |
 | N4 | 输出分区粒度 = 流级（stdout → stderr → traceback → mime），非逐 chunk 交错：CellOutput 为累积串形态（store/notebook.ts 为 Q 线边界外文件），单次 run 内 stdout/stderr 交替片段无法还原；参考图 [76] 的"stdout 面板+红面板相继"由流级分区等价呈现 | 前端 store 边界（Q 线所有权不含 store/notebook.ts）；如需真交错需把 CellOutput 改为 segments 数组（reducer + bridge 契约联动，另立项） | app OutputRenderer.segments.test.ts（分区顺序断言）；[states/03](states/03-error-fixcard.png)/[states/06](states/06-writes-matplotlib.png) |

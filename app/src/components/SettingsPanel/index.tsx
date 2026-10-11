@@ -21,7 +21,7 @@ import { useI18n } from '../../i18n';
  * 测试连接走 bridge LLM 代理（端口由 discovery 协商）：先把草稿落库，再以 'proxy'
  * 占位 key 发起 generateText，真 key 由代理注入上游。
  * P4.3：标签/警告全部经 t()；语言切换（novalab.lang）。
- * P4.4：「重跑首启检查」入口（onRerunOnboarding → App → Onboarding rerun）。
+ * v0.1.1：首启模态并入 Welcome 页常驻自检；底部入口改为「打开 Welcome」（onOpenWelcome）。
  */
 
 type Draft = ProviderConfig;
@@ -40,11 +40,11 @@ interface TestState {
 }
 
 export interface SettingsPanelProps {
-  /** P4.4：重跑首启检查（App 层翻 Onboarding rerun）。 */
-  onRerunOnboarding?: () => void;
+  /** v0.1.1：打开编辑区 Welcome 页（含环境自检）。 */
+  onOpenWelcome?: () => void;
 }
 
-export function SettingsPanel({ onRerunOnboarding }: SettingsPanelProps) {
+export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
   const open = useAgentStore((s) => s.settingsOpen);
   const setOpen = useAgentStore((s) => s.setSettingsOpen);
   const providers = useAgentStore((s) => s.providers);
@@ -304,7 +304,7 @@ export function SettingsPanel({ onRerunOnboarding }: SettingsPanelProps) {
           </div>
         )}
 
-        {/* P4.3/P4.4 底部行：语言切换 + 重跑首启检查 */}
+        {/* P4.3 底部行：语言切换 + 打开 Welcome（环境自检） */}
         <div className="mt-4 flex items-center gap-2 border-t border-[var(--border)] pt-3">
           <label className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
             {t('settings.language')}
@@ -317,17 +317,17 @@ export function SettingsPanel({ onRerunOnboarding }: SettingsPanelProps) {
               <option value="zh">中文</option>
             </select>
           </label>
-          {onRerunOnboarding && (
+          {onOpenWelcome && (
             <button
               type="button"
               onClick={() => {
-                onRerunOnboarding();
+                onOpenWelcome();
                 setOpen(false);
               }}
-              title={t('settings.rerunOnboardingTitle')}
+              title={t('settings.openWelcomeTitle')}
               className="ml-auto rounded border border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--accent-run)] hover:text-[var(--text)]"
             >
-              {t('settings.rerunOnboarding')}
+              {t('settings.openWelcome')}
             </button>
           )}
         </div>

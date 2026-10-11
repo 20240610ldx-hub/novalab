@@ -50,8 +50,8 @@
 
 ## 2. 启动序列
 
-1. Tauri（或 dev 脚本）spawn `bridge`（node），监听 `127.0.0.1:7788`（端口冲突自动 +1）。
-2. 前端连接 WS，发 `notebook.open {path}`。
+1. Tauri（或 dev 脚本）spawn `bridge`（node），在 `127.0.0.1:7788` 起 loopback HTTP + WS（端口冲突自动 +1，至 7798）；生成本次启动 token（或取 `NOVALAB_BRIDGE_TOKEN`），并写运行清单 `<dataDir>/bridge.json`（0600，ADR-009）。
+2. 前端扫描 7788–7798 的 `GET /bridge-info`（要求白名单 Origin）取得 `{wsUrl, token, llmProxyOrigin}` → 连接 WS（upgrade 同样校验 Origin，否则 403）→ 首条消息 `bridge.auth {token}`（3 秒内，否则 1008 关闭）。随后发 `notebook.open {path}`。
 3. Bridge 读 .py → `serialize.parse` → cells[] → spawn novakernel 子进程（uv 管理的 `.venv`，见 plan 环境清单）→ 按拓扑序**静默回放**全部 cell（恢复状态）或按配置冷启动。
 4. Bridge 回 `notebook.state {cells, dag, schemas, staleSet:[]}`；前端渲染，LivePill 转 `live`。
 
@@ -146,6 +146,10 @@ introspect（M5 数据源）：对 globals 每名字产出
 | `diff.stage/accept/reject` | req | 见 §9 |
 | `session.tail` | req/res | 最近 N 条事件（SessionView, P3） |
 | `export.ipynb` | req | `{path, target}` |
+| `bridge.auth` | req | `{token}`——WS 首条消息，认证前其他方法一律断开；回 `{ok, wsPort, llmPort, llmProxyOrigin}` |
+| `bridge.mcpLaunch` | req | → `{mcpLaunch: string[] \| null}`：以 MCP 模式启动本 bridge 的命令行（Welcome「Connect…」）|
+
+**鉴权（v0.1.1，ADR-009）**：Origin 白名单（含缺省 Origin 拒绝）作用于 `/bridge-info` 与 WS upgrade；token 经 `bridge.auth` 首条消息校验；LLM 代理校验 `x-novalab-bridge-token` 请求头。只有已认证连接进入广播集合。
 
 ### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines；P1.3 集成后冻结）
 kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
@@ -182,7 +186,8 @@ Agent system prompt 注入 **Reactive Rulebook**（intent 风险章）：单赋�
 
 出进程白名单（唯一出口 `bridge/src/preview/serializer.ts`）：代码文本、traceback、DAG 边、schema 元信息、`head(1)`/repr≤200 字符预览、用户显式 attach 的文本。
 黑名单硬截断：任何 >4KB 的字符串字段、DataFrame 全量、二进制、文件内容（除非用户显式 attach）。
-UI：AgentPanel 顶部常驻 chip `context: 3 schemas · 1 traceback · 0 rows sent`，点击展开本次请求实际 payload 预览（可审计）。
+cell stdout/stderr 与写入路径不在白名单内（v0.1.1 收紧）：`get_cell_output` 只回 traceback 与 MIME 类型键，见 §7 工具 2。
+UI：AgentPanel 顶部常驻 chip `context: N schemas · M traceback · K tool results · cell outputs stay local`，点击展开：首条消息逐段 + 本轮每次工具返回（工具名 / 字节数 / 截断预览）。状态栏常驻同一隐私边界提示。
 
 ---
 
@@ -203,17 +208,18 @@ proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策�
 ## 10. 前端组件树与视觉规格
 
 ```
-<App>
-├─ <TabBar>            文件/内核 tab + <LivePill state>
-├─ <CellList virtualized>
-│   └─ <Cell>
-│       ├─ <CellHeader> [execCount] lang-chip stale-badge side-effect-badge ⋯menu
-│       ├─ <CellEditor> CM6 (+ <InlineDiffOverlay> when staged)
-│       └─ <OutputDisclosure> ▶ output → <OutputRenderer mime-bundle>
-├─ <KernelStatusBar>   "Python kernel · shared with the agent" | drag-handle | idle
-├─ <InlineREPL>        >>> run code in this kernel…
-└─ <AgentPanel right>  <ContextChip/> <ChatStream/> <FixCard traceback+schema+Apply/>
-    └─ <SessionModal>  (P3) segments 折叠分组 + export .ipynb
+<App>                                   v0.1.1 工作台（ADR-010，VS Code / JupyterLab 式）
+├─ <TitleBar>        品牌 · 工作区 · <SessionBar>(会话 pill + ⧉ Sessions) · 侧栏/Agent 栏开合 · App View · 主题 · <SessionStatusPill>
+├─ <ActivityBar>     Explorer / Sessions / Variables ……（底部）Welcome ⌂ / Settings ⚙
+├─ <SidePanel>       <ExplorerTree> | <SessionsView> | <VariablesView>    ← <Splitter> 可缩放
+├─ <main editor>
+│   ├─ tab 条：⌂ Welcome + <TabBar>(notebook tabs)
+│   ├─ <Welcome>       Start / Recent / Environment(常驻自检) / Keyboard
+│   └─ notebook：<CellList> → <Cell>{<CellHeader>[execCount] lang-chip stale/side-effect/error 徽章 · <CellEditor> CM6 (+<InlineDiff>) · <OutputDisclosure>→<OutputRenderer>}
+│                <Inspector> 抽屉 · <KernelStatusBar>"Python kernel · shared with the agent" · <InlineREPL>
+├─ <AgentPanel>      <ContextChip/> <ChatStream/> <FixCard/>          ← <Splitter> 可缩放
+├─ <StatusBar>       bridge · 内核 ‖ 隐私策略 · provider · cells · 语言
+└─ <SettingsPanel> / <SessionModal>（portal 到 body）
 ```
 
 视觉 tokens（clean-room，ADR-004）：暗色底 `#0b0b0c` 系、面板 `#141416`、边框 1px `#26262a`、等宽 `JetBrains Mono / ui-monospace`、正文 UI sans；圆角 6-8px；无阴影渐变；状态色：run=amber、ok=green、err=red、stale=grey、diff-add=`#1f3b2a`/diff-del=`#3b1f24`。亮色主题 P4。
@@ -243,6 +249,20 @@ proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策�
 | 22 | 长输出**内部滚动**（max-height + overflow-y，输出面板圆角细边框） | OutputRenderer | Q 线 |
 | 23 | 顶栏**`Files \| Notebook` 分段视图切换** + 左工作区标题 + 右图标组 | ViewSwitcher；Files = 全幅文件视图（复用树组件） | Q 线 |
 | 24 | 会话模态内**完整 cell 卡**：代码+输出+红行+复制钮+右对齐内核名+`wrote` 行 | SessionModal 行渲染升级 | Q 线 |
+
+**附录 A-5：Session notebook 对齐（2026-10-10，Owner 第四批参考图）**
+
+| # | 参考图细节 | 我们的对应 |
+|---|---|---|
+| 25 | 模态头：`Session notebook` 粗体标题 + id chip + `1 agent · 39 cells` + 右上 × | 标题 + notebook 名 chip + `N sessions · M cells` + × |
+| 26 | 分组行：`▾ Claude Science ab69ee31 · 39 cells · 2 segments`（可折叠） | `▾ NovaLab <短 id> · <开始时间> · N cells · M segments` + live/read-only；最新会话默认展开 |
+| 27 | 段头：`NOTEBOOK` 小号大写 + `python` chip + `· N cells` | 同（单内核会话 = 一个段） |
+| 28 | cell 行：`[n]` + 语言 chip 左、内核名右；无卡片边框，行间全宽分隔线 | 同 |
+| 29 | 代码面板：行号 gutter + 语法着色 + 横向滚动；出错行整行红底 + `error (line N)` 实心红 pill | 同（tokenizeLines 与编辑器同一着色规则） |
+| 30 | `▶ output` 披露（展开后带边框、内部滚动、焦点环）；红色 traceback 面板；`wrote <路径>` muted 行 | 同；error 默认展开 |
+| 31 | 图像内联（白底图卡） | live 会话经 OutputRenderer 内联富 MIME；历史快照仅文本 + mime 键名（N2 限制） |
+| 32 | 右下 `⤓ .ipynb` 下载 | 同；import .ipynb 收为 footer 左侧链接 |
+| 33 | 会话结束态 footer `Python · ended 0:23 — view only; …` + `38 cells` | KernelStatusBar 既有实现（A-2 #12/#16） |
 
 ---
 

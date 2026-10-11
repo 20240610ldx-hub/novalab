@@ -5,6 +5,7 @@ import json
 import pytest
 
 from novakernel.runtime import (
+    DISPLAY_TEXT_LIMIT,
     REPL_ID,
     CellNotFoundError,
     KernelError,
@@ -301,6 +302,140 @@ def test_repl_last_expression_error_goes_run_error_without_echo():
     assert col.of("run.error", REPL_ID)
     assert col.of("run.mime", REPL_ID) == []
     assert "y" not in rt.globals  # 失败 cell 的 defs 回滚（spec §12），y 不残留
+
+
+# ------------------------------- cell displayhook（L-5 普通 cell 收尾裸表达式回显）
+
+def mime_map(col: Collector, cell_id: str) -> dict[str, str]:
+    return {p["mime"]: p["data"] for p in col.of("run.mime", cell_id)}
+
+
+def test_cell_trailing_expression_echoes_text_plain():
+    # 末语句裸表达式 → run.mime text/plain（repr）；无 _repr_html_ 的对象不发 text/html
+    rt, col = make([("a", "x = 40\nx + 2")])
+    rep = rt.exec_cell("a")
+    assert rep["ok"] is True
+    assert col.of("run.mime", "a") == [{"cellId": "a", "mime": "text/plain", "data": "42"}]
+    methods = col.methods()
+    assert methods.index("run.mime") < methods.index("run.done")  # 前端按流序渲染
+    assert col.json_ok()
+
+
+def test_cell_trailing_dataframe_emits_html_and_plain():
+    pytest.importorskip("pandas")
+    code = "import pandas as pd\ndf = pd.DataFrame({'county': ['A', 'B'], 'pop': [9.1, 7.5]})\ndf"
+    rt, col = make([("a", code)])
+    assert rt.exec_cell("a")["ok"] is True
+    mimes = mime_map(col, "a")
+    assert set(mimes) == {"text/plain", "text/html"}
+    assert mimes["text/plain"] == repr(rt.globals["df"])
+    assert "<table" in mimes["text/html"] and "county" in mimes["text/html"]
+    assert col.json_ok()
+
+
+def test_cell_assignment_emits_nothing():
+    rt, col = make([("a", "x = 1")])
+    assert rt.exec_cell("a")["ok"] is True
+    assert col.of("run.mime", "a") == []
+
+
+def test_cell_trailing_none_call_emits_nothing():
+    # 末语句是返回 None 的调用（print / list.append / plt.show 一类）→ 不回显
+    rt, col = make([("a", "items = []\nitems.append(1)")])
+    assert rt.exec_cell("a")["ok"] is True
+    assert col.of("run.mime", "a") == []
+    assert rt.globals["items"] == [1]  # 调用只执行一次（未被 exec + eval 重复求值）
+
+
+def test_cell_trailing_expression_does_not_bind_or_define():
+    # 反应式单赋值语义不变：回显值不绑定 `_`、不进 defs / defined_by，DAG 分析不受影响
+    rt, col = make([("a", "x = 1\nx + 1"), ("b", "y = x * 10\ny")])
+    before = {cid: (set(r.defs), set(r.refs)) for cid, r in rt.cells.items()}
+    rep = rt.exec_cell("a", cascade=True)
+    assert rep["ok"] and rep["cascaded"] == ["b"]
+    assert "_" not in rt.globals
+    assert rt.defined_by == {"x": "a", "y": "b"}
+    assert col.of("run.done", "a")[0]["defs"] == ["x"]
+    assert col.of("run.done", "b")[0]["defs"] == ["y"]
+    assert {cid: (set(r.defs), set(r.refs)) for cid, r in rt.cells.items()} == before
+    # 级联重跑的下游同样回显
+    assert mime_map(col, "a") == {"text/plain": "2"}
+    assert mime_map(col, "b") == {"text/plain": "10"}
+
+
+def test_cell_trailing_expression_error_goes_run_error_with_line():
+    # 末表达式异常：常规 run.error（行号指向末句）、不回显、defs 回滚、进 stale
+    rt, col = make([("a", "x = 1\n\n\nx / 0")])
+    rep = rt.exec_cell("a")
+    assert rep["ok"] is False and "ZeroDivisionError" in rep["traceback"]
+    assert 'File "<cell a>", line 4' in rep["traceback"]
+    err = col.of("run.error", "a")
+    assert len(err) == 1
+    assert err[0]["frames"][-1] == {
+        "file": "<cell a>", "line": 4, "fn": "<module>", "srcLine": "x / 0",
+    }
+    assert col.of("run.mime", "a") == []
+    assert col.of("run.done", "a") == []
+    assert "x" not in rt.globals and "a" in rt.stale
+
+
+def test_cell_trailing_figure_emits_only_png():
+    # figure 捕获照旧：收尾 `fig` / `ax.plot(...)` 只发 image/png，不附 <Figure …> repr
+    pytest.importorskip("matplotlib")
+    setup = "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfig, ax = plt.subplots()\n"
+    for tail in ("ax.plot([1, 2, 3])\nfig", "ax.plot([1, 2, 3])"):
+        rt, col = make([("p", setup + tail)])
+        assert rt.exec_cell("p")["ok"] is True
+        mimes = col.of("run.mime", "p")
+        assert [m["mime"] for m in mimes] == ["image/png"], tail
+        assert len(mimes[0]["data"]) > 1000
+
+
+def test_cell_display_text_capped_and_oversized_html_dropped():
+    code = "\n".join([
+        "class Big:",
+        "    def __repr__(self):",
+        f"        return 'r' * {DISPLAY_TEXT_LIMIT + 50}",
+        "    def _repr_html_(self):",
+        f"        return '<b>' + 'h' * {DISPLAY_TEXT_LIMIT} + '</b>'",
+        "Big()",
+    ])
+    rt, col = make([("a", code)])
+    assert rt.exec_cell("a")["ok"] is True
+    mimes = mime_map(col, "a")
+    assert set(mimes) == {"text/plain"}  # 超限 html 整条放弃（截断会破坏标签）
+    plain = mimes["text/plain"]
+    assert plain.startswith("r" * DISPLAY_TEXT_LIMIT) and plain.endswith("…[truncated]")
+    assert len(plain) == DISPLAY_TEXT_LIMIT + len("…[truncated]")
+
+
+def test_cell_display_failures_never_fail_the_run():
+    # _repr_html_ 抛异常 / 返回非 str → 静默降级为 text/plain；repr 内的 print 进 run.stdout
+    code = "\n".join([
+        "class Noisy:",
+        "    def __repr__(self):",
+        "        print('from repr')",
+        "        return 'Noisy()'",
+        "    def _repr_html_(self):",
+        "        raise RuntimeError('boom')",
+        "Noisy()",
+    ])
+    rt, col = make([("a", code), ("b", "class NotStr:\n    def _repr_html_(self):\n        return 42\nNotStr")])
+    assert rt.exec_cell("a")["ok"] is True
+    assert mime_map(col, "a") == {"text/plain": "Noisy()"}
+    assert "".join(p["text"] for p in col.of("run.stdout", "a")) == "from repr\n"
+    assert col.of("run.error", "a") == []
+    # 类对象本身（未绑定 _repr_html_）同样只回显 repr
+    assert rt.exec_cell("b")["ok"] is True
+    assert set(mime_map(col, "b")) == {"text/plain"}
+
+
+def test_repl_echo_stays_text_plain_only():
+    # REPL 契约（L-4）不变：有 _repr_html_ 的对象也只回显 text/plain
+    rt, col = make([("a", "class H:\n    def _repr_html_(self):\n        return '<i>h</i>'\nh = H()")])
+    rt.exec_cell("a")
+    assert rt.exec_repl("h")["ok"] is True
+    assert [p["mime"] for p in col.of("run.mime", REPL_ID)] == ["text/plain"]
 
 
 # ---------------------------------------------------------------- 通知流

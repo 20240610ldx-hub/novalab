@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useNotebook } from '../../store/notebook';
 import {
   SESSION_CELL_LIMIT,
@@ -114,7 +115,7 @@ function SessionMenu({
 }
 
 /** 下拉共用的选取逻辑：live 当前会话 → backToLive；历史 → openHistory。 */
-function makePickSession(close: () => void): (sessionId: string) => void {
+export function makePickSession(close: () => void): (sessionId: string) => void {
   return (sessionId) => {
     const s = useSession.getState();
     close();
@@ -192,6 +193,7 @@ export function SessionBar() {
 
 /** header 右 pill：`live` / `Ended HH:MM`，下拉 = 同会话列表（A-2 #12）。 */
 export function SessionStatusPill() {
+  const notebookPath = useNotebook((s) => s.notebookPath);
   const kernelState = useNotebook((s) => s.kernelState);
   const restartKernel = useNotebook((s) => s.restartKernel);
   const readOnly = useSession((s) => s.readOnly);
@@ -211,6 +213,9 @@ export function SessionStatusPill() {
     if (!open) void refreshSessions();
     setOpen((v) => !v);
   };
+
+  // 无 notebook = 无内核会话：不显示 live/Ended pill（v0.1.1 Welcome 态）
+  if (!notebookPath) return null;
 
   return (
     <div className="relative">
@@ -262,7 +267,8 @@ function TruncationBanner() {
   const text = truncationBanner(historyTotal);
   if (!text) return null;
   const pending = exportState.status === 'pending-wiring';
-  return (
+  // portal：标题栏居中容器带 transform，会成为 fixed 的包含块（v0.1.1）
+  return createPortal(
     <div className="fixed left-1/2 top-2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-md border border-[var(--accent-run)] bg-[var(--panel)] px-4 py-2 text-[12px] shadow-lg">
       <span>{text}</span>
       <button
@@ -280,6 +286,7 @@ function TruncationBanner() {
         {t('session.exportButton')}
         {pending ? t('session.exportPendingSuffix') : ''}
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -13,8 +13,10 @@ NovaLab 把 marimo 式反应式执行语义、Claude Science Notebook 式交互�
 
 - **反应式内核**：AST defs/refs 提取 → 单赋值 DAG → 编辑即失效传播（下游标 stale），级联重跑 / mark-only / ask 三档策略，环与多重定义编译期报错（自研 `novakernel`，语义思路参考 marimo，代码 clean-room，见 [NOTICE](NOTICE)）。
 - **Agent 修错闭环**：traceback 自动捕获 → One-click Fix 卡片 → 行内红绿 Diff（CodeMirror MergeView）→ `Tab` 采纳自动重跑 / `Esc` 拒绝；Agent 写入永远 staged，无静默改文件通道。
-- **隐私边界（硬保证）**：出进程内容白名单 = 代码 / traceback / DAG / 变量 schema / `head(1)` 级预览，Bridge `PreviewSerializer` 4KB 硬截断（不靠 prompt 自觉），UI 常驻"本次发送了什么"审计 chip。
+- **隐私边界（硬保证）**：出进程内容白名单 = 代码 / traceback / DAG / 变量 schema / `head(1)` 级预览，Bridge `PreviewSerializer` 4KB 硬截断（不靠 prompt 自觉）；Agent 读取 cell 输出时只得到 traceback 与 MIME 类型键——stdout/stderr 与写入路径不出本机；审计 chip 逐条记录首条消息与每次工具返回的实际内容与体积。
+- **本机通道鉴权**：Bridge 的 loopback HTTP/WS 服务只接受本机前端 Origin（缺 Origin 也拒绝）；`GET /bridge-info` 下发每次启动随机 token，WS 首条消息必须是 `bridge.auth {token}`，LLM 代理校验同一 token——浏览器里的其他网页无法驱动内核或读写工作区（见 [SECURITY.md](SECURITY.md)）。
 - **模型解耦**：Anthropic / OpenAI 兼容端点 / DeepSeek / 本地 Ollama(vLLM) 任意 provider；离线模型可全脱网运行。
+- **工作台布局**：VS Code / JupyterLab 式——顶部细栏、左侧活动栏 + 可缩放侧栏（资源管理器 / 会话 / 变量）、中间编辑区（Welcome 引导页 + notebook tabs）、右侧可缩放 Agent 栏、底部状态栏（连接 · 内核 · 隐私策略 · provider）。
 - **多 Tab 多内核**：一个 tab = 一个 .py 文件 = 一个内核进程，焦点路由，独立 stale/DAG 状态。
 - **会话管理**：内核生命周期即会话；历史会话只读浏览、Session 汇总模态（segments 分组）、nbformat 4.5 `.ipynb` 导出/导入。
 - **交互控件**：slider / datepicker / table 等原生控件，绑定变量即触发反应式重跑。
@@ -106,6 +108,7 @@ uv run --directory py pytest
 node scripts/integration-smoke.mjs            # bridge + kernel 端到端（起停自管）
 pnpm exec playwright install chromium         # 首次
 node scripts/demo-gallery.mjs --skip-agent    # 交互状态画廊（无 LLM 凭据态）
+node scripts/bench.mjs --ui                   # intent §8 量化指标（--ui 需 dev 服务在跑）
 ```
 
 详见 [CONTRIBUTING.md](CONTRIBUTING.md)（含 clean-room 纪律）与 [docs/plan.md](docs/plan.md)。
@@ -119,7 +122,7 @@ node scripts/demo-gallery.mjs --skip-agent    # 交互状态画廊（无 LLM 凭
 
 ## 路线
 
-P1 内核+编辑器+Bridge ✅ · P2 Agent 闭环+文件/会话管理 ✅ · P3 多 Tab+控件+互转 ✅ · **P4 进行中**：Tauri 打包流水线与双平台真实启动验收已完成（CI 见 `.github/workflows/release.yml`）；剩余凭据 keychain/加密存储迁移、签名、App View、i18n、首启引导和公测发布页。
+P1 内核+编辑器+Bridge ✅ · P2 Agent 闭环+文件/会话管理 ✅ · P3 多 Tab+控件+互转 ✅ · P4 产品化 ✅（v0.1.0：Tauri 打包与双平台真实启动验收、加密凭据 + LLM 代理、App View、i18n 骨架、首启自检）· **v0.1.1**：bridge discovery + token 鉴权、Agent 出口只给 traceback / mime 键、工具出口审计、VS Code 式工作台 + Welcome 页、Session notebook 对齐、普通 cell 尾表达式显示与 HTML 表格渲染。下一步：真实数据自用验收、首启离线/镜像安装、i18n 深度迁移、代码签名（见 [docs/plan.md](docs/plan.md) §5b）。
 
 ## License
 

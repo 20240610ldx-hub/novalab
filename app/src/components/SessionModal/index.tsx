@@ -1,19 +1,23 @@
 /**
- * SessionModal（P3.4，spec §7 `<SessionModal> segments 折叠分组 + export .ipynb`）。
+ * SessionModal（P3.4；v0.1.1 对齐 Claude Science「Session notebook」）。
  *
- * - 头部：`Session notebook` + notebook 名 + `N sessions · M cells`；顶部 import .ipynb；
- * - 主体：按 session.list 分组（buildSegments：会话即 segment，>30min 间隔在会话内
- *   再切子段——parts>1 时 header 注记）；每段折叠/展开，展开列该会话快照 cells 的
- *   **完整只读 cell 卡**（A-3 #24，Q 线）：[n] 徽章 + 语言 chip + error (line N)
- *   实心红 pill + 右对齐内核名 + 只读代码（出错行红底）+ 复制钮 + 输出区
- *   （stdout 中性面板 / stderr·traceback 红面板 / wrote 行 / mime 键名注记；
- *   历史快照仅文本形态）；>500 cell 复用 store 既有截断 selector；
- * - footer 右：`.ipynb` 导出（export.ipynb rpc）；-32600/-32601 → 降级
- *   （tooltip「接线 pending」，P3.1 router 合入后自然恢复）。
- * - Esc / 遮罩点击关闭。挂载点：SessionBar（fixed 覆盖层，挂载位置不影响视觉）。
+ * 结构（逐元素对照 Owner 参考图）：
+ *  - 头部：`Session notebook` 标题 + notebook 名 chip + `N sessions · M cells`，右上 ×；
+ *  - 分组行（每个内核会话一行，可折叠）：▾ **来源**（NovaLab / Agent）+ `短 id · 开始时间 ·
+ *    N cells · M segments` + live / read-only 标签；打开模态时最新会话默认展开；
+ *  - 段头：`NOTEBOOK` 小号大写 + `python` chip + `· N cells`（单内核会话 = 一个段）；
+ *  - cell 行（无卡片边框，行间全宽分隔线）：`[n]` + 语言 chip（+ `error (line N)` 实心红 pill）
+ *    + 右对齐内核名；代码面板 = 行号 gutter + 与编辑器同规则的着色（tokenizeLines）+ 出错行
+ *    红底 + 横向滚动 + hover 复制钮；`▶ output` 披露（error 默认展开）；`wrote <路径>` 行；
+ *  - live 会话从 notebook store 渲染（OutputRenderer：图像 / 表格 / 富 MIME 内联，同 Claude
+ *    Science 图内联）；历史会话来自快照（仅文本 + mime 键名注记，见功能矩阵 N2）；
+ *  - footer：左 import .ipynb（折叠成链接），右下 `⤓ .ipynb` 导出。
+ * 渲染经 portal 挂到 body：标题栏居中容器带 transform，会成为 fixed 的包含块（v0.1.1 修复）。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { ChevronDown, ChevronRight, Download, X } from 'lucide-react';
 import {
   buildSegments,
   modalSummary,
@@ -23,184 +27,265 @@ import {
   type SessionSnapshotCell,
 } from '../../store/session';
 import { useNotebook } from '../../store/notebook';
+import { isOutputEmpty, lastCellFrameLine, type Cell } from '../../kernel/types';
 import { useI18n } from '../../i18n';
-import { CopyButton } from '../CellEditor';
-import { ErrPanel, OutPanel, WriteNotifications } from '../OutputRenderer';
+import { CopyButton, tokenizeLines } from '../CellEditor';
+import { ErrPanel, OutPanel, OutputRenderer, WriteNotifications } from '../OutputRenderer';
 import {
   errorLineFromTraceback,
   execBadge,
-  sessionHeaderText,
+  groupMeta,
+  groupTitle,
+  plural,
   snapshotHasOutput,
 } from './selectors';
 
 /* ------------------------------------------------------------------ */
-/* A-3 #24：完整只读 cell 卡                                             */
+/* 只读代码面板：行号 gutter + 着色 + 出错行红底                         */
 /* ------------------------------------------------------------------ */
 
-/** 只读代码块：逐行 span（出错行 --err-line 整行红底，复用 errorLine 装饰观感）。 */
 function ReadOnlyCode({ code, errorLine }: { code: string; errorLine: number | null }) {
-  const lines = (code ?? '').split('\n');
+  const lines = useMemo(() => tokenizeLines(code), [code]);
   return (
-    <pre className="nl-scroll-thin overflow-x-auto rounded-md bg-[var(--panel)] px-3 py-1.5 text-[12px] leading-[1.65] text-[var(--text)]">
-      {lines.map((l, i) => (
-        <span key={i} className={`block min-w-fit ${errorLine === i + 1 ? 'nl-err-line' : ''}`}>
-          {l === '' ? ' ' : l}
-        </span>
-      ))}
-    </pre>
+    <div className="nl-scroll-thin overflow-x-auto rounded-md bg-[var(--bg)] py-2 text-[12.5px] leading-[1.7]">
+      <table className="border-collapse">
+        <tbody>
+          {lines.map((toks, i) => (
+            <tr key={i} className={errorLine === i + 1 ? 'nl-err-line' : ''}>
+              <td className="w-10 select-none pr-4 pl-3 text-right align-top text-[var(--gutter-fg)]">{i + 1}</td>
+              <td className="pr-6 whitespace-pre text-[var(--text)]">
+                {toks.length === 0 ? ' ' : toks.map((t, k) => (t.cls ? <span key={k} className={t.cls}>{t.text}</span> : t.text))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
-function SnapshotCellCard({ cell, index }: { cell: SessionSnapshotCell; index: number }) {
-  const o = cell.output;
-  const errorLine = o?.traceback ? errorLineFromTraceback(o.traceback) : null;
-  const hasOutput = snapshotHasOutput(cell);
-  // 折叠披露沿用 ▶/▼ output；error 卡默认展开
-  const [open, setOpen] = useState(!!o?.traceback);
-  const { t } = useI18n();
+/* ------------------------------------------------------------------ */
+/* cell 行（live 与快照共用外壳）                                        */
+/* ------------------------------------------------------------------ */
 
+function CellRow({
+  badge,
+  code,
+  errorLine,
+  hasError,
+  index,
+  output,
+  writes,
+}: {
+  badge: string;
+  code: string;
+  errorLine: number | null;
+  hasError: boolean;
+  index: number;
+  /** 输出主体（null = 无输出，不渲染披露行）。 */
+  output: ReactNode | null;
+  writes: string[];
+}) {
+  const [open, setOpen] = useState(hasError);
+  const { t } = useI18n();
   return (
-    <article className="my-2 rounded-md border border-[var(--border)] bg-[var(--bg)] pb-1">
-      {/* 卡头：[n] 徽章 + 语言 chip + error (line N) 实心红 pill + 右对齐内核名 */}
-      <div className="flex items-center gap-2 px-3 pt-2 text-[11px] select-none">
+    <article className="border-b border-[var(--border)] px-6 py-4" data-testid="session-cell">
+      <div className="mb-2 flex items-center gap-2 text-[12px] select-none">
         <span className="text-[var(--muted)]" title="execution count">
-          {execBadge(cell, index)}
+          {badge}
         </span>
-        <span
-          className="rounded-full px-2 py-px"
-          style={{ background: 'var(--chip-bg)', color: 'var(--chip-text)' }}
-        >
-          python
-        </span>
-        {o?.traceback && (
-          <span
-            className="rounded-full px-2 py-px text-white"
-            style={{ background: 'var(--err-border)' }}
-            title={t('sessionModal.errorBadgeTitle')}
-          >
+        <span className="rounded-md bg-[var(--chip-bg)] px-2 py-0.5 text-[var(--chip-text)]">python</span>
+        {hasError && (
+          <span className="rounded-full bg-[var(--err-border)] px-2 py-0.5 text-white" title={t('sessionModal.errorBadgeTitle')}>
             {errorLine !== null ? `error (line ${errorLine})` : 'error'}
           </span>
         )}
-        <span className="ml-auto text-[var(--muted)]" title="会话内核">
-          python
-        </span>
+        <span className="ml-auto text-[var(--muted)]">python</span>
       </div>
 
-      {/* 只读代码 + 右上复制钮（#21 同源组件，hover 显现） */}
-      <div className="group relative mt-1 px-2">
-        <ReadOnlyCode code={cell.code} errorLine={o?.traceback ? errorLine : null} />
-        <div className="absolute right-3.5 top-2.5">
-          <CopyButton getText={() => cell.code} label={`copy cell ${index + 1} code`} />
+      <div className="group relative">
+        <ReadOnlyCode code={code} errorLine={hasError ? errorLine : null} />
+        <div className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100">
+          <CopyButton getText={() => code} label={`copy cell ${index + 1} code`} />
         </div>
       </div>
 
-      {/* 输出区：stdout 中性面板 / stderr·traceback 红面板 / mime 键名注记 / wrote 行 */}
-      {hasOutput && (
-        <div className="px-2">
+      {output !== null && (
+        <>
           <button
             type="button"
             onClick={() => setOpen(!open)}
             aria-expanded={open}
-            className="flex w-full items-center gap-1.5 px-1 py-1 text-[11px] text-[var(--muted)] hover:text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent-run)]"
+            className="mt-2 flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-[12px] text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent-run)]"
           >
-            <span aria-hidden>{open ? '▼' : '▶'}</span>
-            <span>output</span>
-            {o?.traceback && <span className="text-[var(--muted)]/70">· error</span>}
+            <span aria-hidden className="text-[10px] text-[var(--muted)]">
+              {open ? '▼' : '▶'}
+            </span>
+            output
           </button>
-          {open && (
-            <div className="space-y-2 border-t border-[var(--border)] p-1.5 text-[12px]">
-              {o?.stdout !== '' && o?.stdout != null && (
-                <OutPanel>
-                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stdout}</pre>
-                </OutPanel>
-              )}
-              {o?.stderr !== '' && o?.stderr != null && (
-                <ErrPanel>
-                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stderr}</pre>
-                </ErrPanel>
-              )}
-              {o?.traceback && (
-                <ErrPanel>
-                  <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.traceback}</pre>
-                </ErrPanel>
-              )}
-              {(o?.mimeKeys?.length ?? 0) > 0 && (
-                <div className="px-1 text-[11px] text-[var(--muted)]">
-                  {t('sessionModal.mimeNote', { keys: o.mimeKeys.join(', ') })}
-                </div>
-              )}
-              <WriteNotifications writes={o?.writes ?? []} />
-            </div>
-          )}
+          {open && <div className="mt-1.5 space-y-2 text-[12px]">{output}</div>}
+        </>
+      )}
+      {writes.length > 0 && (
+        <div className="mt-1.5">
+          <WriteNotifications writes={writes} />
         </div>
       )}
     </article>
   );
 }
 
+/** 快照 cell（历史会话：文本形态）。 */
+function SnapshotRow({ cell, index }: { cell: SessionSnapshotCell; index: number }) {
+  const { t } = useI18n();
+  const o = cell.output;
+  const errorLine = o?.traceback ? errorLineFromTraceback(o.traceback) : null;
+  const textual =
+    !!o && (o.stdout !== '' || o.stderr !== '' || !!o.traceback || (o.mimeKeys?.length ?? 0) > 0);
+  const body = snapshotHasOutput(cell) && textual && o ? (
+    <>
+      {o.stdout !== '' && (
+        <OutPanel>
+          <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stdout}</pre>
+        </OutPanel>
+      )}
+      {o.stderr !== '' && (
+        <ErrPanel>
+          <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.stderr}</pre>
+        </ErrPanel>
+      )}
+      {o.traceback && (
+        <ErrPanel>
+          <pre className="whitespace-pre-wrap break-words px-3 py-2">{o.traceback}</pre>
+        </ErrPanel>
+      )}
+      {(o.mimeKeys?.length ?? 0) > 0 && (
+        <p className="px-1 text-[11px] text-[var(--muted)]">{t('sessionModal.mimeNote', { keys: o.mimeKeys.join(', ') })}</p>
+      )}
+    </>
+  ) : null;
+  return (
+    <CellRow
+      badge={execBadge(cell, index)}
+      code={cell.code}
+      errorLine={errorLine}
+      hasError={!!o?.traceback}
+      index={index}
+      output={body}
+      writes={o?.writes ?? []}
+    />
+  );
+}
+
+/** live cell（当前会话：notebook store 富输出，图像/表格内联）。 */
+function LiveRow({ cell, index }: { cell: Cell; index: number }) {
+  const o = cell.output;
+  const tb = o?.traceback ?? null;
+  const rich = o && !isOutputEmpty({ ...o, writes: [] }) ? <OutputRenderer output={{ ...o, writes: [] }} /> : null;
+  return (
+    <CellRow
+      badge={`[${cell.execCount ?? index + 1}]`}
+      code={cell.code}
+      errorLine={tb ? (lastCellFrameLine(tb.frames) ?? errorLineFromTraceback(tb.text)) : null}
+      hasError={!!tb}
+      index={index}
+      output={rich}
+      writes={o?.writes ?? []}
+    />
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 分组（会话）                                                          */
 /* ------------------------------------------------------------------ */
 
-/** 单个会话段：header（点击折叠/展开）+ 展开时的完整只读 cell 卡（#24）。 */
-function SessionSection({ seg }: { seg: SessionSegment }) {
-  const [expanded, setExpanded] = useState(false);
+function SegmentHeader({ count }: { count: number }) {
+  return (
+    <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--side)] px-6 py-2.5 text-[12px] text-[var(--muted)]">
+      <span className="text-[11px] tracking-[0.12em] uppercase">Notebook</span>
+      <span className="rounded-md bg-[var(--chip-bg)] px-2 py-0.5 text-[var(--chip-text)]">python</span>
+      <span>· {plural(count, 'cell')}</span>
+    </div>
+  );
+}
+
+function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defaultOpen: boolean; isLive: boolean }) {
+  const [expanded, setExpanded] = useState(defaultOpen);
   const { t } = useI18n();
   const loading = useSession((s) => s.snapshotLoading[seg.sessionId] ?? false);
-  const cells = useSession((s) => s.snapshotCells[seg.sessionId]);
+  const snapshot = useSession((s) => s.snapshotCells[seg.sessionId]);
   const total = useSession((s) => s.snapshotTotals[seg.sessionId] ?? 0);
   const loadSnapshot = useSession((s) => s.loadSnapshot);
-  const banner = cells ? truncationBanner(total) : null;
+  const liveCells = useNotebook((s) => s.cells);
+  const executed = useMemo(
+    () => liveCells.filter((c) => c.kind === 'code' && c.execCount !== null && c.execCount > 0),
+    [liveCells],
+  );
 
-  const toggle = () => {
-    const next = !expanded;
-    setExpanded(next);
-    if (next) void loadSnapshot(seg.sessionId);
-  };
+  useEffect(() => {
+    if (expanded && !isLive) void loadSnapshot(seg.sessionId);
+  }, [expanded, isLive, loadSnapshot, seg.sessionId]);
+
+  const banner = !isLive && snapshot ? truncationBanner(total) : null;
+  const count = isLive ? executed.length : (snapshot?.length ?? seg.cellCount);
 
   return (
-    <section className="rounded-md border border-[var(--border)] bg-[var(--panel)]">
+    <section data-testid="session-group" data-live={isLive}>
       <button
         type="button"
-        onClick={toggle}
+        onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-[var(--text)] hover:bg-[var(--bg)]"
+        className="flex w-full items-center gap-2 border-b border-[var(--border)] px-6 py-3 text-left text-[13px] hover:bg-[var(--panel-2)]"
       >
-        <span aria-hidden className="text-[9px] text-[var(--muted)]">{expanded ? '▼' : '▶'}</span>
-        <span className="min-w-0 flex-1 truncate font-mono">{sessionHeaderText(seg)}</span>
-        {seg.live && (
-          <span className="rounded bg-[var(--bg)] px-1 text-[10px] text-[var(--accent-ok)]">live</span>
+        {expanded ? (
+          <ChevronDown size={15} className="shrink-0 text-[var(--muted)]" aria-hidden />
+        ) : (
+          <ChevronRight size={15} className="shrink-0 text-[var(--muted)]" aria-hidden />
         )}
-        {seg.source === 'agent' && (
-          <span className="rounded bg-[var(--bg)] px-1 text-[10px] text-[var(--accent-run)]">agent</span>
-        )}
+        <span className="font-semibold text-[var(--text)]">{groupTitle(seg)}</span>
+        <span className="min-w-0 flex-1 truncate text-[var(--muted)]">{groupMeta(seg)}</span>
+        <span
+          className={`shrink-0 rounded-md bg-[var(--chip-bg)] px-1.5 text-[11px] ${
+            seg.live ? 'text-[var(--accent-ok)]' : 'text-[var(--chip-text)]'
+          }`}
+        >
+          {seg.live ? 'live' : 'read-only'}
+        </span>
       </button>
       {expanded && (
-        <div className="border-t border-[var(--border)] px-3 py-1.5">
+        <div>
+          <SegmentHeader count={count} />
           {banner && (
-            <p className="mb-1 rounded border border-[var(--accent-run)] px-2 py-1 text-[11px] text-[var(--accent-run)]">
-              {banner}
+            <p className="border-b border-[var(--border)] px-6 py-2 text-[11px] text-[var(--accent-run)]">{banner}</p>
+          )}
+          {!isLive && loading && <p className="px-6 py-3 text-[12px] text-[var(--muted)]">{t('sessionModal.loadingSnapshot')}</p>}
+          {isLive
+            ? executed.map((c, i) => <LiveRow key={c.id} cell={c} index={i} />)
+            : !loading && snapshot?.map((c, i) => <SnapshotRow key={c.id} cell={c} index={i} />)}
+          {((isLive && executed.length === 0) || (!isLive && !loading && snapshot && snapshot.length === 0)) && (
+            <p className="border-b border-[var(--border)] px-6 py-3 text-[12px] text-[var(--muted)]">
+              {t('sessionModal.noSnapshotCells')}
             </p>
           )}
-          {loading && <p className="py-1 text-[11px] text-[var(--muted)]">{t('sessionModal.loadingSnapshot')}</p>}
-          {!loading && cells && cells.length === 0 && (
-            <p className="py-1 text-[11px] text-[var(--muted)]">{t('sessionModal.noSnapshotCells')}</p>
-          )}
-          {!loading &&
-            cells?.map((c, i) => <SnapshotCellCard key={c.id} cell={c} index={i} />)}
         </div>
       )}
     </section>
   );
 }
 
+/* ------------------------------------------------------------------ */
+
 export function SessionModal() {
   const modalOpen = useSession((s) => s.modalOpen);
   const closeModal = useSession((s) => s.closeModal);
   const sessions = useSession((s) => s.sessions);
+  const currentId = useSession((s) => s.currentId);
   const exportState = useSession((s) => s.exportState);
   const importState = useSession((s) => s.importState);
   const exportIpynb = useSession((s) => s.exportIpynb);
   const importNotebook = useSession((s) => s.importNotebook);
   const notebookPath = useNotebook((s) => s.notebookPath);
+  const [importOpen, setImportOpen] = useState(false);
   const [importPath, setImportPath] = useState('');
   const { t } = useI18n();
 
@@ -221,9 +306,9 @@ export function SessionModal() {
   const exportPending = exportState.status === 'pending-wiring';
   const busy = exportState.status === 'working' || importState.status === 'working';
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"
       onClick={closeModal}
       role="presentation"
     >
@@ -232,105 +317,105 @@ export function SessionModal() {
         aria-modal="true"
         aria-label={t('sessionModal.title')}
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[80vh] w-[min(860px,92vw)] flex-col rounded-lg border border-[var(--border)] bg-[var(--panel)] shadow-xl"
+        className="flex h-[min(88vh,980px)] w-[min(1200px,94vw)] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl"
       >
-        {/* 头部 */}
-        <header className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-[13px] text-[var(--text)]">{t('sessionModal.title')}</h2>
-            <p className="truncate text-[11px] text-[var(--muted)]">
-              {fileName ?? t('sessionModal.noNotebook')} ·{' '}
-              {t('sessionModal.summary', { sessions: summary.sessionCount, cells: summary.cellCount })}
-            </p>
-          </div>
-          {/* 顶部 import .ipynb（路径输入 → import.ipynb rpc → openNotebook） */}
-          <div className="flex items-center gap-1.5">
-            <input
-              value={importPath}
-              onChange={(e) => setImportPath(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && importPath.trim() !== '') void importNotebook(importPath);
-              }}
-              placeholder={t('sessionModal.importPlaceholder')}
-              aria-label={t('sessionModal.importAria')}
-              className="w-52 rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 font-mono text-[11px] text-[var(--text)] placeholder:text-[var(--muted)]"
-            />
-            <button
-              type="button"
-              disabled={busy || importPath.trim() === ''}
-              title={
-                importState.status === 'pending-wiring'
-                  ? t('sessionModal.importWiringPending')
-                  : t('sessionModal.importTitle')
-              }
-              onClick={() => {
-                void importNotebook(importPath).then((ok) => {
-                  if (ok) setImportPath('');
-                });
-              }}
-              className="rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text)] hover:border-[var(--accent-run)] disabled:opacity-50"
-            >
-              {t('sessionModal.importButton')}
-            </button>
-            <button
-              type="button"
-              onClick={closeModal}
-              aria-label={t('sessionModal.closeAria')}
-              className="rounded px-1.5 py-0.5 text-[13px] text-[var(--muted)] hover:text-[var(--text)]"
-            >
-              ✕
-            </button>
-          </div>
+        <header className="flex items-center gap-3 px-7 py-5">
+          <h2 className="text-[20px] font-semibold text-[var(--text)]">{t('sessionModal.title')}</h2>
+          <span className="max-w-64 truncate rounded-md bg-[var(--chip-bg)] px-2 py-0.5 text-[12px] text-[var(--chip-text)]">
+            {fileName ?? t('sessionModal.noNotebook')}
+          </span>
+          <span className="text-[12px] text-[var(--muted)]">
+            {t('sessionModal.summary', { sessions: summary.sessionCount, cells: summary.cellCount })}
+          </span>
+          <button
+            type="button"
+            onClick={closeModal}
+            aria-label={t('sessionModal.closeAria')}
+            className="ml-auto rounded p-1 text-[var(--muted)] hover:bg-[var(--panel-2)] hover:text-[var(--text)]"
+          >
+            <X size={18} aria-hidden />
+          </button>
         </header>
 
-        {/* 主体：会话段列表 */}
-        <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+        <div className="nl-scroll-thin min-h-0 flex-1 overflow-y-auto border-t border-[var(--border)]">
           {segments.length === 0 && (
-            <p className="py-6 text-center text-[12px] text-[var(--muted)]">
-              {t('sessionModal.empty')}
-            </p>
+            <p className="py-10 text-center text-[12px] text-[var(--muted)]">{t('sessionModal.empty')}</p>
           )}
-          {segments.map((seg) => (
-            <SessionSection key={seg.sessionId} seg={seg} />
+          {segments.map((seg, i) => (
+            <SessionGroup
+              key={seg.sessionId}
+              seg={seg}
+              defaultOpen={i === 0}
+              isLive={seg.live && seg.sessionId === currentId}
+            />
           ))}
           {importState.warnings.length > 0 && (
-            <details className="rounded-md border border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--muted)]">
+            <details className="mx-6 my-3 rounded-md border border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--muted)]">
               <summary>{t('sessionModal.importWarnings', { count: importState.warnings.length })}</summary>
               <ul className="mt-1 list-disc pl-4">
-                {importState.warnings.map((w, i) => (
-                  <li key={i}>{w}</li>
+                {importState.warnings.map((w, k) => (
+                  <li key={k}>{w}</li>
                 ))}
               </ul>
             </details>
           )}
         </div>
 
-        {/* footer：左状态文案，右 .ipynb 导出 */}
-        <footer className="flex items-center gap-3 border-t border-[var(--border)] px-4 py-2.5">
+        <footer className="flex items-center gap-3 border-t border-[var(--border)] px-6 py-3 text-[12px]">
+          {importOpen ? (
+            <span className="flex items-center gap-1.5">
+              <input
+                autoFocus
+                value={importPath}
+                onChange={(e) => setImportPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && importPath.trim() !== '') void importNotebook(importPath);
+                  if (e.key === 'Escape') setImportOpen(false);
+                }}
+                placeholder={t('sessionModal.importPlaceholder')}
+                aria-label={t('sessionModal.importAria')}
+                className="w-64 rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-[11px] text-[var(--text)] placeholder:text-[var(--muted)]"
+              />
+              <button
+                type="button"
+                disabled={busy || importPath.trim() === ''}
+                title={importState.status === 'pending-wiring' ? t('sessionModal.importWiringPending') : t('sessionModal.importTitle')}
+                onClick={() => {
+                  void importNotebook(importPath).then((ok) => {
+                    if (ok) setImportPath('');
+                  });
+                }}
+                className="rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text)] hover:border-[var(--accent-run)] disabled:opacity-50"
+              >
+                {t('sessionModal.importButton')}
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setImportOpen(true)}
+              title={t('sessionModal.importTitle')}
+              className="text-[var(--muted)] hover:text-[var(--text)] hover:underline"
+            >
+              {t('sessionModal.importButton')}…
+            </button>
+          )}
           <p className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted)]" aria-live="polite">
             {exportState.message ?? importState.message ?? ''}
           </p>
           <button
             type="button"
             disabled={busy || sessions.length === 0}
-            title={
-              exportPending
-                ? t('sessionModal.exportWiringPending')
-                : t('sessionModal.exportTitle')
-            }
-            onClick={() => {
-              void exportIpynb();
-            }}
-            className={`rounded border px-2.5 py-1 font-mono text-[11px] ${
-              exportPending
-                ? 'border-[var(--border)] text-[var(--muted)] opacity-70'
-                : 'border-[var(--border)] text-[var(--text)] hover:border-[var(--accent-run)]'
-            } disabled:opacity-50`}
+            title={exportPending ? t('sessionModal.exportWiringPending') : t('sessionModal.exportTitle')}
+            onClick={() => void exportIpynb()}
+            className="flex items-center gap-1.5 rounded px-2 py-1 text-[var(--muted)] hover:bg-[var(--panel-2)] hover:text-[var(--text)] disabled:opacity-50"
           >
+            <Download size={14} aria-hidden />
             .ipynb{exportPending ? t('sessionModal.exportPendingSuffix') : ''}
           </button>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

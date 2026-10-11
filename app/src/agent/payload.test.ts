@@ -14,7 +14,7 @@ import type { VarSchema } from '../kernel/types';
 
 /**
  * payload.ts 的隐私硬规则单测（spec §8）：
- * 4KB 截断（含多字节安全）、DataFrame 全量永不进 payload、schema/traceback 计数、rowsSent 恒 0。
+ * 4KB 截断（含多字节安全）、DataFrame 全量永不进 payload、schema/traceback 计数。
  */
 
 const frames = [
@@ -70,7 +70,7 @@ describe('truncateToBytes（4KB 硬闸）', () => {
 });
 
 describe('buildFixPayload（One-click Fix 的出进程内容）', () => {
-  it('包含代码/traceback/schema 三段，计数正确，rowsSent 恒 0', () => {
+  it('包含代码/traceback/schema 三段，计数正确', () => {
     const p = buildFixPayload({
       cellId: 'c1',
       cellCode: 'df.groupby("k")',
@@ -80,7 +80,6 @@ describe('buildFixPayload（One-click Fix 的出进程内容）', () => {
     expect(p.sections.length).toBe(3);
     expect(p.schemaCount).toBe(3);
     expect(p.tracebackCount).toBe(1);
-    expect(p.rowsSent).toBe(0);
     expect(p.text).toContain('df.groupby("k")');
     expect(p.text).toContain('KeyError: k');
     expect(p.text).toContain('propose_code_change'); // 指令：必须走工具提议（spec §7 单一来源工具名）
@@ -95,7 +94,6 @@ describe('buildFixPayload（One-click Fix 的出进程内容）', () => {
       traceback: { text: 'KeyError: k', frames },
       schemas: makeSchemas(2, { preview: hugePreview }),
     });
-    expect(p.rowsSent).toBe(0);
     for (const sec of p.sections) {
       expect(sec.bytes).toBeLessThanOrEqual(MAX_FIELD_BYTES);
     }
@@ -127,7 +125,6 @@ describe('buildChatPayload', () => {
     expect(p.sections[0]!.bytes).toBeLessThanOrEqual(MAX_FIELD_BYTES);
     expect(p.schemaCount).toBe(0);
     expect(p.tracebackCount).toBe(0);
-    expect(p.rowsSent).toBe(0);
   });
 });
 
@@ -159,5 +156,20 @@ describe('辅助纯函数', () => {
     expect(out).not.toContain('f0.py'); // 头部帧丢弃
     expect(out).toContain('earlier frames omitted');
     expect(byteLength(out)).toBeLessThanOrEqual(MAX_FIELD_BYTES);
+  });
+});
+
+describe('auditToolResult（v0.1.1 工具出口记账）', () => {
+  it('记录工具名、字节数与截断预览', async () => {
+    const { auditToolResult, TOOL_AUDIT_PREVIEW_BYTES } = await import('./payload');
+    const small = auditToolResult('get_cell_output', { traceback: null, mimeKeys: [] });
+    expect(small).toMatchObject({ tool: 'get_cell_output', preview: '{"traceback":null,"mimeKeys":[]}' });
+    expect(small.bytes).toBe('{"traceback":null,"mimeKeys":[]}'.length);
+
+    const big = auditToolResult('get_cell_code', { code: 'x'.repeat(5000) });
+    expect(big.bytes).toBeGreaterThan(5000);
+    expect(big.preview.length).toBeLessThanOrEqual(TOOL_AUDIT_PREVIEW_BYTES);
+
+    expect(auditToolResult('execute_cell', undefined).bytes).toBe('undefined'.length);
   });
 });

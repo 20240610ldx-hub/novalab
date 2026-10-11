@@ -7,8 +7,10 @@
  * 输出映射（CellOutput → nbformat outputs，顺序固定）：
  *   stdout              → {output_type:'stream', name:'stdout', text:[行…]}
  *   stderr              → {output_type:'stream', name:'stderr', …}
- *   mime['text/plain'] / mime['image/png']（base64）
+ *   mime['text/plain'] / mime['text/html'] / mime['image/png']（base64）
  *                       → 合并为单个 {output_type:'display_data', data:{…}}（其余 mime 键忽略）
+ *                         text/* 按行数组、image/png 为 base64 单串；text/html 原样导出不消毒
+ *                         （Jupyter 侧按 richest 表示渲染并自行处理信任）
  *   traceback           → {output_type:'error', ename, evalue, traceback:[行…]}
  *                         ename/evalue 从 traceback 最后一个非空行 `Name: msg` 解析，失败回退 Error
  *   writes              → {output_type:'stream', name:'stdout', text:['wrote <path>\n'…]}（A-2 #15 同文案）
@@ -43,7 +45,7 @@ export interface ExportCellOutput {
   stderr?: string;
   /** 完整 traceback 文本（run.error 的 traceback 原文）。 */
   traceback?: string | null;
-  /** mime-type → 文本或 base64（image/png）；string[] 按行数组宽容接受。 */
+  /** mime-type → 文本（text/plain、text/html）或 base64（image/png）；string[] 按行数组宽容接受。 */
   mime?: Record<string, string | string[]>;
   /** run.notify file-write 落盘路径（P2.9）。 */
   writes?: string[];
@@ -115,10 +117,12 @@ export function buildOutputs(out: ExportCellOutput | null | undefined): NbOutput
     res.push({ output_type: 'stream', name: 'stderr', text: toSourceLines(out.stderr) });
   }
   const plain = out.mime?.['text/plain'];
+  const html = out.mime?.['text/html'];
   const png = out.mime?.['image/png'];
-  if (plain !== undefined || png !== undefined) {
+  if (plain !== undefined || html !== undefined || png !== undefined) {
     const data: Record<string, unknown> = {};
     if (plain !== undefined) data['text/plain'] = toSourceLines(mimeText(plain));
+    if (html !== undefined) data['text/html'] = toSourceLines(mimeText(html));
     if (png !== undefined) data['image/png'] = mimeText(png); // base64 单串
     res.push({ output_type: 'display_data', metadata: {}, data });
   }

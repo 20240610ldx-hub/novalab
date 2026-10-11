@@ -7,7 +7,8 @@ import type { Cell, TracebackFrame, VarSchema } from '../kernel/types';
  *  1. 任何进入 payload 的字符串字段先按 MAX_FIELD_BYTES(4KB) 截断；
  *  2. 组装完成后每个 section 再过一次 enforceFieldLimit（本地第二道闸）；
  *  3. schema preview 单独按 PREVIEW_BYTES(200B) 截断（head(1)/repr 级别）；
- *  4. rowsSent 恒为 0 —— DataFrame 全量/行数据永不进入 payload。
+ *  4. 首条消息只含代码/traceback/schema 摘要；Agent 工具调用的返回另由
+ *     auditToolResult 逐条记账（v0.1.1：审计覆盖工具出口，不再声称"0 rows sent"）。
  *
  * 本文件是纯函数集合（不触网、不读 store），vitest 直接覆盖，见 payload.test.ts。
  */
@@ -137,8 +138,6 @@ export interface AssembledPayload {
   schemaCount: number;
   /** 进入 payload 的 traceback 条数（0 | 1）。 */
   tracebackCount: number;
-  /** 硬规则：行级数据永不发送，恒为 0（spec §8 UI chip 契约）。 */
-  rowsSent: 0;
 }
 
 function section(label: string, text: string): PayloadSection {
@@ -157,7 +156,6 @@ function assemble(
     totalBytes: byteLength(text),
     schemaCount: meta.schemaCount,
     tracebackCount: meta.tracebackCount,
-    rowsSent: 0,
   };
 }
 
@@ -192,4 +190,28 @@ export function buildFixPayload(opts: {
 export function buildChatPayload(userText: string): AssembledPayload {
   const sections = [section('user message', userText)];
   return assemble(sections, { schemaCount: 0, tracebackCount: 0 });
+}
+
+/* ---------------- v0.1.1：工具出口审计 ---------------- */
+
+/** 审计条目里保留的结果预览上限（字节）。 */
+export const TOOL_AUDIT_PREVIEW_BYTES = 600;
+
+/** 一次 Agent 工具调用的出口记账（ContextChip 展开逐条列出）。 */
+export interface ToolAuditEntry {
+  tool: string;
+  /** 工具返回值 JSON 的 UTF-8 字节数（= 下一轮发给模型的体积）。 */
+  bytes: number;
+  /** 截断预览（审计面板展示用）。 */
+  preview: string;
+}
+
+export function auditToolResult(tool: string, result: unknown): ToolAuditEntry {
+  let json: string;
+  try {
+    json = JSON.stringify(result) ?? 'undefined';
+  } catch {
+    json = String(result);
+  }
+  return { tool, bytes: byteLength(json), preview: truncateToBytes(json, TOOL_AUDIT_PREVIEW_BYTES) };
 }

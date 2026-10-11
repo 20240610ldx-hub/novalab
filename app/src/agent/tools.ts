@@ -6,6 +6,8 @@ import {
   type AgentToolName,
 } from '@novalab/bridge/mcp-tools';
 import { bridge } from '../bridge/client';
+import { auditToolResult } from './payload';
+import { useAgentStore } from '../store/agent';
 
 /**
  * Agent 工具集的前端形态（spec §7），ai v7 tool() 形态（inputSchema + execute）。
@@ -64,7 +66,12 @@ function buildAgentTools(): Record<AgentToolName, Tool> {
     tools[def.name] = tool({
       description: def.description,
       inputSchema: def.inputSchema,
-      execute: (args: unknown) => executeAgentTool(rpcHost, def.name, args),
+      // v0.1.1：每次工具返回都记账（ContextChip 审计"实际发给模型的工具输出"）
+      execute: async (args: unknown) => {
+        const result = await executeAgentTool(rpcHost, def.name, args);
+        useAgentStore.getState().recordToolResult(auditToolResult(def.name, result));
+        return result;
+      },
     });
   }
   return tools;

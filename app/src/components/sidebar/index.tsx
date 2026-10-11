@@ -11,10 +11,9 @@ import {
 import { bridge } from '../../bridge/client';
 import { useNotebook } from '../../store/notebook';
 import { useSession } from '../../store/session';
-import { useUi } from '../../store/ui';
+import { useLayout } from '../../store/layout';
 import {
   baseName,
-  dirName,
   ensurePySuffix,
   humanSize,
   isNotebookFile,
@@ -39,10 +38,9 @@ import {
 /*   目录在前按名排序、行内 rename 输入框（.py 选中主名保留扩展名）；        */
 /* - crumbs.ts：路径面包屑，点段导航；                                    */
 /* - model.ts：cd/refresh 语义 → 懒加载目录 + ⟳ 全量刷新。                */
-/* A-3 #23：原左缘 icon rail sidebar 已移除——Files 升级为顶栏分段控件      */
-/* `Files | Notebook` 切换的**全幅文件视图**（FilesView：树放大版 + 最近    */
-/* 打开右栏），避免双入口。useWorkspaceSync 由 App 挂载（root 镜像 +        */
-/* 最近打开记录，与视图无关全局生效）。                                     */
+/* v0.1.1 工作台：树回到左侧活动栏 Explorer 视图（ExplorerTree）；最近打开  */
+/* 移至编辑区 Welcome 页。useWorkspaceSync 由 App 挂载（root 镜像 + 最近    */
+/* 打开记录，与视图无关全局生效）。                                         */
 /* ------------------------------------------------------------------ */
 
 interface PromptState {
@@ -81,10 +79,10 @@ function indentPx(depth: number): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* FilesView：全幅文件视图（A-3 #23）= 树（放大版）+ 最近打开右栏            */
+/* ExplorerTree：侧栏工作区树（v0.1.1）                                     */
 /* ------------------------------------------------------------------ */
 
-/** 打开 notebook：同步 ?path=（刷新可恢复）+ store.openNotebook + 切回 Notebook 视图。 */
+/** 打开 notebook：同步 ?path=（刷新可恢复）+ store.openNotebook + 编辑区切到 notebook。 */
 export function useOpenNotebookAbs() {
   return useCallback((abs: string) => {
     const url = new URL(window.location.href);
@@ -92,13 +90,13 @@ export function useOpenNotebookAbs() {
     window.history.replaceState(null, '', url.toString());
     // guard（store/session.ts）会先退出历史只读视图再打开
     void useNotebook.getState().openNotebook(abs);
-    useUi.getState().setView('notebook'); // 双击文件 → 跳转 Notebook 视图
+    useLayout.getState().showNotebook(); // 双击文件 → 编辑区切到 notebook
   }, []);
 }
 
 /**
  * 全局工作区副作用（App 挂载，与视图切换无关）：
- * - fs.root 镜像（header 工作区标题 / FilesView 消费）；
+ * - fs.root 镜像（TitleBar 工作区名 / Explorer / Welcome 消费）；
  * - notebookPath 变化（无论入口）→ 记录最近打开（localStorage）。
  */
 export function useWorkspaceSync() {
@@ -118,50 +116,10 @@ export function useWorkspaceSync() {
   }, []);
 }
 
-export function FilesView() {
+/** 侧栏 Explorer 视图（v0.1.1 工作台）：工作区树，双击 .py 打开到编辑区。 */
+export function ExplorerTree() {
   const openNotebookAbs = useOpenNotebookAbs();
-  // 挂载时读 localStorage（每次切入 Files 视图重挂载 → 列表总是最新）
-  const [recents, setRecents] = useState<RecentEntry[]>(() => {
-    try {
-      return loadRecent(localStorage);
-    } catch {
-      return [];
-    }
-  });
-
-  const removeRecent = (p: string) => {
-    setRecents((list) => {
-      const next = list.filter((e) => e.path !== p);
-      try {
-        saveRecent(localStorage, next);
-      } catch {
-        /* 忽略 */
-      }
-      return next;
-    });
-  };
-
-  const clearRecents = () => {
-    setRecents([]);
-    try {
-      localStorage.removeItem('novalab.recent');
-    } catch {
-      /* 忽略 */
-    }
-  };
-
-  return (
-    <div className="flex min-h-0 flex-1">
-      {/* 全幅文件浏览面板（树放大版：面包屑 + 列表 + 操作菜单） */}
-      <div className="flex min-w-0 flex-1 flex-col bg-[var(--panel)]">
-        <FilesPanel onOpenNotebook={openNotebookAbs} />
-      </div>
-      {/* 最近打开右栏（原 sidebar recent tab 的归处） */}
-      <div className="flex w-80 shrink-0 flex-col border-l border-[var(--border)] bg-[var(--panel)]">
-        <RecentPanel recents={recents} onOpen={openNotebookAbs} onRemove={removeRecent} onClear={clearRecents} />
-      </div>
-    </div>
-  );
+  return <FilesPanel onOpenNotebook={openNotebookAbs} />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -811,68 +769,5 @@ function DeleteDialog({
         </div>
       </div>
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Recent tab（localStorage 最近打开）                                   */
-/* ------------------------------------------------------------------ */
-
-function RecentPanel({
-  recents,
-  onOpen,
-  onRemove,
-  onClear,
-}: {
-  recents: RecentEntry[];
-  onOpen: (abs: string) => void;
-  onRemove: (p: string) => void;
-  onClear: () => void;
-}) {
-  return (
-    <>
-      <div className="flex items-center gap-1 border-b border-[var(--border)] px-2 py-1.5">
-        <span className="min-w-0 flex-1 text-[11px] tracking-wider text-[var(--muted)] uppercase">recent</span>
-        {recents.length > 0 && (
-          <button
-            type="button"
-            onClick={onClear}
-            title="清空最近打开"
-            className="rounded px-1 text-[11px] text-[var(--muted)] hover:bg-[var(--bg)] hover:text-[var(--text)]"
-          >
-            清空
-          </button>
-        )}
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
-        {recents.length === 0 && (
-          <p className="p-2 text-[11px] text-[var(--muted)]">暂无最近打开记录。</p>
-        )}
-        {recents.map((r) => (
-          <div
-            key={r.path}
-            className="group flex cursor-default items-center gap-1.5 rounded px-2 py-1 text-[12px] hover:bg-[var(--bg)]"
-            title={r.path}
-            onDoubleClick={() => onOpen(r.path)}
-          >
-            <span aria-hidden className="shrink-0 text-[11px]" style={{ color: 'var(--accent-run)' }}>
-              ◈
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[var(--text)]">{baseName(r.path)}</span>
-              <span className="block truncate text-[10px] text-[var(--muted)]">{dirName(r.path)}</span>
-            </span>
-            <button
-              type="button"
-              title="从列表移除"
-              onClick={() => onRemove(r.path)}
-              className="shrink-0 rounded px-1 text-[var(--muted)] opacity-0 hover:text-[var(--text)] group-hover:opacity-100"
-            >
-              ×
-            </button>
-          </div>
-        ))}
-      </div>
-    </>
   );
 }

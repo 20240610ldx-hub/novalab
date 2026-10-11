@@ -27,6 +27,9 @@
   --tab-active: #1d1d21; /* active tab pill = 提亮底（A-4 #6） */
   --gutter-fg: #6a6a72; /* CM6 行号（A-4 #8） */
   --active-line: rgba(255, 255, 255, 0.025);
+  /* v0.1.1 工作台：标题栏/活动栏/状态栏 = chrome；侧栏与 Agent 栏 = side（介于 chrome 与编辑区之间） */
+  --chrome: #0f0f11;
+  --side: #121214;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -55,6 +58,8 @@
   --tab-active: #ffffff;
   --gutter-fg: #b0b0b0;
   --active-line: rgba(0, 0, 0, 0.03);
+  --chrome: #ececec;
+  --side: #f4f4f4;
 }
 
 html,
@@ -88,6 +93,56 @@ body {
   border-radius: 4px;
   background: var(--err-panel);
   color: var(--err-text);
+}
+
+/* ---- text/html 表格输出（ADR-011） ----
+ * 内核 HTML 经白名单重建后不带任何 class / style，观感全部由这里给：
+ * 套在中性面板内（复用 420px 内部滚动；宽表横向滚动），表头吸顶，
+ * 数值右对齐等宽数字（Jupyter DataFrame 惯例），颜色全走 token → 双主题自适应。
+ * 用 separate + spacing 0 而非 collapse：collapse 下吸顶表头的边框不随之吸附。 */
+.nl-out-html {
+  width: max-content;
+  min-width: 100%;
+  padding: 0 4px 4px;
+}
+.nl-out-html table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.nl-out-html th,
+.nl-out-html td {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  vertical-align: top;
+  white-space: nowrap;
+}
+/* 吸顶挂在 thead 而非 th：多级列索引有多行表头，逐 th 吸顶会叠在同一行位。 */
+.nl-out-html thead {
+  position: sticky;
+  top: 0;
+}
+.nl-out-html thead th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 500;
+}
+.nl-out-html tbody th {
+  color: var(--muted);
+  font-weight: 400;
+}
+.nl-out-html tbody tr:last-child > * {
+  border-bottom: none;
+}
+.nl-out-html tbody tr:hover > * {
+  background: var(--active-line);
+}
+.nl-out-html caption,
+.nl-out-html p {
+  padding: 6px 12px;
+  color: var(--muted);
+  text-align: left;
 }
 
 /* 细滚动条（#22）：webkit + firefox 双轨 */
@@ -205,4 +260,21 @@ span[title='最近一次运行失败'] {
 }
 [data-theme='light'] .nl-bi {
   color: #0e7490;
+}
+
+/* ---- v0.1.1 工作台分隔条（VS Code sash）：静止 = 1px 边框线；hover/拖拽/聚焦 = 琥珀高亮 ---- */
+.nl-sash::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background-color 120ms, width 120ms;
+}
+.nl-sash:hover::before,
+.nl-sash:focus-visible::before,
+.nl-sash:active::before {
+  width: 3px;
+  background: var(--accent-run);
 }

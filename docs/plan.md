@@ -1,6 +1,6 @@
 # NovaLab 实施计划（Plan）
 
-> 状态：v0.1 · 2026-10-06 · 上游：[intent.md](intent.md) · [spec.md](spec.md)
+> 状态：v0.1 · 2026-10-06（2026-10-10 增补 §5b v0.1.1） · 上游：[intent.md](intent.md) · [spec.md](spec.md)
 > 周期口径：1 周 = 5 个工作日；W1 从开工日算起。任务 id：`P<阶段>.<序号>`，spike `S< n>`，门 `G<n>`。
 
 ---
@@ -41,7 +41,7 @@
 | P1.5 | 反应式 UI 联动：stale 徽章、级联运行流式刷新、编译错行内提示 | intent §8 演示脚本前半段 | P1.4 | ✅ 完成（store reducer + compileErrors 行内提示；stale 传递闭包经集成冒烟验证） |
 | P1.6 | KernelStatusBar + InlineREPL + LivePill（截图元素 2/6/7） | REPL 输出回灌匿名 cell | P1.4 | ✅ 完成（按冻结契约改为单一持久 [repl] cell；dead pill 点击重启） |
 | P1.7 | Tauri 壳 devUrl 模式接入（spawn bridge、窗口、图标占位） | 双击桌面图标 = 浏览器同等体验 | P1.5 | ✅ 闭环（2026-10-06）：VCTools 补装于 VS18（Owner 执行）、图标集 `tauri icon` 生成、cargo check 绿；宿主两坑归档：Git usr\bin 的 coreutils link.exe 劫持 → 仓库级 rust-lld 免疫（.cargo/config.toml）；stable rustc 拒显式 msvc-lld flavor → 目标默认风味自动配对 |
-| P1.8 | .py 打开/保存/新建 + sidecar `.novalab/` + 崩溃恢复横幅 | 改文件外部→热重载提示 | P1.5 |
+| P1.8 | .py 打开/保存/新建 + sidecar `.novalab/` + 崩溃恢复横幅 | 改文件外部→热重载提示 | P1.5 | ✅ 完成（watch/ui-store 测试；崩溃横幅真机未拍，见功能矩阵） |
 | **D1** | **阶段演示**：intent §8 脚本除 Agent 段外全通（断网） | 录屏存档 `docs/demos/p1.gif` | 全部 |
 
 ## 3. 阶段 2 · Agent 闭环与 Diff（W5–W7）
@@ -55,8 +55,8 @@
 | P2.5 | One-click Fix 卡片：traceback+相关 schemas 自动附着、ContextChip 审计展开 | intent §8 全脚本通网版 |
 | P2.6 | MCP server (stdio) 对外暴露 + `novalab://` resources；Claude Code 实连演示 | 外部 Agent 提议 → 前端弹审阅 |
 | P2.7 | PreviewSerializer 硬截断 + 发送审计 UI | >4KB  fuzz 必截单测 | ✅ bridge 侧完成（I 线）；审计 chip 随 G2 线 |
-| P2.8 | **文件与会话管理**（M8/M9，第四波 J 线）：左侧文件树 + bridge fs.*（越界拒绝）+ 会话历史/只读浏览/ended 态/截断横幅/cell 计数；交互参考 refs/jupyterlab filebrowser | 双包绿 + 手测开/建/改/删文件与只读会话 | 进行中 |
-| P2.9 | **错误 UX 与写事件**（附录 A-2 #11/15/17，第四波 K 线）：error(line N) 徽章 + 编辑器红行高亮；内核 addaudithook('open') 写钩子 → run.notify → `wrote …` 通知行；matplotlib inline 验证 | py/app 双绿 + 真机截图 | 进行中 |
+| P2.8 | **文件与会话管理**（M8/M9，第四波 J 线）：左侧文件树 + bridge fs.*（越界拒绝）+ 会话历史/只读浏览/ended 态/截断横幅/cell 计数；交互参考 refs/jupyterlab filebrowser | 双包绿 + 手测开/建/改/删文件与只读会话 | ✅ 完成 |
+| P2.9 | **错误 UX 与写事件**（附录 A-2 #11/15/17，第四波 K 线）：error(line N) 徽章 + 编辑器红行高亮；内核 addaudithook('open') 写钩子 → run.notify → `wrote …` 通知行；matplotlib inline 验证 | py/app 双绿 + 真机截图 | ✅ 完成 |
 | **D2** | 阶段演示：报错→Fix→Diff→Tab→级联绿 全闭环 | `docs/demos/p2.gif` |
 
 ## 4. 阶段 3 · 上下文深潜与多内核（W8–W10）
@@ -73,6 +73,29 @@ P3.6 marimo ↔ NovaLab .py 双向转换器（2–4 人日，S1 侦察估计；j
 
 P4.1 CI/CD：tauri-action 双平台产物 + 签名占位；GitHub Actions Release run `38066573600` 已验收 Windows NSIS/MSI、Linux AppImage/deb 与两平台真实启动 smoke；后续 CI 已加入构建后 bundle 产物检查（Windows NSIS payload、Linux AppImage/deb）。**Owner 裁决（2026-10-07）：Apache-2.0 开源直发**——LICENSE/NOTICE/CONTRIBUTING/CHANGELOG/.github workflows（ci + release-on-tag）先行；签名 secrets、版本号联动和 updater 仍待补。**P4.1b sidecar（Owner 裁决按建议案）**：bridge = externalBin node.exe + esbuild 单文件 JS resource；kernel = uv.exe sidecar 首启 `uv python install + uv sync` + BYO 兜底；identifier 保持 dev.novalab.app（macOS 后缀警告接受）；
 P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（P1 全链路 / P2 修错闭环）→ docs/demos/reels/，矩阵 D 行闭环；P4.2 App View 模式；P4.3 亮色主题 + i18n 骨架（Q3）；P4.4 首启引导（uv 环境自检/修复向导，intent 风险章）；P4.5 公测发布页 + 开源仓库整理（Q4 许可证落定）。
+
+## 5b. v0.1.1 · 加固与工作台（2026-10-10，评估后 Owner 裁决"按建议推进"）
+
+| id | 任务 | 状态 |
+|---|---|---|
+| H1 | Bridge 鉴权（ADR-009）：`/bridge-info` discovery + Origin 白名单 + `bridge.auth` token；LLM 代理 token 头 | ✅（main `0877485`） |
+| H2 | 隐私收紧：`get_cell_output` 只回 traceback + mime 键（main `0877485`）；审计 chip 记录每次工具返回、去掉常量 "0 rows sent" | ✅ |
+| H3 | CI 画廊回绿：钉 en、选择器去中文文案依赖；新增 00-welcome 态 | ✅ 本地全绿（11 态无凭据降级为预期） |
+| H4 | 工作台布局（ADR-010）：标题栏 / 活动栏 / 可缩放侧栏（Explorer · Sessions · Variables）/ 编辑区 / 可缩放 Agent 栏 / 状态栏 | ✅ |
+| H5 | Welcome 页（JupyterLab 式）取代首启模态；常驻环境自检；`bridge.mcpLaunch` 回报 MCP 命令 | ✅ |
+| H6 | Session notebook 对齐 Claude Science（spec 附录 A-5） | ✅ |
+| H7 | 文档同步：intent / spec / plan / 功能矩阵 / CHANGELOG / README / SECURITY | ✅ |
+| H8 | 量化指标基准脚本 `scripts/bench.mjs`（intent §8） | ✅（数字需空闲机器重测） |
+| H9 | 普通 cell 尾表达式回显（L-5）、text/html 白名单表格渲染（ADR-011 提案）、.ipynb 导出含 text/html | ✅ |
+
+**下一步（按优先级）**
+1. **Owner 真实数据自用验收**：装 v0.1.1 安装包，用一份人口预测或 POI 清洗工作跑 intent §3 N1–N4，记录卡点（这是目前最缺的信号：发布页下载数为 0）。
+2. ~~普通 cell 尾表达式显示~~ ✅ 内核回显（L-5）+ 前端表格渲染（ADR-011 提案，**待 Owner 裁决**）+ .ipynb 导出含 text/html。
+3. ~~量化指标基准~~ ✅ `scripts/bench.mjs`（2026-10-10 首测：3 项达标，滚动 57.9fps 需真机复核）；剩余：Tauri 窗口首帧计时、重输出 notebook 场景、安装包体积（37MB vs 目标 20MB）。
+4. **首启离线/镜像安装**：可配 PyPI / python-build-standalone 镜像，或预置 wheel 的离线包；国内网络下首启是最大失败点。
+5. **i18n 深度迁移**：侧栏树、AgentPanel、FixCard 等仍为硬编码中文。
+6. **Tauri CSP 收紧**（当前 `csp: null`）与代码签名 secrets。
+7. 清理：`claude/suspicious-banach-bfca7a` 分支落后 main 32 commit，可删除。
 
 ---
 
@@ -103,7 +126,7 @@ P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（
 依赖纪律：app 不 import bridge 运行时（仅类型）；py 零第三方硬依赖起步（websockets 除外），pandas 等进 introspect 可选 extras。
 环境清单（已装/待装）：node deps 见 `app|bridge/package.json`；py venv `.venv`（uv）：`websockets, pytest`，extras：`pandas, marimo(spike 参考)`。
 
-## 9. 下一步（Owner 裁决后即刻可开工）
+## 9. 下一步（历史：2026-10-06 开工前清单，已全部完成；当前下一步见 §5b）
 
 1. ~~回答 intent §7 的 Q1–Q7~~ ✅ 2026-10-06 已裁决（Q7 的值待 Owner 填入 `app/.env.local`）；
 2. 我按 G1 流程跑 S1+S2 并出 `docs/adr/001-kernel-route.md` 终稿；

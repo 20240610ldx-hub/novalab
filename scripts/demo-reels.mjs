@@ -246,8 +246,8 @@ async function openNotebook(page, file) {
   // 新鲜 context 无 onboarded flag → 首启引导模态拦截操作（与画廊同因）
   await page.addInitScript(() => {
     try {
-      localStorage.setItem('novalab.onboarded', '1');
-      localStorage.setItem('novalab.view', 'notebook');
+      localStorage.setItem('novalab.lang', 'en');
+      localStorage.removeItem('novalab.layout');
     } catch {
       /* 忽略 */
     }
@@ -420,18 +420,19 @@ async function runD1(page, bridge, notes) {
   await openNotebook(page, DEMO_PY);
   await pace(page, 700);
 
-  // ViewSwitcher（Files | Notebook，Q 线 A-3 #23 已挂载）：切一眼文件视图再切回；
-  // 未挂载的旧版则跳过（前向兼容）
-  const vs = page.locator('div[role="group"][aria-label="视图切换"]');
-  if (await vs.count()) {
-    await vs.locator('button[title="Files 视图"]').click();
-    await page.waitForSelector('[role="treeitem"]', { timeout: 10000 }).catch(() => {});
-    await pace(page, 800);
-    await vs.locator('button[title="Notebook 视图"]').click();
+  // v0.1.1 工作台：侧栏 Explorer 树一眼 → 切 Welcome tab 一眼 → 回 notebook tab
+  await page.waitForSelector('[data-testid="side-panel"] [role="treeitem"]', { timeout: 10000 }).catch(() => {});
+  await pace(page, 600);
+  const welcomeTab = page.locator('[data-testid="tab-welcome"]');
+  if (await welcomeTab.count()) {
+    await welcomeTab.click();
+    await page.waitForSelector('[data-testid="welcome"]', { timeout: 10000 });
+    await pace(page, 900);
+    await page.locator('[role="tab"]').first().click();
     await page.waitForSelector('section[data-cell-id="a1b2c3d4"] .cm-editor', { timeout: 15000 });
     await pace(page, 400);
   } else {
-    notes.push('d1: ViewSwitcher 未挂载 → 文件视图一眼跳过');
+    notes.push('d1: Welcome tab 未挂载 → 跳过');
   }
 
   // 首跑三格（▶ 按钮），逐格展开输出。注意 execCount 是"每格"计数（各格首跑均 [1]，
@@ -493,7 +494,7 @@ async function runD1(page, bridge, notes) {
   await page.locator('button[title^="Session notebook —"]').click();
   const dialog = page.locator('[role="dialog"][aria-label="Session notebook"]');
   await dialog.waitFor({ timeout: 10000 });
-  await dialog.locator('section button[aria-expanded]').first().waitFor({ timeout: 15000 });
+  await dialog.locator('[data-testid="session-group"] > button[aria-expanded]').first().waitFor({ timeout: 15000 });
   await pace(page, 600);
   const status = dialog.locator('footer p[aria-live="polite"]');
   await dialog.locator('footer button:text-is(".ipynb")').click();
@@ -507,7 +508,7 @@ async function runD1(page, bridge, notes) {
   if (!fs.existsSync(m[1])) throw new Error('导出 .ipynb 未落盘: ' + m[1]);
   notes.push(`d1: export.ipynb 落盘 ${path.relative(root, m[1])}（${m[2]} cells · ${m[3]} outputs）`);
   await pace(page, 800); // 导出成功态停留一眼
-  await dialog.locator('button[aria-label="关闭"]').click();
+  await dialog.locator('button[aria-label="close"]').click();
   await dialog.waitFor({ state: 'detached', timeout: 5000 });
   await pace(page, 400);
 }

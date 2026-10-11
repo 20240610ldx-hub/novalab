@@ -46,7 +46,11 @@ function stateTitle(t: TFn, tab: NotebookTab): string {
   return t('tab.stateTitle', { state: tab.kernelState, mem, path: tab.path });
 }
 
-export function TabBar() {
+/**
+ * @param dimActive 编辑区正显示 Welcome 时为 true：当前 tab 不再呈 selected 态
+ *   （aria-selected=false → 去掉 active pill 样式），点击它即回到 notebook。
+ */
+export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const tabs = useNotebooks((s) => s.tabs);
   const activeId = useNotebooks((s) => s.activeId);
   const switchTab = useNotebook((s) => s.switchTab);
@@ -130,7 +134,7 @@ export function TabBar() {
           <div
             key={tab.notebookId}
             role="tab"
-            aria-selected={active}
+            aria-selected={active && !dimActive}
             title={stateTitle(t, tab)}
             onClick={() => void switchTab(tab.notebookId)}
             className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-t border border-b-0 px-2.5 py-1 text-[12px] ${

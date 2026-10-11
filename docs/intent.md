@@ -1,7 +1,7 @@
 # NovaLab 意图文档（Intent & 需求头脑风暴）
 
-> 状态：v0.1 头脑风暴初稿，待用户裁决第 7 节开放问题
-> 日期：2026-10-06
+> 状态：v0.1 已裁决（§7 全部拍板）；2026-10-10 增补 ADR-009（WS 鉴权）、ADR-010（工作台布局）与 M5 收紧
+> 日期：2026-10-06（初稿）· 2026-10-10（v0.1.1 修订）
 > 配套文档：[spec.md](spec.md)（技术规格）· [plan.md](plan.md)（实施计划）
 > 参考代码：`refs/marimo`（反应式内核）、`refs/codemirror-merge`（行内 Diff）、`refs/vercel-ai`（Agent SDK）
 
@@ -88,7 +88,7 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 - **M2 纯 .py 主存储**：自定 `# %% [cell-id]` cell 块格式 + 头部配置注释，git 友好、零 JSON 冲突；marimo 互操作 = 单向宽容导入 + 转换器导出（P3.6；S1 侦察修正：marimo 原生为 @app.cell 装饰器式、文件内无 id，与本格式互不直读）。
 - **M3 单元格编辑器**：CodeMirror 6 多实例、行号、Python 高亮、块内横滚、可折叠 output、执行计数徽章。
 - **M4 修错闭环**：traceback 自动捕获 → Agent One-click Fix 卡片 → 行内红绿 Diff → `Tab` 采纳（自动触发运行）/ `Esc` 撤销；Agent 写入永远 staged，禁止静默改文件。
-- **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。
+- **M5 隐私边界**：出进程的内容仅限 代码文本 / traceback / DAG 结构 / 变量 schema / `head(1)` 级预览；有显式 UI 指示"本次发送了什么"。**2026-10-10 收紧**：cell 的 stdout/stderr 与写入路径不在白名单内（`print(df)` 即原始数据），Agent 工具 `get_cell_output` 只返回 traceback 与 MIME 类型键；审计须覆盖每次工具返回，不得以常量声称"0 rows sent"。
 - **M6 模型解耦**：设置面板填 Anthropic / OpenAI / DeepSeek / 本地 Ollama(vLLM) 的 base_url+key；离线模型可全脱网运行。
 - **M7 内核状态栏 + 底部 REPL**：复刻截图元素 6、7。
 - **M8 工作区文件管理**（2026-10-06 增补，Owner 指出缺基本功能）：左侧可折叠文件树（workspace root 可设、.py 双击打开、新建/重命名/删除带确认、路径越界拒绝）；交互参考 refs/jupyterlab `packages/filebrowser`，视觉 clean-room。
@@ -140,6 +140,27 @@ Bridge 从第一天就是独立进程（node），前端 `pnpm dev` 浏览器直
 ### ADR-008 开发自测端点与凭据纪律：**cc-switch tokenplan + gitignored .env.local**
 Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名为 `tokenplan` 的 URL 与 API Key（Anthropic 兼容代理）。凭据纪律：**项目永不自动读取任何凭据存储**（权限分类器亦拦截此类凭据探索）；两个值由 Owner 手动填入 `app/.env.local`（已 gitignore），`app/src/agent/providers.ts` 只读该文件；P2.1 设置面板上线后迁移 keychain/加密配置。
 
+### ADR-009 本机通道鉴权：**Origin 白名单 + 启动 token**（Owner 裁决 2026-10-10）
+背景：WebSocket 握手不受浏览器 CORS 约束，任意网页都能连 `ws://127.0.0.1:7788`，而该通道可执行任意 Python、读写工作区——与"数据不出门"直接冲突。
+- 选项 A：只校验 Origin。挡住远程网页与 DNS rebinding，挡不住同机其他进程与 loopback 上其他端口的页面。
+- 选项 B：只要求 token。需要安全的 token 分发渠道，浏览器侧仍应拒绝异域 Origin 作为纵深防御。
+- **结论：两层都做**。Bridge 在 loopback 上起 HTTP + WS：`GET /bridge-info` 与 WS upgrade 都要求 Origin 在白名单内（vite dev 的 localhost/127.0.0.1 5000–5999 端口、Tauri webview；**缺 Origin 同样拒绝**，因此 DNS rebinding 后的同源请求也拿不到 token）；`/bridge-info` 下发每次启动随机 token（或 `NOVALAB_BRIDGE_TOKEN`）与实际端口；WS 连上后 3 秒内首条消息必须是 `bridge.auth {token}`，否则以 1008 关闭，未认证连接收不到任何广播；LLM 代理校验请求头 `x-novalab-bridge-token`。剩余边界：与用户同权限的本地进程可伪造 Origin 头——等同于能读用户全部数据，不在防护范围内。
+
+### ADR-010 工作台布局：**VS Code / JupyterLab 式**（Owner 裁决 2026-10-10）
+取代 Q 线 A-3 #23 的顶栏 `Files | Notebook` 切换。上下两条细栏放必要操作与提示（标题栏：工作区 · 会话 pill · 布局/主题/App View；状态栏：连接 · 内核 · 隐私策略 · provider · cell 数）；左侧图标活动栏 → 可缩放的详细侧栏（资源管理器 / 会话 / 变量）；中间编辑区（Welcome 引导页 + notebook tabs）；右侧可缩放 Agent 栏。引导页采用 JupyterLab Welcome 样式（Start / Recent / Environment / Keyboard），首启模态并入其中。notebook 编辑区与 Session notebook 模态继续逐元素对齐 Claude Science（附录 A、A-2、A-3、A-5）。
+
+### ADR-011 内核 text/html 输出渲染：**解析后白名单重建（仅表格 / 行内格式），不用 iframe、不引消毒依赖**
+> 状态：**提案，随实现一并提交，待 Owner 裁决**（ADR-009 / ADR-010 已裁决，本条尚未）。
+
+背景：L-5 起普通 cell 收尾裸表达式会发 run.mime `text/plain`，对象有 `_repr_html_()`（pandas DataFrame）时再发 `text/html`。这段 HTML 来自内核，要在 Tauri webview 主框架里显示，而 Tauri CSP 仍是待办。威胁不在"用户自己写的代码"（内核本就能执行任意代码），而在**数据经劣质 repr 未转义地流进标签**（不可信 CSV 的单元格、`to_html(escape=False)`、第三方库的 `_repr_html_`）：一旦在主框架执行脚本，可触达 bridge WS（含经它转发的 LLM 代理）与 Tauri IPC。
+- 选项 A：`<iframe sandbox srcDoc>`（不给 allow-scripts）。得：浏览器强制隔离、保真度最高（保留 pandas 自带样式 / Styler 着色）。失：无 allow-same-origin 时父页量不到子文档高度、子文档无脚本也报不了高度 → 4 行表与 60 行表只能给同一固定高度，破坏输出面板"短输出无滚动条、长输出 420px 内滚"的约定；给 allow-same-origin 能量高度但审计面变微妙；iframe 不继承 design token，暗 / 浅主题色须注入 srcDoc 并在切主题时重建；外链资源（img / CSS url）与 meta refresh 仍可外发请求，还得再叠一层 meta CSP 或消毒；每个输出一个文档，不利于 100 cell 60fps。
+- 选项 B：**解析后重建**。`DOMParser`（惰性文档：不执行脚本、不加载资源）→ 遍历节点树 → 只产出白名单标签（表格族 + 行内格式 + div/p/pre/br/hr/ul/ol/li）与 `colspan` / `rowspan` 两个整数属性 → React `createElement` 渲染。得：全程不把 HTML 串写回 DOM，不存在 mutation-XSS；白名单内没有任何带 URL 的属性，也没有 style / class / id / on*，**零脚本面、零网络外发面**，安全论证只有几十行可审计代码；原生 DOM 直接继承 token、自然高度、复用 `.nl-out-panel`；零新依赖。失：丢样式（Styler 着色、库自带 CSS）；依赖脚本的 repr（plotly / bokeh / altair）无法呈现。
+- 选项 C：引入 DOMPurify + `dangerouslySetInnerHTML`。得：成熟、保真度介于 A / B。失：新增安全关键依赖须持续跟版本；仍是"过滤后回写 HTML 串"，历史上 mXSS 绕过多出自这一步；保留 style / class 后还要处理与全局样式的相互污染。
+- 选项 D：直接 `dangerouslySetInnerHTML`。否。
+- **结论（提案）**：取 B。范围刻意收窄为"表格型 HTML"：消毒结果含 `<table>` 且有文本才以 HTML 渲染，否则回落 `text/plain` 面板并保留灰字 `unrendered mime: text/html`（与未知 mime 同一降级观感，不静默吞掉富表示的存在）。展示语义取 Jupyter richest-representation：有 `text/html` 即取代 `text/plain`，不并列显示。防护叠层：内核侧单条 1e6 字符上限（L-5）+ 前端 20 000 节点预算（超出截断并注记）。
+- 不变量：ADR-006 隐私边界不动——mime 数据只到前端广播与 .ipynb 导出缓冲，agent 读面仍只见 `mimeKeys`（bridge `router.agent.test.ts` 钉住）。
+- 后续（不在本条范围）：① Tauri CSP 落地后本方案无需放宽（不需要 `unsafe-inline`），二者叠加；② 需要保真富输出（Styler 着色、plotly）时另立 ADR 评估"每输出独立 sandbox iframe + 显式信任开关"；③ ~~.ipynb 导出丢 `text/html`~~ 已随本批补上（live 会话导出含 text/html，原样不消毒，交由 Jupyter 的信任模型）。
+
 ---
 
 ## 7. 开放问题（头脑风暴交互点）— ✅ 2026-10-06 已全部裁决
@@ -164,6 +185,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 打开 `demo.py` → 编辑上游 cell → 下游自动标 stale → 运行级联转绿 → 人为制造 `KeyError` → Fix 卡片浮现（附 traceback+schema）→ 行内 Diff → `Tab` 采纳自动重跑转绿 → 底部 REPL 直接查询变量 → 导出 .ipynb。
 
 **量化指标**：冷启动（双击→可编辑）< 3s；cell 运行附加开销 < 50ms；100 cell 滚动 60fps；Bridge 常驻内存 < 150MB；安装包（P4）< 20MB。
+> 2026-10-10 首次实测（`node scripts/bench.mjs --ui`，dev 形态）：冷启动 1.3s（不含 Tauri 窗口）、cell 附加开销中位数 0.9ms、bridge RSS ≈100MB 均达标；100 cell 滚动 57.9fps（headless，需真机复核）。v0.1.0 安装包 NSIS 37MB / MSI 55MB，另需首启联网下载约 450MB 运行时——"断网可跑"目前只对已完成首启的机器成立。见 plan §5b。
 
 ---
 

@@ -88,7 +88,7 @@ describe('段 header 与计数', () => {
 
 /* ---- A-3 #24：完整 cell 卡派生 selector（Q 线） ---- */
 
-import { errorLineFromTraceback, execBadge, snapshotHasOutput } from './selectors';
+import { errorLineFromTraceback, execBadge, groupMeta, groupTitle, plural, shortId, snapshotHasOutput } from './selectors';
 
 const TB_SAMPLE = [
   'Traceback (most recent call last):',
@@ -126,5 +126,31 @@ describe('snapshotHasOutput / execBadge', () => {
   it('execBadge：execCount>0 用计数，否则 1-based 序号', () => {
     expect(execBadge(snap({ execCount: 7 }), 0)).toBe('[7]');
     expect(execBadge(snap({ execCount: 0 }), 2)).toBe('[3]');
+  });
+});
+
+describe('v0.1.1 分组行 selector（对齐 Claude Science）', () => {
+  it('shortId 取尾 8 位字母数字', () => {
+    expect(shortId('s-2026-10-10T13-10-00-ab69ee31')).toBe('ab69ee31');
+    expect(shortId('abc')).toBe('abc');
+  });
+  it('plural', () => {
+    expect(plural(1, 'cell')).toBe('1 cell');
+    expect(plural(39, 'cell')).toBe('39 cells');
+  });
+  it('groupTitle / groupMeta', () => {
+    const seg = {
+      sessionId: 'sess-ab69ee31',
+      startedAt: '2026-10-10T05:10:00.000Z',
+      cellCount: 39,
+      source: 'local' as const,
+      live: false,
+      parts: 2,
+      partStarts: [],
+    };
+    expect(groupTitle(seg)).toBe('NovaLab');
+    expect(groupTitle({ source: 'agent' })).toBe('Agent');
+    expect(groupMeta(seg).startsWith('ab69ee31 · ')).toBe(true);
+    expect(groupMeta(seg)).toContain('39 cells · 2 segments');
   });
 });
