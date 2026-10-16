@@ -1,7 +1,9 @@
 import { tool, type JSONValue, type Tool } from 'ai';
+import { z } from 'zod';
 import {
   AGENT_TOOL_DEFS,
   executeAgentTool,
+  sanitizeToolOutput,
   type AgentToolHost,
   type AgentToolName,
 } from '@novalab/bridge/mcp-tools';
@@ -23,6 +25,12 @@ import { useAgentStore } from '../store/agent';
  * （bridge 客户端把 error.message "method not found: xxx" 包成 Error）。safeRpc 捕获后
  * 返回 {bridgeUpgradeNeeded: true, ...} 作为工具输出——模型可读到并停手，
  * AgentPanel 渲染 "bridge 待升级" 提示条，不崩溃。
+ *
+ * M5 第二道闸（ADR-012 D3，与 harness 选型无关）：execute 的返回值先过
+ * sanitizeToolOutput（单一来源白名单，见 bridge/src/mcp/output-whitelist.ts）再交给模型——
+ * bridge agent.* 出口若回归（例如 agent.cellOutput 误带 stdout / 写文件路径），
+ * 白名单外的键在这里被丢弃并记入 ContextChip 审计（droppedKeys）；形状不符则整条替换为占位。
+ * UI 渲染的也是过闸后的值：模型与用户看到同一份，不存在"未过闸副本"。
  */
 
 /** AgentPanel 与模型共用的升级提示文案。 */
@@ -60,6 +68,20 @@ const rpcHost: AgentToolHost = {
   invoke: (method, params) => safeRpc(method, params),
 };
 
+/** safeRpc 自产的两种非数据结果：过闸时先于工具白名单匹配（同样 strip + 4KB 截断）。 */
+const SAFE_RPC_ENVELOPE = z.union([
+  z.object({ bridgeUpgradeNeeded: z.literal(true), method: z.string(), error: z.string() }),
+  z.object({ toolError: z.string(), method: z.string() }),
+]);
+
+/** 执行单一来源工具并过 M5 第二道闸；审计记录过闸后的实际出口。 */
+export async function runGatedTool(name: AgentToolName, args: unknown): Promise<JSONValue> {
+  const raw = await executeAgentTool(rpcHost, name, args);
+  const gate = sanitizeToolOutput(name, raw, { envelope: SAFE_RPC_ENVELOPE });
+  useAgentStore.getState().recordToolResult(auditToolResult(name, gate.output, gate));
+  return gate.output as JSONValue;
+}
+
 function buildAgentTools(): Record<AgentToolName, Tool> {
   const tools = {} as Record<AgentToolName, Tool>;
   for (const def of AGENT_TOOL_DEFS) {
@@ -67,11 +89,7 @@ function buildAgentTools(): Record<AgentToolName, Tool> {
       description: def.description,
       inputSchema: def.inputSchema,
       // v0.1.1：每次工具返回都记账（ContextChip 审计"实际发给模型的工具输出"）
-      execute: async (args: unknown) => {
-        const result = await executeAgentTool(rpcHost, def.name, args);
-        useAgentStore.getState().recordToolResult(auditToolResult(def.name, result));
-        return result;
-      },
+      execute: (args: unknown) => runGatedTool(def.name, args),
     });
   }
   return tools;

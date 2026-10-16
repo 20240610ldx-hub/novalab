@@ -131,6 +131,8 @@ export const zh: Record<keyof typeof en, string> = {
   'chip.none': '尚未发送任何请求。',
   'chip.lastRequest': '最近一次请求 · {sections} 段 · 共 {bytes} B（单段硬上限 4096 B）',
   'chip.toolsHeader': '返回给模型的工具结果 · {count} 次 · 共 {bytes} B',
+  'chip.toolRedacted': '已被隐私白名单拦截（形状不符）',
+  'chip.toolDropped': '隐私白名单已丢弃：{keys}',
   'wb.activityBar': '活动栏',
   'wb.explorer': '资源管理器',
   'wb.sessions': '会话',

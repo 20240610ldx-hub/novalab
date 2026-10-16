@@ -130,6 +130,8 @@ export const en = {
   'chip.none': 'No request sent yet.',
   'chip.lastRequest': 'Last request · {sections} sections · {bytes} B (each section capped at 4096 B)',
   'chip.toolsHeader': 'Tool results returned to the model · {count} · {bytes} B',
+  'chip.toolRedacted': 'withheld by privacy whitelist (unexpected shape)',
+  'chip.toolDropped': 'privacy whitelist dropped: {keys}',
   'wb.activityBar': 'Activity bar',
   'wb.explorer': 'Explorer',
   'wb.sessions': 'Sessions',

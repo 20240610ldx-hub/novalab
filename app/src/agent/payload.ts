@@ -204,14 +204,29 @@ export interface ToolAuditEntry {
   bytes: number;
   /** 截断预览（审计面板展示用）。 */
   preview: string;
+  /** M5 第二道闸丢弃的白名单外键路径（非空 = bridge agent.* 出口回归）。 */
+  droppedKeys: string[];
+  /** 整条被第二道闸替换为占位（未知工具 / 形状不符）。 */
+  redacted: boolean;
 }
 
-export function auditToolResult(tool: string, result: unknown): ToolAuditEntry {
+/** result 须是**过闸后**实际交给模型的值；gate 携带第二道闸的处置记录。 */
+export function auditToolResult(
+  tool: string,
+  result: unknown,
+  gate: { droppedKeys: string[]; redacted: boolean } = { droppedKeys: [], redacted: false },
+): ToolAuditEntry {
   let json: string;
   try {
     json = JSON.stringify(result) ?? 'undefined';
   } catch {
     json = String(result);
   }
-  return { tool, bytes: byteLength(json), preview: truncateToBytes(json, TOOL_AUDIT_PREVIEW_BYTES) };
+  return {
+    tool,
+    bytes: byteLength(json),
+    preview: truncateToBytes(json, TOOL_AUDIT_PREVIEW_BYTES),
+    droppedKeys: gate.droppedKeys,
+    redacted: gate.redacted,
+  };
 }
