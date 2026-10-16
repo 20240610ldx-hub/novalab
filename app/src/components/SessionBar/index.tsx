@@ -196,7 +196,7 @@ export function SessionStatusPill() {
   const notebookPath = useNotebook((s) => s.notebookPath);
   const kernelState = useNotebook((s) => s.kernelState);
   const restartKernel = useNotebook((s) => s.restartKernel);
-  const readOnly = useSession((s) => s.readOnly);
+  const historyView = useNotebook((s) => s.historyView);
   const sessions = useSession((s) => s.sessions);
   const currentId = useSession((s) => s.currentId);
   const currentEndedAt = useSession((s) => s.currentEndedAt);
@@ -238,7 +238,7 @@ export function SessionStatusPill() {
           onPick={makePickSession(() => setOpen(false))}
           onClose={() => setOpen(false)}
           footer={
-            kernelState === 'dead' && !readOnly ? (
+            kernelState === 'dead' && !historyView ? (
               <button
                 type="button"
                 onClick={() => {

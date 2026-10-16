@@ -55,6 +55,9 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const activeId = useNotebooks((s) => s.activeId);
   const switchTab = useNotebook((s) => s.switchTab);
   const closeTab = useNotebook((s) => s.closeTab);
+  const flushSaves = useNotebook((s) => s.flushSaves);
+  const reloadFromDisk = useNotebook((s) => s.reloadFromDisk);
+  const historyView = useNotebook((s) => s.historyView);
   const openNotebook = useNotebook((s) => s.openNotebook);
   const refreshList = useNotebooks((s) => s.refreshList);
   const { t } = useI18n();
@@ -73,7 +76,7 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   // 历史会话视图（viewingId）优先，不在此干预。
   const activeEnded = useNotebooks((s) => {
     const t = s.tabs.find((x) => x.notebookId === s.activeId);
-    return t?.ended ?? false;
+    return (t?.ended ?? false) || (t?.reloading ?? false) || (t?.restarting ?? false);
   });
   const viewingId = useSession((s) => s.viewingId);
   useEffect(() => {
@@ -83,11 +86,12 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
     }
   }, [activeEnded, viewingId]);
 
-  // 切 tab → SessionBar 只读 active notebook 的会话历史（刷新到当前 notebook 目录）
+  // notebook.open 的 session.started 早于前端路径提交；路径落定后再刷新，切 tab 同理。
+  const notebookPath = useNotebook((s) => s.notebookPath);
   const refreshSessions = useSession((s) => s.refreshSessions);
   useEffect(() => {
-    if (activeId && !viewingId) void refreshSessions();
-  }, [activeId, viewingId, refreshSessions]);
+    if (notebookPath && !viewingId) void refreshSessions(notebookPath);
+  }, [notebookPath, viewingId, refreshSessions]);
 
   // Ctrl+Tab / Ctrl+Shift+Tab 循环切换（capture，仅吃 Ctrl+Tab；不触碰编辑器 Tab 缩进）
   useEffect(() => {
@@ -112,8 +116,9 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   }, [adding]);
 
   const onClose = (t: NotebookTab) => {
+    if (t.closing || t.reloading || t.conflict) return;
     if (hasUnsavedChanges(t)) {
-      const ok = window.confirm(`"${tabLabel(t.path)}" 有未保存改动，确定关闭？（内核将 shutdown，会话结束）`);
+      const ok = window.confirm(`"${tabLabel(t.path)}" 有未保存改动，保存后关闭？（内核将 shutdown，会话结束）`);
       if (!ok) return;
     }
     void closeTab(t.notebookId);
@@ -127,6 +132,7 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   };
 
   return (
+    <div className="flex min-w-0 flex-col">
     <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
       {tabs.map((tab) => {
         const active = tab.notebookId === activeId;
@@ -149,7 +155,7 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
             </span>
             <span className={`max-w-40 truncate ${tab.ended ? 'italic' : ''}`}>{tabLabel(tab.path)}</span>
             {/* 未保存改动标记 */}
-            {tab.dirty && !tab.ended && (
+            {tab.dirty && (
               <span aria-hidden title={t('tab.dirtyTitle')} className="text-[9px] text-[var(--accent-run)]">
                 ●
               </span>
@@ -161,6 +167,8 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
             <button
               type="button"
               aria-label={`close ${tabLabel(tab.path)}`}
+              disabled={tab.closing || tab.reloading || !!tab.conflict}
+              aria-busy={tab.closing || tab.reloading}
               onClick={(e) => {
                 e.stopPropagation();
                 onClose(tab);
@@ -203,6 +211,47 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
           +
         </button>
       )}
+    </div>
+    {tabs.filter((tab) => tab.conflict).map((tab) => (
+      <div key={tab.notebookId} role="alert" className="space-y-1 border-t border-[var(--border)] px-2 py-2 text-[12px] text-[var(--accent-err)]">
+        <p>{tabLabel(tab.path)} 的文件已有外部版本。本地编辑仍保留，自动保存已暂停。</p>
+        {tab.conflict!.recoveryPath && <p className="break-all text-[var(--text)]">本地副本：{tab.conflict!.recoveryPath}</p>}
+        {tab.conflict!.recoveryError && <p>本地副本保存失败：{tab.conflict!.recoveryError}</p>}
+        {tab.conflict!.message && <p>加载外部版本失败：{tab.conflict!.message}</p>}
+        <button
+          type="button"
+          disabled={tab.reloading || tab.closing || historyView || !!viewingId}
+          aria-busy={tab.reloading}
+          onClick={() => void reloadFromDisk(tab.notebookId)}
+          className="rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)] disabled:opacity-50"
+        >保留本地副本并加载磁盘版本</button>
+        {tab.reloading && <p className="text-[var(--muted)]">正在保留本地副本并加载外部版本…</p>}
+      </div>
+    ))}
+    {tabs.filter((tab) => tab.recoveryPath && !tab.conflict).map((tab) => (
+      <div key={tab.notebookId} role="status" className="break-all border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)]">
+        {tabLabel(tab.path)} · 本地副本：{tab.recoveryPath}
+      </div>
+    ))}
+    {tabs.filter((tab) => tab.error && !tab.conflict).map((tab) => (
+      <div key={tab.notebookId} role="alert" className="flex items-center gap-2 border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--accent-err)]">
+        <span>{tabLabel(tab.path)} · {tab.error!.operation === 'close' ? '关闭失败' : tab.error!.operation === 'restart' ? '重启失败' : '保存失败'}：{tab.error!.message}</span>
+        <button
+          type="button"
+          disabled={tab.closing}
+          onClick={() => {
+            if (tab.error!.operation === 'close') void closeTab(tab.notebookId);
+            else if (tab.error!.operation === 'restart') {
+              void (async () => {
+                if (useNotebooks.getState().activeId !== tab.notebookId) await switchTab(tab.notebookId);
+                await useNotebook.getState().restartKernel();
+              })();
+            } else void flushSaves(tab.notebookId).catch(() => {});
+          }}
+          className="shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)] disabled:opacity-50"
+        >Retry</button>
+      </div>
+    ))}
     </div>
   );
 }

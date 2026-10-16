@@ -47,7 +47,14 @@ describe('SessionStore · 生命周期', () => {
     expect(readFileSync(path.join(sessionsDir, `${s.id}.jsonl`), 'utf8')).toBe('');
     const index = readIndex(dir);
     expect(index).toHaveLength(1);
-    expect(index[0]).toEqual({ id: s.id, startedAt: s.startedAt, cellCount: 3, source: 'local' });
+    // O-2：index 条目带 notebookPath（同目录多 .py 据此区分归属）
+    expect(index[0]).toEqual({
+      id: s.id,
+      startedAt: s.startedAt,
+      cellCount: 3,
+      source: 'local',
+      notebookPath: path.join(dir, 'nb.py'),
+    });
     expect(index[0]!.endedAt).toBeUndefined();
   });
 
@@ -77,7 +84,7 @@ describe('SessionStore · 生命周期', () => {
     expect(meta.cellCount).toBe(2);
     const index = readIndex(dir);
     expect(index).toHaveLength(1);
-    expect(index[0]).toEqual({ ...meta, source: 'local' });
+    expect(index[0]).toEqual({ ...meta, source: 'local', notebookPath: path.join(dir, 'nb.py') });
 
     const snap: SessionSnapshot = JSON.parse(
       readFileSync(path.join(SessionStore.dirFor(dir), `${s.id}.snapshot.json`), 'utf8'),
@@ -128,6 +135,76 @@ describe('SessionStore · 生命周期', () => {
     t = new Date('2026-10-06T08:20:00Z');
     store.end(s2, cells(4), 'shutdown');
     expect(store.list(dir).map((m) => m.cellCount)).toEqual([3, 4]);
+  });
+});
+
+describe('SessionStore · O-2 同目录多 notebook 归属', () => {
+  it('list 按 notebookPath 过滤：只返回属于该 notebook 的会话', () => {
+    const dir = tmpDir();
+    const a = path.join(dir, 'a.py');
+    const b = path.join(dir, 'b.py');
+    const store = new SessionStore(() => new Date('2026-10-06T08:00:00Z'));
+    const sa = store.begin({ notebookDir: dir, notebookPath: a, cellCount: 1 });
+    const sb = store.begin({ notebookDir: dir, notebookPath: b, cellCount: 1 });
+
+    expect(store.list(dir).map((m) => m.id).sort()).toEqual([sa.id, sb.id].sort());
+    expect(store.list(dir, a).map((m) => m.id)).toEqual([sa.id]);
+    expect(store.list(dir, b).map((m) => m.id)).toEqual([sb.id]);
+  });
+
+  it('无归属的历史条目：该 notebook 无归属条目时兜底可见（升级不丢列表）', () => {
+    const dir = tmpDir();
+    const sessionsDir = SessionStore.dirFor(dir);
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(
+      path.join(sessionsDir, 'index.json'),
+      JSON.stringify([{ id: 's-legacy', startedAt: '2026-01-01T00:00:00Z', cellCount: 2, source: 'local' }]),
+      'utf8',
+    );
+    const store = new SessionStore();
+    expect(store.list(dir, path.join(dir, 'a.py')).map((m) => m.id)).toEqual(['s-legacy']);
+  });
+
+  it('无归属且缺少快照的旧条目仍保留，不能猜成另一个 notebook', () => {
+    const dir = tmpDir();
+    const sessionsDir = SessionStore.dirFor(dir);
+    const store = new SessionStore(() => new Date('2026-10-06T08:00:00Z'));
+    const s = store.begin({ notebookDir: dir, notebookPath: path.join(dir, 'a.py'), cellCount: 1 });
+    // 无法恢复归属的旧记录保留；新记录出现不应使旧记录消失。
+    const index = JSON.parse(readFileSync(path.join(sessionsDir, 'index.json'), 'utf8')) as SessionMeta[];
+    index.push({ id: 's-legacy', startedAt: '2026-01-01T00:00:00Z', cellCount: 2, source: 'local' });
+    writeFileSync(path.join(sessionsDir, 'index.json'), JSON.stringify(index, null, 2), 'utf8');
+
+    expect(store.list(dir, path.join(dir, 'a.py')).map((m) => m.id)).toEqual([s.id, 's-legacy']);
+    expect(store.list(dir).map((m) => m.id).sort()).toEqual([s.id, 's-legacy'].sort());
+  });
+
+  it('旧版历史从 snapshot 恢复归属；新会话不隐藏同 notebook 的旧历史', () => {
+    const dir = tmpDir();
+    const a = path.join(dir, 'a.py');
+    const b = path.join(dir, 'b.py');
+    const store = new SessionStore();
+    const oldA = store.begin({ notebookDir: dir, notebookPath: a, cellCount: 1 });
+    store.end(oldA, cells(1));
+    const oldB = store.begin({ notebookDir: dir, notebookPath: b, cellCount: 1 });
+    store.end(oldB, cells(1));
+    const indexFile = path.join(SessionStore.dirFor(dir), 'index.json');
+    const legacy = readIndex(dir).map(({ notebookPath: _path, ...m }) => m);
+    writeFileSync(indexFile, JSON.stringify(legacy), 'utf8');
+    const current = store.begin({ notebookDir: dir, notebookPath: a, cellCount: 1 });
+
+    const listed = store.list(dir, a);
+    expect(listed.map((m) => m.id)).toEqual([oldA.id, current.id]);
+    expect(listed.every((m) => m.notebookPath === a)).toBe(true);
+    expect(store.list(dir, b).map((m) => m.id)).toEqual([oldB.id]);
+  });
+
+  it('路径大小写按宿主平台比较：Windows 折叠，Linux 保留区别', () => {
+    const dir = tmpDir();
+    const nb = path.join(dir, 'a.py');
+    const store = new SessionStore(() => new Date('2026-10-06T08:00:00Z'));
+    const s = store.begin({ notebookDir: dir, notebookPath: nb, cellCount: 1 });
+    expect(store.list(dir, nb.toUpperCase()).map((m) => m.id)).toEqual(process.platform === 'win32' ? [s.id] : []);
   });
 });
 

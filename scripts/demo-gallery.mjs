@@ -3,7 +3,7 @@
  *
  * 用法（仓库根；dev 服务已在跑就复用，没跑就自起自停）：
  *   node scripts/demo-gallery.mjs [--skip-agent] [状态前缀过滤，如 03 11]
- *   （自起 = pnpm dev:bridge（端口通过 /bridge-info 发现） + pnpm dev:app
+ *   （自起 = pnpm --filter @novalab/bridge start（端口通过 /bridge-info 发现） + pnpm dev:app
  *     http://localhost:5199 (strictPort)；脚本退出前 taskkill 整树，
  *     复用的既有服务不动。）
  *
@@ -16,7 +16,8 @@
  *   先经 UI cell.save 还原、脚本结束再按启动时快照字节级兜底还原；
  * - demos/.novalab 残留（sessions/ui.json、15 态导出 .ipynb 与回转 .py——文件名
  *   含会话 id，逐次运行不冲突）容忍，不清理；
- * - 09 态新建的 demos/gallery-created.py 允许存在（fs.writeFile 覆盖写）；
+ * - 运行前备份夹具/索引/截图；旧 fail-* 图与 09 自建 gallery-created.py 移入
+ *   demos/.novalab/gallery-archive/，不删除旧证据；
  * - P3.1 多 tab 语境下 bridge 上下文跨状态存活：每个自开新页的状态先
  *   closeAllTabs（notebook.list → notebook.close）保证单 tab 干净截图。
  *
@@ -246,11 +247,6 @@ function startDevPnpm(args, name) {
   return child;
 }
 
-/** spawn pnpm <script>（默认端口复用路径）。 */
-function startDev(script) {
-  return startDevPnpm([script], script);
-}
-
 /** 备用端口自起 vite：pnpm exec 直传参数（双层 pnpm run 会吞/字面化 `--` 分隔）。 */
 function startDevAppOn(port) {
   return startDevPnpm(
@@ -400,6 +396,18 @@ function reconcileStaleSessions(notebookDir) {
     log(`已剔除 ${removed} 条 stale-live 会话索引（硬杀 bridge 残留）`);
   }
   return removed;
+}
+
+const GALLERY_ARCHIVE_DIR = join(DEMOS, '.novalab', 'gallery-archive');
+function archiveGalleryFile(file) {
+  if (!fs.existsSync(file)) return null;
+  fs.mkdirSync(GALLERY_ARCHIVE_DIR, { recursive: true });
+  const archived = join(
+    GALLERY_ARCHIVE_DIR,
+    `${path.basename(file)}.${Date.now()}-${process.pid}`,
+  );
+  fs.renameSync(file, archived);
+  return archived;
 }
 
 /** 等 TabBar tab 数 ≥ n（新 tab = 内核 spawn，uv 冷/热启动给足余量）。 */
@@ -724,7 +732,9 @@ state('08', '08-readonly-session', async (ctx) => {
   if (!ctx.replPage) await openNotebook(page, DEMO_PY);
 
   // kernel.restart = 当前会话 ended + 新会话开启（广播 session.ended/started）
-  await bridge.rpc('kernel.restart');
+  const restartTarget = (await bridge.rpc('notebook.list')).find((entry) => entry.path === DEMO_PY);
+  if (!restartTarget?.notebookId) throw new Error('无法定位 demo.py notebook owner');
+  await bridge.rpc('kernel.restart', { notebookId: restartTarget.notebookId });
   await page.waitForTimeout(1000);
 
   // 左 pill 下拉 → 选刚 ended 的会话
@@ -925,11 +935,17 @@ state('15', '15-session-modal', async (ctx) => {
     ctx.notes.push('15: 无 ended 会话段可展开（首段代替）——分组头证据仍有效');
   }
   await page.waitForTimeout(600); // 快照行渲染稳定
+  // 展开历史段会自动滚动；截图回到顶端，保留当前会话分组头与完整卡的关系。
+  await dialog.locator('.nl-scroll-thin').first().evaluate((el) => { el.scrollTop = 0; });
   await shoot(page, '15-session-modal');
   // A-4 浅色证据：模态遮罩挡住 header toggle 钮 → DOM 直达主题（拍完即回暗色）
   await setTheme(page, 'light');
   await shoot(page, '15-session-modal-light');
   await setTheme(page, 'dark');
+
+  const sourceSessions = await bridge.rpc('session.list', { notebookPath: DEMO_PY });
+  const sourceLive = sourceSessions.find((s) => !s.endedAt);
+  if (!sourceLive) throw new Error('15: demo live 会话缺失');
 
   // footer「.ipynb」导出 → 断言 .novalab/sessions/*.ipynb 落盘（node 侧 fs）
   const status = dialog.locator('footer p[aria-live="polite"]');
@@ -968,6 +984,23 @@ state('15', '15-session-modal', async (ctx) => {
   const base = pyPath.split(/[\\/]/).pop();
   await page.locator(`[role="tab"]:has-text("${base}")`).waitFor({ timeout: 60000 });
 
+  // O-2 回归：原 live 内核已在后台，按原路径仍能取自身投影；模态切到导入 notebook。
+  const background = await bridge.rpc('session.open', { notebookPath: DEMO_PY, sessionId: sourceLive.id });
+  if (background.endedAt !== null || background.cells.length !== 3 || background.cells.some((c) => c.execCount !== 1)) {
+    throw new Error('15: 后台 live 会话投影不符合原执行状态');
+  }
+  const importedSessions = await bridge.rpc('session.list', { notebookPath: pyPath });
+  const importedLive = importedSessions.find((s) => !s.endedAt);
+  if (!importedLive) throw new Error('15: 导入 live 会话缺失');
+  await dialog.locator('header > span').filter({ hasText: base }).waitFor({ timeout: 15000 });
+  const importedGroup = dialog.locator(`[data-session-id="${importedLive.id}"][data-live="true"]`);
+  await importedGroup.waitFor({ timeout: 15000 });
+  if (await importedGroup.locator('[data-testid="session-cell"]').count()) {
+    throw new Error('15: 未执行的导入会话借用了原 notebook cells');
+  }
+  await dialog.locator(`[data-session-id="${sourceLive.id}"]`).waitFor({ state: 'detached', timeout: 15000 });
+  ctx.notes.push('15: O-2 后台 live 投影 / 导入会话归属 / 不串执行 cells 通过');
+
   // 关模态 → 新 tab（选中态）+ 导入 notebook 的 cells 同框 = 15b 证据
   await dialog.locator('button[aria-label="close"], button[aria-label="关闭"]').click();
   await dialog.waitFor({ state: 'detached', timeout: 5000 });
@@ -998,9 +1031,19 @@ function chromiumCount() {
 
 async function main() {
   fs.mkdirSync(STATES_DIR, { recursive: true });
-  // 清掉上次运行的失败诊断图（幂等）
+  fs.mkdirSync(GALLERY_ARCHIVE_DIR, { recursive: true });
+  const backupDir = fs.mkdtempSync(join(GALLERY_ARCHIVE_DIR, 'before-run-'));
+  for (const file of [
+    DEMO_PY, ERROR_PY, WRITE_PY, CONTROLS_PY,
+    join(DEMOS, '.novalab', 'sessions', 'index.json'),
+    ...fs.readdirSync(STATES_DIR).filter((f) => f.endsWith('.png')).map((f) => join(STATES_DIR, f)),
+  ]) {
+    if (fs.existsSync(file)) fs.copyFileSync(file, join(backupDir, path.basename(file)), fs.constants.COPYFILE_EXCL);
+  }
+  log(`运行前夹具、索引与截图备份：${backupDir}`);
+  // 归档上次的失败诊断图（幂等且可恢复）
   for (const f of fs.readdirSync(STATES_DIR)) {
-    if (f.startsWith('fail-')) fs.rmSync(join(STATES_DIR, f));
+    if (f.startsWith('fail-')) archiveGalleryFile(join(STATES_DIR, f));
   }
 
   // 夹具每次重写
@@ -1008,8 +1051,8 @@ async function main() {
   fs.writeFileSync(WRITE_PY, WRITE_FIXTURE);
   fs.writeFileSync(CONTROLS_PY, CONTROLS_FIXTURE);
   // 09 态新建的 notebook：fs.writeFile 不覆盖已存在文件（EXIST），
-  // 每次运行前删掉自己的 gallery-created.py 保证真"新建"且截图无报错。
-  fs.rmSync(join(DEMOS, 'gallery-created.py'), { force: true });
+  // 每次运行前归档自己的 gallery-created.py 保证真"新建"且截图无报错。
+  archiveGalleryFile(join(DEMOS, 'gallery-created.py'));
   const demoOriginal = fs.readFileSync(DEMO_PY, 'utf8');
 
   // dev 服务：已在跑就复用；没跑就自起（退出前自停，见 killStartedServers）
@@ -1017,8 +1060,8 @@ async function main() {
   if (bridgeState) {
     log(`bridge 已在跑（:${bridgeState.wsPort}）→ 复用`);
   } else {
-    log('bridge 未跑 → 自起 pnpm dev:bridge');
-    startDev('dev:bridge');
+    log('bridge 未跑 → 自起 pnpm --filter @novalab/bridge start（无 watcher）');
+    startDevPnpm(['--filter', '@novalab/bridge', 'start'], 'bridge:start');
   }
   // app：只认真 HTTP 200 才复用 :5199（半死监听器/跨线 vite 反复启停让 TCP 状态
   // 不可信）；否则一律备用端口 5299 自起，彻底避开 strictPort 互斥竞态
@@ -1086,6 +1129,10 @@ async function main() {
 
   const results = [];
   for (const st of states) {
+    if (SKIP_AGENT && st.id === '11') {
+      ctx.notes.push('11: skipped (--skip-agent); 未执行 Agent 状态，未调用 provider');
+      continue;
+    }
     if (ONLY.length > 0 && !ONLY.some((f) => st.id === f || st.name.includes(f))) continue;
     try {
       await st.fn(ctx);

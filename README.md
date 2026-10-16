@@ -84,7 +84,7 @@ pnpm kernel        # 终端 3（可选）：手动起 novakernel 调试协议帧
 |---|---|---|---|
 | ![stale](docs/demos/states/02-stale.png) | ![fix card](docs/demos/states/03-error-fixcard.png) | ![diff](docs/demos/states/04-diff-staged.png) | ![multi-tab](docs/demos/states/12-multi-tab.png) |
 
-全部 17 态与逐功能证据（✅34/🟡5/⛔1）见 [功能矩阵](docs/demos/feature-matrix.md)。
+完整状态画廊与逐功能历史证据见 [功能矩阵](docs/demos/feature-matrix.md)。实现状态不等于当前候选版已验收；v0.1.1 的操作清单、发布阻塞与证据要求见 [验收清单](docs/release-v0.1.1-checklist.md)。
 
 ## MCP 接入
 
@@ -102,14 +102,17 @@ claude mcp add novalab -- pnpm --dir "<repo>/bridge" exec tsx src/main.ts --mcp 
 
 ```bash
 pnpm --filter @novalab/bridge exec tsc --noEmit && pnpm --filter @novalab/app exec tsc --noEmit
+pnpm test:scripts
 pnpm --filter @novalab/bridge exec vitest run
 pnpm --filter @novalab/app exec vitest run
 uv run --directory py pytest
-node scripts/integration-smoke.mjs            # bridge + kernel 端到端（起停自管）
+node scripts/integration-smoke.mjs            # 私有临时 bridge + kernel（核验归属，起停自管）
 pnpm exec playwright install chromium         # 首次
-node scripts/demo-gallery.mjs --skip-agent    # 交互状态画廊（无 LLM 凭据态）
+node scripts/demo-gallery.mjs --skip-agent    # 明确跳过 11 态，不调用真实 Agent
 node scripts/bench.mjs --ui                   # intent §8 量化指标（--ui 需 dev 服务在跑）
 ```
+
+开发前端已运行时，另执行 `node scripts/html-output-smoke.mjs <app-url>`、`node scripts/save-lifecycle-smoke.mjs <app-url>` 与 `node scripts/file-conflict-smoke.mjs <app-url>`，分别验证真实 Chromium 的 HTML 渲染边界、保存/关闭链和外部冲突恢复；后两者使用私有临时 bridge 和文件，需要已准备的 uv 环境；源码稳定后使用新启动的 Vite 实例，避免测试动态导入与热更新模块实例分离。`node --test --test-timeout=70000 scripts/integration-smoke.acceptance.mjs` 单列进程隔离验收（需 uv，不进入 `test:scripts`）。真实进程 bridge 验收入口为 `pnpm --filter @novalab/bridge exec vitest run --config vitest.acceptance.config.ts`。
 
 详见 [CONTRIBUTING.md](CONTRIBUTING.md)（含 clean-room 纪律）与 [docs/plan.md](docs/plan.md)。
 
@@ -118,6 +121,8 @@ node scripts/bench.mjs --ui                   # intent §8 量化指标（--ui �
 - [docs/intent.md](docs/intent.md) — 愿景、需求（MoSCoW）、ADR 决策记录
 - [docs/spec.md](docs/spec.md) — 架构、协议、内核语义（规范）、工具 schema、UI 规格
 - [docs/plan.md](docs/plan.md) — spike/门、四阶段 WBS、风险登记
+- [docs/research-iteration-roadmap.md](docs/research-iteration-roadmap.md) — 公开科研需求与竞品反馈、五阶段迭代闭环、验收门与决策边界
+- [docs/release-v0.1.1-checklist.md](docs/release-v0.1.1-checklist.md) — v0.1.1 验收操作、阻塞项、候选产物与证据模板
 - [docs/mcp-demo.md](docs/mcp-demo.md) — MCP 接入完整示例
 
 ## 路线

@@ -126,6 +126,45 @@ def test_full_flow_set_cells_exec_cascade_introspect(tmp_path):
     assert stdout_repl == "6\n"
 
 
+def test_validate_cells_stdio_shape_and_errors_do_not_load_or_execute():
+    resps, notifs, _, rc = run_session([
+        {"id": 1, "method": "validate_cells", "params": {"cells": [
+            {"id": "a", "code": "x = 1"},
+            {"id": "b", "code": "y = x + 1\nopen('unused', 'w')"},
+        ]}},
+        {"id": 2, "method": "exec_cell", "params": {"cellId": "a"}},
+        {"id": 3, "method": "validate_cells", "params": {"cells": [
+            {"id": "a", "code": "x = 1"}, {"id": "b", "code": "x = 2"},
+        ]}},
+        {"id": 4, "method": "validate_cells", "params": {}},
+        {"id": 5, "method": "validate_cells", "params": {"cells": {}}},
+        {"id": 6, "method": "validate_cells", "params": {"cells": [{"id": "a"}]}},
+        {"id": 7, "method": "validate_cells", "params": {"cells": [
+            {"id": "a", "code": "x = 1"}, {"id": "a", "code": "y = 2"},
+        ]}},
+        {"id": 8, "method": "validate_cells", "params": {"cells": []}},
+        {"id": 9, "method": "shutdown"},
+    ])
+    assert rc == 0 and notifs == []
+    assert by_id(resps, 1)["result"] == {
+        "cells": [
+            {"id": "a", "code": "x = 1", "defs": ["x"], "refs": [], "sideEffect": False},
+            {"id": "b", "code": "y = x + 1\nopen('unused', 'w')", "defs": ["y"], "refs": ["x"], "sideEffect": True},
+        ],
+        "edges": [{"from": "a", "to": "b"}],
+    }
+    assert by_id(resps, 2)["error"]["code"] == -32001
+    assert "multiple definitions" in by_id(resps, 3)["result"]["compileError"]
+    for rid, message in [
+        (4, "missing param: cells"),
+        (5, "param cells must be list"),
+        (6, "validate_cells: each cell needs {id, code}"),
+        (7, "validate_cells: duplicate cell ids"),
+    ]:
+        assert by_id(resps, rid)["error"] == {"code": -32602, "message": message}
+    assert by_id(resps, 8)["result"] == {"cells": [], "edges": []}
+
+
 def test_load_save_file_flow(tmp_path):
     nb = tmp_path / "nb.py"
     nb.write_text(

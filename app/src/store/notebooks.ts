@@ -24,6 +24,14 @@ import type { Cell, DagEdge, StagedDiff, VarSchema } from '../kernel/types';
 /** bridge 侧内核状态（notebook.list / kernel.status 的原始取值）。 */
 export type BridgeKernelState = 'idle' | 'busy' | 'restarting' | 'dead';
 
+export interface FileConflict {
+  notebookPath: string;
+  recoveryPath: string | null;
+  recoveryError?: string;
+  /** Failure of the explicit backup-and-reload action. */
+  message?: string;
+}
+
 /** notebook.list 条目 → 前端 tab（额外带本地 dirty 标记，close 确认用）。 */
 export interface NotebookTab {
   notebookId: string;
@@ -36,6 +44,15 @@ export interface NotebookTab {
   rssMB: number | null;
   /** 前端本地：有未保存改动（编辑过 cell 但未落盘）。 */
   dirty: boolean;
+  /** Close freezes new edits until the latest drafts are saved or close fails. */
+  closing?: boolean;
+  error?: { operation: 'save' | 'close' | 'restart'; message: string };
+  conflict?: FileConflict;
+  reloading?: boolean;
+  /** Keep the confirmed local copy path visible after loading the external version. */
+  recoveryPath?: string;
+  /** Lifecycle restart is in flight; ordinary writes remain blocked. */
+  restarting?: boolean;
 }
 
 /** 一个 notebook 的焦点视图切片缓存（切换时捕获/恢复）。 */
@@ -51,6 +68,10 @@ export interface NotebookCache {
   activeCellId: string | null;
   uiCollapsed: Record<string, boolean>;
   lastRunMs: Record<string, number>;
+  /** Unsaved cell revisions; ACKs confirm only the revision actually sent. */
+  drafts: Record<string, { code: string; revision: number }>;
+  /** Any local code edit invalidates analysis from an older save request. */
+  draftRevision: number;
 }
 
 /** notebook.open / notebook.switch 响应（bridge 冻结契约）。 */
@@ -63,6 +84,11 @@ export interface NotebookStateResult {
     staleSet?: string[];
     execCounts?: Record<string, number | null>;
   };
+}
+
+/** kernel.restart 响应：冷加载结果必须带回原 notebook owner。 */
+export interface NotebookRestartResult extends NotebookStateResult {
+  notebookPath: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -81,6 +107,8 @@ export function emptyCache(): NotebookCache {
     activeCellId: null,
     uiCollapsed: {},
     lastRunMs: {},
+    drafts: {},
+    draftRevision: 0,
   };
 }
 
@@ -90,12 +118,14 @@ export function tabLabel(p: string): string {
   return name && name.length > 0 ? name : p;
 }
 
-/**
- * close 确认 predicate：有未保存改动且非 view-only（ended tab 已是只读快照，
- * 无"未保存"可言）→ 关闭前需确认。纯函数，供 TabBar 与单测消费。
- */
+/** Unsaved drafts remain unsaved even if the kernel has ended. */
 export function hasUnsavedChanges(tab: Pick<NotebookTab, 'dirty' | 'ended'>): boolean {
-  return tab.dirty && !tab.ended;
+  return tab.dirty;
+}
+
+/** Restart is a lifecycle action for a dead/ended live tab, never a history action. */
+export function canRestartTab(tab: Pick<NotebookTab, 'ended' | 'kernelState' | 'dirty' | 'closing' | 'reloading' | 'conflict' | 'restarting'>): boolean {
+  return (tab.ended || tab.kernelState === 'dead') && !tab.dirty && !tab.closing && !tab.reloading && !tab.conflict && !tab.restarting;
 }
 
 /**
@@ -104,12 +134,13 @@ export function hasUnsavedChanges(tab: Pick<NotebookTab, 'dirty' | 'ended'>): bo
  */
 export function normalizeTabs(payload: unknown, prev: readonly NotebookTab[]): NotebookTab[] {
   if (!Array.isArray(payload)) return [];
-  const dirtyById = new Map(prev.map((t) => [t.notebookId, t.dirty]));
+  const previous = new Map(prev.map((t) => [t.notebookId, t]));
   const out: NotebookTab[] = [];
   for (const e of payload) {
     if (!e || typeof e !== 'object') continue;
     const r = e as Record<string, unknown>;
     if (typeof r.notebookId !== 'string' || typeof r.path !== 'string') continue;
+    const old = previous.get(r.notebookId);
     const ks = r.kernelState;
     const kernelState: BridgeKernelState =
       ks === 'idle' || ks === 'busy' || ks === 'restarting' || ks === 'dead' ? ks : 'idle';
@@ -120,7 +151,13 @@ export function normalizeTabs(payload: unknown, prev: readonly NotebookTab[]): N
       cellCount: typeof r.cellCount === 'number' ? r.cellCount : 0,
       ended: r.ended === true || kernelState === 'dead',
       rssMB: typeof r.rssMB === 'number' ? r.rssMB : null,
-      dirty: dirtyById.get(r.notebookId) ?? false,
+      dirty: old?.dirty ?? false,
+      ...(old?.closing ? { closing: true } : {}),
+      ...(old?.error ? { error: old.error } : {}),
+      ...(old?.conflict ? { conflict: old.conflict } : {}),
+      ...(old?.reloading ? { reloading: true } : {}),
+      ...(old?.recoveryPath ? { recoveryPath: old.recoveryPath } : {}),
+      ...(old?.restarting ? { restarting: true } : {}),
     });
   }
   return out;
@@ -142,6 +179,12 @@ interface NotebooksStore {
   saveCache: (id: string, cache: NotebookCache) => void;
   readCache: (id: string) => NotebookCache | undefined;
   markDirty: (id: string, dirty: boolean) => void;
+  setClosing: (id: string, closing: boolean) => void;
+  setError: (id: string, error?: NotebookTab['error']) => void;
+  setConflict: (id: string, conflict?: FileConflict) => void;
+  setReloading: (id: string, reloading: boolean) => void;
+  setRecoveryPath: (id: string, path: string) => void;
+  setRestarting: (id: string, restarting: boolean) => void;
   /** 焦点 tab 的内核状态更新（kernel.status 通知驱动 TabBar 点色）。 */
   setKernelState: (id: string, state: BridgeKernelState) => void;
   activeTab: () => NotebookTab | undefined;
@@ -184,6 +227,24 @@ export const useNotebooks = create<NotebooksStore>((set, get) => ({
   markDirty: (id, dirty) =>
     set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, dirty } : t)) }),
 
+  setClosing: (id, closing) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, closing } : t)) }),
+
+  setError: (id, error) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, error } : t)) }),
+
+  setConflict: (id, conflict) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, conflict, error: undefined } : t)) }),
+
+  setReloading: (id, reloading) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, reloading } : t)) }),
+
+  setRecoveryPath: (id, recoveryPath) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, recoveryPath } : t)) }),
+
+  setRestarting: (id, restarting) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, restarting } : t)) }),
+
   setKernelState: (id, state) =>
     set({
       tabs: get().tabs.map((t) =>
@@ -219,15 +280,18 @@ export const useNotebooks = create<NotebooksStore>((set, get) => ({
   },
 
   closeRpc: async (id) => {
-    try {
-      await bridge.rpc('notebook.close', { notebookId: id });
-    } catch (err) {
-      console.error('notebook.close 失败:', err);
+    const tab = get().tabs.find((t) => t.notebookId === id);
+    if (tab?.conflict || tab?.reloading) throw new Error('请先保留本地副本并加载磁盘版本');
+    // Failure must propagate before any local state is removed.
+    await bridge.rpc('notebook.close', { notebookId: id });
+    if (get().tabs.find((t) => t.notebookId === id)?.conflict) {
+      throw new Error('文件有外部版本，本地编辑仍保留');
     }
-    // 摘除该 tab 的缓存；焦点转移由 bridge 决定，拉 list 校准（activeId 失效则回退首个）
     const caches = { ...get().caches };
     delete caches[id];
-    set({ caches });
+    const tabs = get().tabs.filter((t) => t.notebookId !== id);
+    const activeId = get().activeId === id ? (tabs[0]?.notebookId ?? null) : get().activeId;
+    set({ caches, tabs, activeId });
     await get().refreshList();
     return { closedId: id, nextActiveId: get().activeId };
   },

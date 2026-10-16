@@ -50,12 +50,14 @@
 
 ## 2. 启动序列
 
-1. Tauri（或 dev 脚本）spawn `bridge`（node），在 `127.0.0.1:7788` 起 loopback HTTP + WS（端口冲突自动 +1，至 7798）；生成本次启动 token（或取 `NOVALAB_BRIDGE_TOKEN`），并写运行清单 `<dataDir>/bridge.json`（0600，ADR-009）。
+1. Tauri（或 dev 脚本）spawn `bridge`（node），默认在 `127.0.0.1:7788` 起 loopback HTTP + WS（端口冲突自动 +1，至 7798），LLM 代理默认 7789。`NOVALAB_BRIDGE_PORT` / `NOVALAB_LLM_PORT` 可显式指定 0–65535，0 由 OS 分配；显式端口冲突直接失败，不递增。生成本次启动 token（或取 `NOVALAB_BRIDGE_TOKEN`）；两个 listener 就绪后才写运行清单 `<dataDir>/bridge.json`（0600，ADR-009）。隔离验收使用私有 data/notebook 目录，核对 PID/token/精确 loopback URL 后显式连接，避免扫描既有服务。
 2. 前端扫描 7788–7798 的 `GET /bridge-info`（要求白名单 Origin）取得 `{wsUrl, token, llmProxyOrigin}` → 连接 WS（upgrade 同样校验 Origin，否则 403）→ 首条消息 `bridge.auth {token}`（3 秒内，否则 1008 关闭）。随后发 `notebook.open {path}`。
-3. Bridge 读 .py → `serialize.parse` → cells[] → spawn novakernel 子进程（uv 管理的 `.venv`，见 plan 环境清单）→ 按拓扑序**静默回放**全部 cell（恢复状态）或按配置冷启动。
-4. Bridge 回 `notebook.state {cells, dag, schemas, staleSet:[]}`；前端渲染，LivePill 转 `live`。
+3. Bridge 创建该 .py 的 novakernel 子进程（uv 管理的 `.venv`，见 plan 环境清单），调用 `load_file` 解析源码、建立静态 DAG；冷启动不执行 cell。
+4. Bridge 回 `{notebookId, state:{cells, dagEdges, schemas, staleSet, execCounts}}`；前端渲染，内核转 `idle`。`execCounts` 从 0 开始，变量与结果须由用户显式执行重建。
 
-崩溃恢复：kernel 死 → LivePill `dead` + 横幅"内核已退出，重启将按 .py 拓扑回放恢复状态"→ 一键 restart（状态可重建是反应式模型的免费红利）。
+崩溃恢复：kernel 死后标记 `dead`，不自动重放代码或副作用。干净的 dead/ended notebook 只能通过 `kernel.restart {notebookId}` 显式重启；响应携带 `{notebookId, notebookPath, state}`，Bridge 按 owner 加入同 notebook 写队列，并只执行冷 `load_file`。重启成功后清理旧 outputs、schemas、execCounts、Diff 与临时 REPL 显示，并结束旧会话、开始新会话；加载失败保留 dead 状态和旧会话。存在未落盘的 bridge 改动或前端草稿时拒绝重启，不覆盖磁盘、不自动备份或恢复草稿。切换 tab 后延迟响应只更新原 owner 缓存。
+
+执行队列：`exec_cell` / `exec_repl` 按内核 FIFO 串行执行。停止、崩溃或重启结束旧代次时，普通在途请求、当前执行和全部排队执行均以取消错误结算，队列深度归零；已出队但尚未发送的执行同样取消。旧 transport 的通知/响应/exit、执行 finally 和 load_file 的 await 续体不能更新新代次。busy 时不以无 ping 响应判死，避免误杀同步长任务。取消等待不撤销旧任务已经产生的文件或其他副作用。
 
 ---
 
@@ -104,6 +106,8 @@ df.groupby("county").sum()
 - **UI 状态（折叠、滚动、segment 命名）不进 .py**，存 sidecar `.novalab/ui.json`；执行事件存 `.novalab/session.jsonl`（ADR-002）。
 - 解析器对"手写的不规范 .py"宽容降级：无 marker 的单文件 = 按空行启发式切分或整体单 cell（导入 marimo 文件时同理）。
 
+保存实现（阶段 2）：解析 symlink 的实际目标，在目标同目录排它创建临时文件，UTF-8/LF 写完并 flush/fsync、关闭后以 `os.replace` 替换。暂存写入、同步或替换失败不截断原目标；只清本次临时文件，不降级为直接覆盖。已有 POSIX permission mode 保留，新文件沿用私有暂存权限；Windows 权限由目录 ACL 继承，不能由 POSIX mode 推定用户独占。替换会改变 inode，其他 hardlink 保留旧内容；文件 fsync 不构成所有断电/目录持久性保证。内容冲突校验另见 §6.1。
+
 **互操作修正（S1 侦察，2026-10-06，证据见 docs/spike-s1-memo.md）**：真 marimo .py 为 `@app.cell` 装饰器式、文件内无 cell id（运行时 4 字母重发），不能直读我们的 `# %% [cell-id]` 格式；marimo → NovaLab 为单向宽容导入（整文件单 cell 或启发式切分），NovaLab → marimo 经转换器（plan P3.6，2–4 人日，jupytext 作参考实现）。"兼容"卖点降级为"纯 .py、git 友好、可转换"。
 
 ---
@@ -137,7 +141,7 @@ introspect（M5 数据源）：对 globals 每名字产出
 |---|---|---|
 | `notebook.open` | req | `{path}` |
 | `notebook.state` | res | `{cells, dagEdges, schemas, staleSet, execCounts}` |
-| `cell.save` | req | `{cellId, code}` → 重算 DAG → res `{dagEdges, staleSet, compileError?}` |
+| `cell.save` | req | `{notebookId?, cellId, code}` → 重算所属 notebook 的 DAG 并保存 → res `{dagEdges, staleSet, compileError?}`；显式 ID 不存在则拒绝，省略时兼容当前焦点 |
 | `cell.run` | req | `{cellId, cascade: bool?}` |
 | `run.started / run.stdout / run.stderr / run.mime / run.done / run.error` | notif | 流式；`run.done{cellId, execCount, cascaded:[ids], durationMs}`；`run.error{cellId, traceback, frames:[{file,line,fn,srcLine}]}` |
 | `kernel.status` | notif | `{state: idle|busy|restarting|dead, queueDepth}` |
@@ -145,18 +149,47 @@ introspect（M5 数据源）：对 globals 每名字产出
 | `kernel.repl` | req | `{code}` → 输出回灌为匿名 cell（`[repl]` 徽章） |
 | `diff.stage/accept/reject` | req | 见 §9 |
 | `session.tail` | req/res | 最近 N 条事件（SessionView, P3） |
+| `session.list` | req/res | `{notebookPath?}` → 当前 notebook 的会话元数据（含 `notebookPath`；旧 index 从 snapshot 恢复归属，无法恢复的旧条目保留） |
+| `session.open` | req/res | `{sessionId, notebookPath?}` → 只读 cells 投影；live 从该 notebook 内核缓存读取，后台查询不切焦点；历史从快照读取并核对归属 |
 | `export.ipynb` | req | `{path, target}` |
 | `bridge.auth` | req | `{token}`——WS 首条消息，认证前其他方法一律断开；回 `{ok, wsPort, llmPort, llmProxyOrigin}` |
 | `bridge.mcpLaunch` | req | → `{mcpLaunch: string[] \| null}`：以 MCP 模式启动本 bridge 的命令行（Welcome「Connect…」）|
 
 **鉴权（v0.1.1，ADR-009）**：Origin 白名单（含缺省 Origin 拒绝）作用于 `/bridge-info` 与 WS upgrade；token 经 `bridge.auth` 首条消息校验；LLM 代理校验 `x-novalab-bridge-token` 请求头。只有已认证连接进入广播集合。
 
+#### 保存与关闭的一致性（阶段 2 修复契约）
+
+前端自动保存必须携带编辑发生时的 `notebookId`，延迟任务不可按发送时的新焦点改写其他文件。同一 notebook 的保存按序完成；响应只确认其发送的 cell/版本，另一个 cell 或随后产生的草稿仍属未保存。后台响应更新所属缓存，不改当前其他 notebook 的 DAG、stale 或 dirty。历史会话是只读投影；浏览历史期间，live 自动保存的确认只更新 live 缓存，不替换历史页面；返回 live 时使用已确认的最新缓存。
+
+关闭前提交该 notebook 最新待保存草稿并等待成功，关闭过程阻止新增编辑。保存或关闭失败时保留 tab、草稿、缓存和可见错误，允许重试；不能因为错误被 catch 而清空本地内容。dirty 与内核是否 ended 无关，内核已退出不表示草稿已经落盘。
+
+Bridge 对同一 notebook 的 `cell.save`、`diff.accept`、`notebook.reload`、`notebook.close` 和 `kernel.restart` 排队，避免关闭或重启越过已收到的保存与 Diff。重启一旦入队，后续普通写入、reload 和 close 请求拒绝，避免它们作用于新会话；已经在 FIFO 中的操作先结算。存活内核的关闭必须先持久化成功；失败时保留 context、内核与会话。dead/ended 的旧上下文仅在没有已知落盘失败的缓存改动时可关闭或重启；尚未发来的前端草稿由前端护栏保留。原子替换见 §4，外部内容冲突见下；本契约不代表断电恢复或草稿跨应用重启持久化已完成。
+
+#### 外部修改与显式加载（阶段 2 修复契约）
+
+`load_file` 从同一次原始字节读取建立内容基线。已加载路径的 `save_file` 在写盘前比较实际字节（不依赖 mtime/长度），不同或已删除则以 `-32002` 拒绝覆盖，返回 `error.data = {kind:'external-modification', notebookPath, recoveryPath:string|null, recoveryError?}`。本地完整候选保存到同目录排它创建的 `.py` 副本；相同候选仅在现存副本字节一致时复用。副本失败仍拒绝覆盖，不推进基线，不把候选正文写入错误数据；界面明确显示备份失败。只有成功保存或显式重新加载才推进基线。该检查与替换之间仍有跨进程竞态，不构成文件 CAS。
+
+watcher 只发送 `notebook.externalChange {notebookId, notebookPath}`，不自动 load、覆盖缓存或运行。前端记录所属 tab 的冲突并暂停该 tab 的自动保存，允许继续保留本地编辑；保存/关闭遇冲突不清草稿、不移除 tab、不循环通用 Retry。错过 watcher 的后台变化或抑制窗口变化由每次保存的内容检查兜底。
+
+用户显式选择“保留本地副本并加载磁盘版本”时，前端冻结所属 tab，等既有保存结算，携带包括未发送草稿的全部持久 notebook cells 调用 `notebook.reload {notebookId, cells?}`，过滤临时 `kind:'repl'` cell，保持副本为可重开的标准 `.py` notebook。Bridge 同写入队列先执行纯 `backup_file`，副本成功后才冷 `load_file`；成功结束旧会话、开始所属 notebook 新会话并清旧输出、计数、变量摘要、Diff 与 REPL 显示。失败保留本地代码和会话，可重试显式动作。`kernel.restart` 不执行 `backup_file`：dirty dead/ended owner 直接拒绝，等待独立草稿恢复包。后台 ACK 不更改当前其他 notebook 或历史视图。该动作不覆盖磁盘、不自动合并、不执行代码；本地副本只保留源码，不恢复既有变量或输出。当前内核需可响应 backup/load；dead 重启和跨应用草稿恢复另包。
+
+#### 本地验证脚本客户端的请求生命周期
+
+`scripts/bridge-client.mjs` 沿用上述鉴权与 JSON-RPC 协议。已认证连接关闭、socket error、坏 JSON/非对象消息或主动 `close()` 时，reject 全部在途 RPC、清空 pending 并回收 timer；未认证或非 OPEN 的 socket 不接受 RPC。发送同步异常/回调失败与 RPC error 清理对应请求；旧 socket 的迟到事件不影响新连接。
+
+- 普通 RPC 默认 deadline 20 秒，`new BridgeClient({rpcTimeoutMs})` 可配置。
+- `cell.run`、`kernel.repl`、`diff.accept`、`control.set`、`notebook.open`、`kernel.restart`、`notebook.reload` 会等待执行/级联、备份/加载或环境准备，默认不设 deadline；`runTimeoutMs` 单独配置这些长操作。
+- `rpc(method, params, {timeoutMs})` 覆盖单次期限；0 表示无期限，值须为不超过 2,147,483,647 的非负整数毫秒。
+- 期限只结束客户端等待，不取消服务端执行，也不自动重试。迟到响应忽略。普通查询排在长执行之后也可能超时，调用者按场景覆盖期限。
+
 ### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines；P1.3 集成后冻结）
 kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
 - `ping` → `{pong, version}`；**内核单线程同步，exec 期间无法应答；supervisor 仅 idle 时健康探测**
 - `load_file {path}` → NotebookState `{cells:[{id,code,defs,refs,sideEffect}], dagEdges, schemas, staleSet, execCounts}`
-- `save_file {path, cells}` → `{ok}`
+- `save_file {path, cells}` → `{ok}`；已加载路径内容冲突 → `-32002` 与本地恢复副本元数据
+- `backup_file {path, cells}` → `{recoveryPath}`；纯源码副本，不改运行态/基线，不执行
 - `set_cells {cells:[{id,code}]}` → `{cells(重算含 defs/refs/sideEffect), edges, staleSet, compileError?}`
+- `validate_cells {cells:[{id,code}]}` → `{cells(静态 defs/refs/sideEffect), edges, compileError?}`；只分析候选，不改源码、DAG、变量、stale、执行计数或控件，不发 run 通知；Diff 入队前使用此方法
 - `exec_cell {cellId, cascade}` / `exec_repl {code}` → RunReport `{cellId, ok, cascaded, durationMs, traceback?}`
 - `introspect {}` → `{schemas}`；`shutdown` → `{ok}`
 通知：`run.started {cellId}` / `run.stdout {cellId,text}` / `run.stderr {cellId,text}` / `run.mime {cellId,mime,data}` / `run.error {cellId,traceback,frames}` / `run.done {cellId,execCount,cascaded,durationMs,defs,refs}`；repl 的 cellId 恒为 `"repl"`。
@@ -260,7 +293,7 @@ proposed ──(Tab / 点击 Accept)──> accepted ──> cell.save + 按策�
 | 28 | cell 行：`[n]` + 语言 chip 左、内核名右；无卡片边框，行间全宽分隔线 | 同 |
 | 29 | 代码面板：行号 gutter + 语法着色 + 横向滚动；出错行整行红底 + `error (line N)` 实心红 pill | 同（tokenizeLines 与编辑器同一着色规则） |
 | 30 | `▶ output` 披露（展开后带边框、内部滚动、焦点环）；红色 traceback 面板；`wrote <路径>` muted 行 | 同；error 默认展开 |
-| 31 | 图像内联（白底图卡） | live 会话经 OutputRenderer 内联富 MIME；历史快照仅文本 + mime 键名（N2 限制） |
+| 31 | 图像内联（白底图卡） | 当前 notebook 的当前 live 会话经 OutputRenderer 内联富 MIME；非当前会话与历史视图使用所属会话的文本投影 + mime 键名（N2 限制），不能借用当前编辑区 cells |
 | 32 | 右下 `⤓ .ipynb` 下载 | 同；import .ipynb 收为 footer 左侧链接 |
 | 33 | 会话结束态 footer `Python · ended 0:23 — view only; …` + `38 cells` | KernelStatusBar 既有实现（A-2 #12/#16） |
 

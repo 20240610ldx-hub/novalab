@@ -5,7 +5,8 @@
   "scripts": {
     "dev:app": "pnpm --filter @novalab/app dev",
     "dev:bridge": "pnpm --filter @novalab/bridge dev",
-    "kernel": "uv run --directory py python -m novakernel.server"
+    "kernel": "uv run --directory py python -m novakernel.server",
+    "test:scripts": "node --test scripts/*.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0"

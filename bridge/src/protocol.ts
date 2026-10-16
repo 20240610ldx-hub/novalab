@@ -45,6 +45,15 @@ export const ERR_INTERNAL = -32603;
 export const ERR_KERNEL = -32000;
 /** 服务端自定义：尚未 notebook.open。 */
 export const ERR_NO_NOTEBOOK = -32001;
+/** 磁盘内容与已加载基线不同：保留外部文件，并返回本地候选的恢复副本信息。 */
+export const ERR_FILE_CONFLICT = -32002;
+
+export interface FileConflictData {
+  kind: 'external-modification';
+  notebookPath: string;
+  recoveryPath: string | null;
+  recoveryError?: string;
+}
 
 // ---------- 领域模型 ----------
 
@@ -103,6 +112,9 @@ export interface NotebookState {
 //   notebook.switch {notebookId}   → NotebookSwitchResult {notebookId, state}
 //                                    切 router 焦点 + 广播 focus.changed {notebookId}；
 //                                    不杀内核（进程保活，切回状态即在）。
+//   notebook.reload {notebookId, cells?:[{id,code}]} → NotebookReloadResult
+//                                    先备份全量本地源码，再cold load；成功后重开会话，不执行。
+//   notebook.externalChange {notebookId, notebookPath}（通知）：只提示，不自动load。
 //   notebook.close  {notebookId}   → NotebookCloseResult {notebookId, closed:true}
 //                                    未保存改动先 save_file → 内核 shutdown → 会话
 //                                    ended('shutdown')（进 SessionBar 历史）→ 摘除 tab。
@@ -140,6 +152,30 @@ export interface NotebookSummary {
 export interface NotebookSwitchResult {
   notebookId: string;
   state: NotebookState;
+}
+
+/** notebook.reload：备份本地源码后冷加载磁盘，不执行，不切换焦点。 */
+export interface NotebookReloadResult {
+  notebookId: string;
+  state: NotebookState;
+  recoveryPath: string;
+}
+
+/** kernel.restart：按 notebook owner 冷加载，不执行用户代码或副作用。 */
+export interface NotebookRestartParams {
+  notebookId: string;
+}
+
+export interface NotebookRestartResult {
+  notebookId: string;
+  notebookPath: string;
+  state: NotebookState;
+}
+
+/** notebook.externalChange：仅提示指定notebook，禁止据此自动覆盖本地草稿。 */
+export interface NotebookExternalChangeParams {
+  notebookId: string;
+  notebookPath: string;
 }
 
 /** notebook.close 响应。 */
@@ -283,6 +319,8 @@ export interface SessionMeta {
   endedAt?: string;
   cellCount: number;
   source: 'local' | 'agent';
+  /** 会话所属 notebook；同目录共用 index 时按此过滤。旧记录可从 snapshot 恢复。 */
+  notebookPath?: string;
 }
 
 /** 会话快照 cell（`<sessionId>.snapshot.json`）：全量 cell + 输出缓冲摘要。 */
@@ -384,8 +422,10 @@ export interface ProvidersSetActiveResult {
  * 内核方法集（内核只说"执行语"，不含文件/diff 概念之外的东西）：
  * - ping            → {pong:true}
  * - load_file       {path}                → NotebookState
- * - save_file       {path, cells}         → {ok:true}
- * - set_cells       {cells:[{id,code}]}   → SetCellsResult（含重算 cells）
+ * - save_file       {path, cells}         → {ok:true}；基线冲突 → -32002 + FileConflictData
+ * - backup_file     {path, cells}         → {recoveryPath}（纯恢复副本，不set/exec/推进基线）
+ * - set_cells       {cells:[{id,code}]}    → SetCellsResult（含重算 cells）
+ * - validate_cells  {cells:[{id,code}]}    → {cells, edges, compileError?}（纯静态，不改运行状态）
  * - exec_cell       {cellId, cascade}     → RunReport（期间发 run.* 通知）
  * - exec_repl       {code}                → RunReport（cellId="repl"，输出经 run.* 通知回灌）
  * - introspect      {}                    → {schemas: VarSchema[]}
@@ -400,7 +440,9 @@ export type KernelMethod =
   | 'ping'
   | 'load_file'
   | 'save_file'
+  | 'backup_file'
   | 'set_cells'
+  | 'validate_cells'
   | 'exec_cell'
   | 'exec_repl'
   | 'introspect'
@@ -415,7 +457,7 @@ export interface KernelRequest {
 export interface KernelResponse {
   id: number;
   result?: unknown;
-  error?: { code: number; message: string };
+  error?: RpcError;
 }
 
 export interface KernelNotificationMsg {

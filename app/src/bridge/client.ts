@@ -3,6 +3,20 @@
 export interface RpcError {
   code: number;
   message: string;
+  data?: unknown;
+}
+
+/** Preserve structured failures so callers can distinguish file conflicts from retries. */
+export class BridgeRpcError extends Error {
+  readonly code: number;
+  readonly data?: unknown;
+
+  constructor(error: RpcError) {
+    super(error.message);
+    this.name = 'BridgeRpcError';
+    this.code = error.code;
+    this.data = error.data;
+  }
 }
 
 type NotificationHandler = (method: string, params: unknown) => void;
@@ -170,7 +184,7 @@ export class BridgeClient {
     if (id !== undefined && this.pending.has(id)) {
       const { resolve, reject } = this.pending.get(id)!;
       this.pending.delete(id);
-      if (msg.error) reject(new Error((msg.error as RpcError).message));
+      if (msg.error) reject(new BridgeRpcError(msg.error as RpcError));
       else resolve(msg.result);
       return;
     }

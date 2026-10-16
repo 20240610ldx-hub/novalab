@@ -289,13 +289,14 @@ describe('diff.stage 编译预检（P2.7）', () => {
     // 未入队：无 diff.updated 广播，后续 accept 无 diffId 可用
     expect(countNotes('diff.updated')).toBe(0);
 
-    // 试探 + 回滚 = 2 次 set_cells；试探带候选码，回滚复原
-    const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    expect(setCells).toHaveLength(2);
-    const probe = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
-    const rollback = (setCells[1]!.params as { cells: { id: string; code: string }[] }).cells;
-    expect(probe.find((c) => c.id === 'b')!.code).toBe('x = 1');
-    expect(rollback.find((c) => c.id === 'b')!.code).toBe('y = x + 1');
+    const validations = fakes[0]!.requests.filter((r) => r.method === 'validate_cells');
+    expect(validations).toHaveLength(1);
+    const candidate = (validations[0]!.params as { cells: { id: string; code: string }[] }).cells;
+    expect(candidate.find((c) => c.id === 'b')!.code).toBe('x = 1');
+    expect(fakes[0]!.countOf('set_cells')).toBe(0);
+    expect(fakes[0]!.countOf('save_file')).toBe(0);
+    expect(fakes[0]!.countOf('exec_cell')).toBe(0);
+    expect(fakes[0]!.countOf('exec_repl')).toBe(0);
     // 缓存未被污染
     expect((await call('agent.cellCode', { cellId: 'b' })).result).toEqual({
       cellId: 'b',
@@ -303,9 +304,13 @@ describe('diff.stage 编译预检（P2.7）', () => {
     });
   });
 
-  it('预检通过 → 正常 stage + diff.updated；回滚发生在 stage 前', async () => {
+  it('预检通过 → 正常 stage + diff.updated；只有一次纯验证且不改内核状态', async () => {
     setup();
     await openNotebook();
+    await call('cell.run', { cellId: 'a', cascade: true });
+    const before = structuredClone({ cells: fakes[0]!.cells, staleSet: fakes[0]!.staleSet });
+    const start = fakes[0]!.requests.length;
+    const noteStart = notes.length;
     const res = await call('diff.stage', {
       targetCellId: 'b',
       action: 'update',
@@ -315,11 +320,12 @@ describe('diff.stage 编译预检（P2.7）', () => {
     expect(out).toEqual({ diffId: 'diff-1' });
     expect(countNotes('diff.updated')).toBe(1);
 
-    const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    expect(setCells).toHaveLength(2); // 试探 + 回滚（stage 本身不改内核）
-    const rollback = (setCells[1]!.params as { cells: { id: string; code: string }[] }).cells;
-    expect(rollback.find((c) => c.id === 'b')!.code).toBe('y = x + 1');
-    // 内核回滚不影响缓存里的 diff 队列
+    const requests = fakes[0]!.requests.slice(start);
+    expect(requests.map((r) => r.method)).toEqual(['validate_cells']);
+    const candidate = (requests[0]!.params as { cells: { id: string; code: string }[] }).cells;
+    expect(candidate.find((c) => c.id === 'b')!.code).toBe('y = x + 2');
+    expect({ cells: fakes[0]!.cells, staleSet: fakes[0]!.staleSet }).toEqual(before);
+    expect(notes.slice(noteStart).filter((n) => n.method.startsWith('run.'))).toEqual([]);
     const diffs = (notes.find((n) => n.method === 'diff.updated')!.params as DiffUpdatedParams).diffs;
     expect(diffs[0]).toMatchObject({ diffId: 'diff-1', newCode: 'y = x + 2', status: 'proposed' });
   });
@@ -333,12 +339,13 @@ describe('diff.stage 编译预检（P2.7）', () => {
       newCode: 'z = x * 10',
     });
     expect(res.result).toEqual({ diffId: 'diff-1' });
-    const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    const probe = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
-    expect(probe).toHaveLength(4);
-    expect(probe[1]).toEqual({ id: '__diff_precheck__', code: 'z = x * 10' });
-    const rollback = (setCells[1]!.params as { cells: { id: string; code: string }[] }).cells;
-    expect(rollback).toHaveLength(3);
+    const validations = fakes[0]!.requests.filter((r) => r.method === 'validate_cells');
+    expect(validations).toHaveLength(1);
+    const candidate = (validations[0]!.params as { cells: { id: string; code: string }[] }).cells;
+    expect(candidate).toHaveLength(4);
+    expect(candidate[1]).toEqual({ id: '__diff_precheck__', code: 'z = x * 10' });
+    expect(fakes[0]!.countOf('set_cells')).toBe(0);
+    expect(fakes[0]!.cells).toHaveLength(3);
   });
 
   it('未 open → -32001（预检不改变前置校验）', async () => {
