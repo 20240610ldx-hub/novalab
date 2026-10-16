@@ -11,14 +11,18 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "chokidar": "^5.0.0",
     "ws": "^8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "4.0.72",
     "@types/node": "^26.6.4",
     "@types/ws": "^8.18.2",
+    "ai": "7.0.128",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
