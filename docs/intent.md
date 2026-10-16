@@ -38,11 +38,11 @@ spec 回答"怎么做"，plan 回答"按什么顺序做"，本文档回答"到�
 |---|---|---|
 | Jupyter / JupyterLab | 生态最全、科研人员肌肉记忆 | 隐式状态黑盒：乱序执行后变量与代码脱钩；Agent 拿到的"世界模型"是错的；.ipynb JSON 冲突 |
 | Colab / Claude Science（云端） | UI/UX 现代、Agent 原生集成 | 数据必须上传（敏感科研数据不可接受）；GPU/内存配额；离线不可用 |
-| marimo | 反应式 DAG、纯 .py 存储、UI 现代 | Agent 能力浅（补全级）；UI 不是"会话日志"范式；多内核/科研交付流弱 |
+| marimo | 反应式 DAG、纯 .py 存储；现有 Agent/Code、ACP 集成、本地模型、逐 notebook 环境与多格式导出 | 2026-10-14 复核已纠正原“仅补全级/交付弱”假设；会话审阅、恢复、出站与科研结果质量须按具体任务比较 |
 | Observable | 反应式、可视化强 | JS 生态，与 Python 科研栈绝缘 |
 | VS Code + 插件 | 编辑器强 | 无反应式语义；notebook 体验是拼接的 |
 
-**我们的空档**：marimo 的执行语义 × Claude Science 的交互范式 × 本地隐私边界 × 可插拔任意 LLM。四者交集目前无人占据。
+**待验证的产品差异**：反应式执行语义 × 会话审阅范式 × 可检查的本地隐私边界 × 可插拔 LLM。2026-10-14 公开资料复核不支持“交集无人占据”的原假设；后续以可靠保存/恢复、同核 Agent 审阅、运行结果可追溯和真实科研交付验证价值，见 [科研需求与迭代证据台账](research-iteration-roadmap.md)。
 
 ---
 
@@ -154,7 +154,7 @@ Q7 裁决：开发自测使用本机 cc-switch 中 Claude 桌面端选项栏名�
 
 背景：L-5 起普通 cell 收尾裸表达式会发 run.mime `text/plain`，对象有 `_repr_html_()`（pandas DataFrame）时再发 `text/html`。这段 HTML 来自内核，要在 Tauri webview 主框架里显示，而 Tauri CSP 仍是待办。威胁不在"用户自己写的代码"（内核本就能执行任意代码），而在**数据经劣质 repr 未转义地流进标签**（不可信 CSV 的单元格、`to_html(escape=False)`、第三方库的 `_repr_html_`）：一旦在主框架执行脚本，可触达 bridge WS（含经它转发的 LLM 代理）与 Tauri IPC。
 - 选项 A：`<iframe sandbox srcDoc>`（不给 allow-scripts）。得：浏览器强制隔离、保真度最高（保留 pandas 自带样式 / Styler 着色）。失：无 allow-same-origin 时父页量不到子文档高度、子文档无脚本也报不了高度 → 4 行表与 60 行表只能给同一固定高度，破坏输出面板"短输出无滚动条、长输出 420px 内滚"的约定；给 allow-same-origin 能量高度但审计面变微妙；iframe 不继承 design token，暗 / 浅主题色须注入 srcDoc 并在切主题时重建；外链资源（img / CSS url）与 meta refresh 仍可外发请求，还得再叠一层 meta CSP 或消毒；每个输出一个文档，不利于 100 cell 60fps。
-- 选项 B：**解析后重建**。`DOMParser`（惰性文档：不执行脚本、不加载资源）→ 遍历节点树 → 只产出白名单标签（表格族 + 行内格式 + div/p/pre/br/hr/ul/ol/li）与 `colspan` / `rowspan` 两个整数属性 → React `createElement` 渲染。得：全程不把 HTML 串写回 DOM，不存在 mutation-XSS；白名单内没有任何带 URL 的属性，也没有 style / class / id / on*，**零脚本面、零网络外发面**，安全论证只有几十行可审计代码；原生 DOM 直接继承 token、自然高度、复用 `.nl-out-panel`；零新依赖。失：丢样式（Styler 着色、库自带 CSS）；依赖脚本的 repr（plotly / bokeh / altair）无法呈现。
+- 选项 B：**解析后重建**。`DOMParser`（脱离页面的解析文档；解析期间行为须在目标浏览器验证）→ 遍历节点树 → 只产出白名单标签（表格族 + 行内格式 + div/p/pre/br/hr/ul/ol/li）与 `colspan` / `rowspan` 两个整数属性 → React `createElement` 渲染。得：重建阶段不把 HTML 串写回 DOM，避开消毒后回写字符串的 mutation-XSS 路径；输出树没有带 URL 的属性，也没有 style / class / id / on*，不保留脚本与资源加载入口。解析期行为另在目标浏览器验收；本轮开发 Chromium 哨兵测试未观察到脚本执行或外链请求尝试，不据此推定所有 WebView 均通过。原生 DOM 直接继承 token、自然高度、复用 `.nl-out-panel`；零新依赖。失：丢样式（Styler 着色、库自带 CSS）；依赖脚本的 repr（plotly / bokeh / altair）无法呈现。
 - 选项 C：引入 DOMPurify + `dangerouslySetInnerHTML`。得：成熟、保真度介于 A / B。失：新增安全关键依赖须持续跟版本；仍是"过滤后回写 HTML 串"，历史上 mXSS 绕过多出自这一步；保留 style / class 后还要处理与全局样式的相互污染。
 - 选项 D：直接 `dangerouslySetInnerHTML`。否。
 - **结论（提案）**：取 B。范围刻意收窄为"表格型 HTML"：消毒结果含 `<table>` 且有文本才以 HTML 渲染，否则回落 `text/plain` 面板并保留灰字 `unrendered mime: text/html`（与未知 mime 同一降级观感，不静默吞掉富表示的存在）。展示语义取 Jupyter richest-representation：有 `text/html` 即取代 `text/plain`，不并列显示。防护叠层：内核侧单条 1e6 字符上限（L-5）+ 前端 20 000 节点预算（超出截断并注记）。

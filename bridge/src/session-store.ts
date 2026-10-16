@@ -44,6 +44,15 @@ export function makeSessionId(startedAt: Date, rand: () => string = () => random
   return `s-${compact}-${rand()}`;
 }
 
+/** Windows 路径忽略大小写；大小写敏感的平台保留文件名区别。 */
+export function notebookPathsMatch(a: string, b: string): boolean {
+  const normalize = (p: string) => {
+    const resolved = path.resolve(p);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(a) === normalize(b);
+}
+
 export class SessionStore {
   constructor(private readonly clock: () => Date = () => new Date()) {}
 
@@ -65,6 +74,7 @@ export class SessionStore {
       startedAt: startedAt.toISOString(),
       cellCount: opts.cellCount,
       source: 'local',
+      notebookPath: opts.notebookPath,
     };
     const index = this.readIndex(dir);
     index.push(meta);
@@ -118,20 +128,37 @@ export class SessionStore {
     const index = this.readIndex(dir);
     let meta = index.find((m) => m.id === session.id);
     if (!meta) {
-      meta = { id: session.id, startedAt: session.startedAt, cellCount: cells.length, source: 'local' };
+      meta = { id: session.id, startedAt: session.startedAt, cellCount: cells.length, source: 'local', notebookPath: session.notebookPath };
       index.push(meta);
     }
     meta.endedAt = endedAt;
     meta.cellCount = cells.length;
+    meta.notebookPath = session.notebookPath;
     this.writeIndex(dir, index);
     return { ...meta };
   }
 
   // ---------- 查询 ----------
 
-  /** index.json 全量（时间序 = begin 顺序）；缺失/损坏 → []。 */
-  list(notebookDir: string): SessionMeta[] {
-    return this.readIndex(SessionStore.dirFor(notebookDir));
+  /**
+   * 同目录共用 index；有 notebookPath 时按归属过滤。
+   * 旧版 index 的归属从 snapshot 恢复；无可读快照时保留未知条目，避免隐藏旧历史。
+   */
+  list(notebookDir: string, notebookPath?: string): SessionMeta[] {
+    const dir = SessionStore.dirFor(notebookDir);
+    const all = this.readIndex(dir).map((m) => {
+      if (m.notebookPath || !/^[A-Za-z0-9._-]+$/.test(m.id)) return m;
+      try {
+        const snapshot = JSON.parse(readFileSync(path.join(dir, `${m.id}.snapshot.json`), 'utf8')) as SessionSnapshot;
+        const owner = snapshot?.notebookPath;
+        return typeof owner === 'string' && owner !== '' ? { ...m, notebookPath: owner } : m;
+      } catch {
+        return m;
+      }
+    });
+    return notebookPath
+      ? all.filter((m) => !m.notebookPath || notebookPathsMatch(m.notebookPath, notebookPath))
+      : all;
   }
 
   /**
@@ -158,6 +185,7 @@ export class SessionStore {
         ...(snapshot.endedAt ? { endedAt: snapshot.endedAt } : {}),
         cellCount: snapshot.cells.length,
         source: 'local' as const,
+        ...(typeof snapshot.notebookPath === 'string' ? { notebookPath: snapshot.notebookPath } : {}),
       };
     return { meta, snapshot, events: this.readEvents(notebookDir, sessionId) };
   }
@@ -212,6 +240,7 @@ export class SessionStore {
           ...(typeof r['endedAt'] === 'string' ? { endedAt: r['endedAt'] } : {}),
           cellCount: typeof r['cellCount'] === 'number' ? r['cellCount'] : 0,
           source: r['source'] === 'agent' ? 'agent' : 'local',
+          ...(typeof r['notebookPath'] === 'string' ? { notebookPath: r['notebookPath'] } : {}),
         });
       }
       return out;

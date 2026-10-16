@@ -40,6 +40,8 @@ jobs:
         run: |
           pnpm --filter @novalab/bridge exec tsc --noEmit
           pnpm --filter @novalab/app exec tsc --noEmit
+      - name: script clients (local WebSocket fixtures)
+        run: pnpm test:scripts
       - name: vitest (bridge)
         run: pnpm --filter @novalab/bridge exec vitest run
       - name: vitest (app)
@@ -61,9 +63,13 @@ jobs:
   # 端到端冒烟：bridge(真) + novakernel(真) + 模拟前端 WS 客户端
   # （scripts/integration-smoke.mjs 自起自停 bridge，job 无需常驻服务）
   integration:
-    name: integration-smoke
-    runs-on: ubuntu-latest
+    name: integration-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: [node-tests, py-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -79,7 +85,11 @@ jobs:
           cache-dependency-glob: py/uv.lock
       - run: pnpm install --frozen-lockfile
       - run: uv sync --directory py --all-extras
+      - name: real-process security, persistence and lifecycle acceptance
+        run: pnpm --filter @novalab/bridge exec vitest run --config vitest.acceptance.config.ts
       - run: node scripts/integration-smoke.mjs
+      - name: owned-process isolation acceptance
+        run: node --test --test-timeout=70000 scripts/integration-smoke.acceptance.mjs
 
   # 交互状态画廊：真机截图（playwright chromium headless）。
   # 服务由本 job 后台起（脚本检测到已运行则复用，不触发其 Windows-only 的
@@ -115,6 +125,12 @@ jobs:
             sleep 1
           done
           curl -sf http://localhost:5199/ > /dev/null || { echo 'vite never came up'; cat bridge-ci.log app-ci.log; exit 1; }
+      - name: HTML parser and renderer acceptance
+        run: node scripts/html-output-smoke.mjs http://localhost:5199/
+      - name: browser save and close acceptance
+        run: node scripts/save-lifecycle-smoke.mjs http://localhost:5199/
+      - name: browser external conflict acceptance
+        run: node scripts/file-conflict-smoke.mjs http://localhost:5199/
       - name: run gallery
         run: node scripts/demo-gallery.mjs --skip-agent
       - name: upload states artifact

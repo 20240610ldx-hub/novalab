@@ -12,9 +12,18 @@
  * 隐私边界（spec §8）：出进程数据的截断在 router 各 agent.* 出口实施
  * （agent.context 的 schemas 过 PreviewSerializer 4KB 硬截断；agent.cellOutput 只返回
  * traceback 与 MIME 类型键，stdout/stderr/文件路径留在本地 UI/session）。
+ * 第二道闸（按工具输出白名单）见 ./output-whitelist，经本模块 re-export 给 app 侧。
  */
 
 import { z } from 'zod';
+
+export {
+  REDACTED_TEXT,
+  TOOL_OUTPUT_WHITELIST,
+  TRACEBACK_CHAR_LIMIT,
+  sanitizeToolOutput,
+  type ToolOutputGateResult,
+} from './output-whitelist';
 
 /** 六工具名（spec §7 顺序：4 核心 + 2 只读辅助）。 */
 export const AGENT_TOOL_NAMES = [

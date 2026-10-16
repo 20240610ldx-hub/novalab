@@ -300,7 +300,7 @@ export function Welcome() {
                 disabled={!notebookPath}
                 testId="welcome-new-session"
                 onClick={() => {
-                  void restartKernel();
+                  void restartKernel({ allowLive: true });
                   showNotebook();
                 }}
               />

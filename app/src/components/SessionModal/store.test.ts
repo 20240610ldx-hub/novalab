@@ -23,6 +23,7 @@ import {
   buildSegments,
   degradeTransfer,
   idleTransfer,
+  normalizeSessionMetas,
   isWiringPending,
   modalSummary,
   useSession,
@@ -169,6 +170,80 @@ describe('modal 开关与快照缓存', () => {
     await useSession.getState().loadSnapshot('sX');
     expect(useSession.getState().snapshotCells['sX']).toEqual([]);
     expect(useSession.getState().snapshotLoading['sX']).toBe(false);
+  });
+
+  it('O-2：来源路径从 bridge 保留，仅缺省记录使用查询路径', () => {
+    const sessions = normalizeSessionMetas([
+      meta('s-a', 't1', { notebookPath: NB }),
+      meta('s-legacy', 't2'),
+    ], 'D:/nb/imported.py');
+    expect(sessions.map((s) => s.notebookPath)).toEqual([NB, 'D:/nb/imported.py']);
+    expect(buildSegments(sessions).map((s) => s.notebookPath)).toEqual(['D:/nb/imported.py', NB]);
+  });
+
+  it('O-2：旧 session.list 延迟返回不覆盖新 notebook 的会话与 currentId', async () => {
+    let resolveOld!: (value: unknown) => void;
+    const oldReply = new Promise((resolve) => { resolveOld = resolve; });
+    mockDispatch({
+      'session.list': (params) => (params as { notebookPath: string }).notebookPath === NB
+        ? oldReply
+        : [meta('s-new', 't2')],
+    });
+    const oldRefresh = useSession.getState().refreshSessions(NB);
+    useNotebook.setState({ notebookPath: 'D:/nb/imported.py' });
+    await useSession.getState().refreshSessions();
+    resolveOld([meta('s-old', 't1')]);
+    await oldRefresh;
+    expect(useSession.getState().sessions.map((s) => s.id)).toEqual(['s-new']);
+    expect(useSession.getState().currentId).toBe('s-new');
+  });
+
+  it('同一路径的旧响应也不能覆盖更新的列表；无 live 时清掉旧 currentId', async () => {
+    let resolveOld!: (value: unknown) => void;
+    rpc.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    const old = useSession.getState().refreshSessions();
+    mockDispatch({ 'session.list': () => [meta('s-ended', 't2', { endedAt: 't3' })] });
+    useSession.setState({ currentId: 's-old' });
+    await useSession.getState().refreshSessions();
+    resolveOld([meta('s-old', 't1')]);
+    await old;
+    expect(useSession.getState().sessions.map((s) => s.id)).toEqual(['s-ended']);
+    expect(useSession.getState().currentId).toBeNull();
+  });
+
+  it('最后一个 notebook 关闭后，在途 session.list 不重填列表', async () => {
+    let resolve!: (value: unknown) => void;
+    rpc.mockImplementationOnce(() => new Promise((r) => { resolve = r; }));
+    const pending = useSession.getState().refreshSessions();
+    useNotebook.setState({ notebookPath: null });
+    resolve([meta('s-old', 't1')]);
+    await pending;
+    expect(useSession.getState().sessions).toEqual([]);
+  });
+
+  it('session.started 早于 notebook.open 响应：路径落定后补刷新', async () => {
+    mockDispatch({ 'session.list': () => [meta('s-new', 't2')] });
+    useSession.getState().onStarted({ sessionId: 's-new', notebookPath: 'D:/nb/imported.py' });
+    await flush();
+    expect(useSession.getState().sessions).toEqual([]);
+    useNotebook.setState({ notebookPath: 'D:/nb/imported.py' });
+    await useSession.getState().refreshSessions();
+    expect(useSession.getState().sessions.map((s) => s.id)).toEqual(['s-new']);
+    expect(useSession.getState().currentId).toBe('s-new');
+  });
+
+  it('O-2 修复：显式 notebookPath 覆盖当前 notebook（会话与 notebook 配对）', async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    mockDispatch({
+      'session.open': (params) => {
+        seen.push(params as Record<string, unknown>);
+        return { sessionId: 's-old', startedAt: 't', endedAt: 't2', cells: [snapCell(0)], readOnly: true };
+      },
+    });
+    useNotebook.setState({ notebookPath: 'D:/nb/imported.py' });
+    await useSession.getState().loadSnapshot('s-old', 'D:/nb/geo.py');
+    expect(seen).toEqual([{ sessionId: 's-old', notebookPath: 'D:/nb/geo.py' }]);
+    expect(useSession.getState().snapshotCells['s-old']).toHaveLength(1);
   });
 });
 

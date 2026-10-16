@@ -4,6 +4,9 @@
 //! - Host the WebView pointed at the vite dev server (dev) or `../dist` (build).
 //! - Spawn the Bridge (node) child process unless the developer already runs it
 //!   themselves (`NOVALAB_BRIDGE=external`).
+//! - Supervise the bridge: an unexpected exit is restarted at most 3 times within
+//!   60 s (supervisor.rs); after that the frontend's "retry connection" calls the
+//!   `restart_bridge` command, which resets the budget (round 6, A15).
 //! - Kill the bridge process tree on app exit.
 //!
 //! P4.1b — bridge/kernel sidecar 双分支：
@@ -24,9 +27,15 @@
 //! 生成物（bridge-dist/、py-resources/、binaries/*.exe）不入库，由
 //! scripts/build-bridge.mjs + scripts/sync-py-resources.mjs 在打包前产出。
 
+mod supervisor;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use supervisor::{Decision, RestartPolicy};
 
 use tauri::Manager;
 
@@ -34,6 +43,18 @@ use tauri::Manager;
 /// `None` when `NOVALAB_BRIDGE=external` or when the spawn failed (dev workflow
 /// tolerates a manually-started bridge — see spec §2).
 struct BridgeChild(Mutex<Option<Child>>);
+
+/// Supervision bookkeeping for the bridge child (only used when we spawned it).
+struct BridgeSupervision {
+    policy: Mutex<RestartPolicy>,
+    /// Set first thing on app exit so the watcher never respawns during shutdown.
+    shutting_down: AtomicBool,
+    /// A watcher thread is alive (at most one).
+    watching: AtomicBool,
+}
+
+/// Poll interval for the watcher thread (`try_wait` is non-blocking).
+const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// sidecar 文件名嵌 target triple（tauri-utils `external_binaries()` 命名约定，
 /// triple 由 tauri-build 经 `cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE` 提供）。
@@ -43,23 +64,142 @@ const SIDCAR_TRIPLE: &str = env!("TAURI_ENV_TARGET_TRIPLE");
 pub fn run() {
     tauri::Builder::default()
         .manage(BridgeChild(Mutex::new(None)))
+        .manage(BridgeSupervision {
+            policy: Mutex::new(RestartPolicy::default()),
+            shutting_down: AtomicBool::new(false),
+            watching: AtomicBool::new(false),
+        })
+        .invoke_handler(tauri::generate_handler![restart_bridge])
         .setup(|app| {
             spawn_bridge(app.handle());
+            start_watcher(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building NovaLab")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                app_handle
+                    .state::<BridgeSupervision>()
+                    .shutting_down
+                    .store(true, Ordering::SeqCst);
                 kill_bridge(app_handle);
             }
         });
 }
 
+fn bridge_is_external() -> bool {
+    std::env::var("NOVALAB_BRIDGE").as_deref() == Ok("external")
+}
+
+/// Start the (single) watcher thread if we own a bridge child.
+fn start_watcher(app: &tauri::AppHandle) {
+    if bridge_is_external() {
+        return;
+    }
+    let sup = app.state::<BridgeSupervision>();
+    if sup.watching.swap(true, Ordering::SeqCst) {
+        return; // already watching
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        watch_bridge(&app);
+        app.state::<BridgeSupervision>()
+            .watching
+            .store(false, Ordering::SeqCst);
+    });
+}
+
+/// Poll the bridge child; on an unexpected exit apply the restart policy.
+/// Returns when shutting down, when there is no child to watch, or on GiveUp.
+fn watch_bridge(app: &tauri::AppHandle) {
+    loop {
+        std::thread::sleep(WATCH_INTERVAL);
+        let sup = app.state::<BridgeSupervision>();
+        if sup.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let exited = {
+            let state = app.state::<BridgeChild>();
+            let mut guard = state.0.lock().expect("bridge state poisoned");
+            let Some(child) = guard.as_mut() else {
+                return; // spawn failed or child already taken — nothing we own
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let pid = child.id();
+                    *guard = None;
+                    Some((pid, status))
+                }
+                Ok(None) | Err(_) => None,
+            }
+        };
+        let Some((pid, status)) = exited else { continue };
+        eprintln!("[novalab] bridge exited unexpectedly (pid {pid}, {status})");
+        // Best effort: reap descendants of the dead bridge that still name it as parent.
+        kill_tree(pid);
+        let decision = sup
+            .policy
+            .lock()
+            .expect("bridge policy poisoned")
+            .on_exit(Instant::now());
+        match decision {
+            Decision::Restart(delay) => {
+                eprintln!("[novalab] restarting bridge in {} ms", delay.as_millis());
+                std::thread::sleep(delay);
+                if sup.shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
+                spawn_bridge(app);
+            }
+            Decision::GiveUp => {
+                eprintln!(
+                    "[novalab] bridge restart limit reached ({} in {} s); waiting for retry from the UI",
+                    supervisor::MAX_RESTARTS,
+                    supervisor::RESTART_WINDOW.as_secs()
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// Frontend "retry connection" after the budget was exhausted: reset the policy,
+/// respawn if no live child, and resume supervision. Returns false for an
+/// external bridge (nothing we own to restart).
+#[tauri::command]
+fn restart_bridge(app: tauri::AppHandle) -> bool {
+    if bridge_is_external() {
+        return false;
+    }
+    let sup = app.state::<BridgeSupervision>();
+    if sup.shutting_down.load(Ordering::SeqCst) {
+        return false;
+    }
+    sup.policy.lock().expect("bridge policy poisoned").reset();
+    let alive = {
+        let state = app.state::<BridgeChild>();
+        let mut guard = state.0.lock().expect("bridge state poisoned");
+        match guard.as_mut().map(|c| c.try_wait()) {
+            Some(Ok(None)) => true,
+            Some(_) => {
+                *guard = None;
+                false
+            }
+            None => false,
+        }
+    };
+    if !alive {
+        spawn_bridge(&app);
+    }
+    start_watcher(&app);
+    true
+}
+
 /// Spawn the bridge unless `NOVALAB_BRIDGE=external`.
 /// Packaged 构建走 sidecar 分支；dev（或 packaged payload 缺失时回落）走 pnpm 分支。
 fn spawn_bridge(app: &tauri::AppHandle) {
-    if std::env::var("NOVALAB_BRIDGE").as_deref() == Ok("external") {
+    if bridge_is_external() {
         eprintln!("[novalab] NOVALAB_BRIDGE=external — not spawning bridge; assuming a Bridge is already running (frontend discovers /bridge-info)");
         return;
     }
@@ -259,22 +399,35 @@ fn kill_bridge(app: &tauri::AppHandle) {
         return; // external bridge or spawn failed — nothing we own
     };
 
-    #[cfg(windows)]
-    {
-        // dev 分支：我们 spawn 的是 `cmd /C pnpm ...`，真实负载（node/tsx）是孙进程；
-        // packaged 分支：node 是直接子进程，但 kernel（uv → python）是它的孙进程。
-        // 两种情况都靠 taskkill /T /F 杀整棵树。
-        let pid = child.id().to_string();
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .output();
-    }
+    // dev 分支：我们 spawn 的是 `cmd /C pnpm ...`，真实负载（node/tsx）是孙进程；
+    // packaged 分支：node 是直接子进程，但 kernel（uv → python）是它的孙进程。
+    // 两种情况都靠 taskkill /T /F 杀整棵树。
+    kill_tree(child.id());
     #[cfg(not(windows))]
     {
         let _ = child.kill();
     }
     let _ = child.wait(); // reap
     eprintln!("[novalab] bridge stopped");
+}
+
+/// Kill a process tree we own by root PID (Windows `taskkill /T /F`; no-op elsewhere,
+/// where the caller kills the direct child).
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let pid = pid.to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+    }
 }
 
 /// Locate the pnpm workspace root (the dir containing `pnpm-workspace.yaml`).

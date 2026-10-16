@@ -1,5 +1,6 @@
 """test_runtime.py — 反应式执行语义黄金集（spec §5 + 契约增补形状）。"""
 
+import hashlib
 import json
 
 import pytest
@@ -498,7 +499,8 @@ def test_load_save_exec_roundtrip(tmp_path):
     assert "".join(p["text"] for p in col.of("run.stdout", "e5f6a7b8")) == "42\n"
 
     p2 = tmp_path / "saved.py"
-    assert rt.save_file(str(p2), [{"id": c["id"], "code": c["code"]} for c in state["cells"]]) == {"ok": True}
+    saved = rt.save_file(str(p2), [{"id": c["id"], "code": c["code"]} for c in state["cells"]])
+    assert saved == {"ok": True, "baselineSha256": hashlib.sha256(p2.read_bytes()).hexdigest()}
     nb2 = serialize.parse_file(str(p2))
     assert [(c.id, c.code) for c in nb2.cells] == [
         ("a1b2c3d4", "x = 21 * 2"),

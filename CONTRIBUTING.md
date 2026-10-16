@@ -17,11 +17,18 @@
 | 门 | 命令 |
 |---|---|
 | 类型检查 | `pnpm --filter @novalab/bridge exec tsc --noEmit` 且 `pnpm --filter @novalab/app exec tsc --noEmit` |
+| 脚本客户端回归 | `pnpm test:scripts`（随机 loopback 端口合成 WS，不读凭据/调用 provider） |
 | bridge 单测 | `pnpm --filter @novalab/bridge exec vitest run` |
 | app 单测 | `pnpm --filter @novalab/app exec vitest run` |
 | Python 内核单测 | `uv run --directory py pytest` |
-| 集成冒烟 | `node scripts/integration-smoke.mjs`（bridge+kernel 端到端，起停自管） |
-| 画廊（涉及 UI 时） | `node scripts/demo-gallery.mjs --skip-agent`，并把受影响状态截图随 PR 更新到 `docs/demos/states/` |
+| 真实进程验收 | `pnpm --filter @novalab/bridge exec vitest run --config vitest.acceptance.config.ts`（先 `uv sync --directory py --all-extras`；鉴权/代理负例、纯 Diff 预检、真实保存/关闭与执行队列生命周期） |
+| HTML 浏览器验收 | `node scripts/html-output-smoke.mjs <app-url>`（开发前端已运行；Chromium；无真实 provider） |
+| 保存/关闭浏览器验收 | `node scripts/save-lifecycle-smoke.mjs <app-url>`（开发前端已运行；Chromium + 私有临时 bridge/文件；uv 环境已准备） |
+| 外部冲突浏览器验收 | `node scripts/file-conflict-smoke.mjs <app-url>`（源码稳定后新启开发前端；私有临时文件；后台冲突、watcher 提醒、备份/冷加载、失败后显式重试与副本重开） |
+| 集成冒烟 | `node scripts/integration-smoke.mjs`（私有临时 bridge + kernel，核验 PID/token 后直连，起停自管） |
+| 进程隔离验收 | `node --test --test-timeout=70000 scripts/integration-smoke.acceptance.mjs`（先准备 uv 环境；独占合成 7788 服务，覆盖成功/故障/超时/信号处理器/并发；不得停止已占用该端口的其他服务） |
+| Packaged 进程归属验收（Release 门） | 先构建 sidecars，再 `node --test --test-timeout=70000 scripts/packaged-startup-smoke.acceptance.mjs`；真实 bundled node/bridge/uv + 已准备的 Python，临时 notebook；需 7788 空闲建 decoy，不得停止其他服务，不与集成隔离套件并行。平台与非安装器边界见 [清单](docs/release-v0.1.1-checklist.md) |
+| 画廊（涉及 UI 时） | 无 LLM 用 `node scripts/demo-gallery.mjs --skip-agent`（明确跳过 11 态）；受影响截图更新到 `docs/demos/states/`。真实 Agent 单列验收：11 态 optional 失败不影响脚本退出码，需核对实际结果 |
 
 新增功能必须带测试；修 bug 先补一个能复现的失败用例再修。
 

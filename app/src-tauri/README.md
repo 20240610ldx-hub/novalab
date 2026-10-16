@@ -132,7 +132,7 @@ pnpm --filter @novalab/app exec tauri build --bundles nsis --config '{\"bundle\"
 - [x] **bundle**：GitHub Actions Release run `38066573600` 已在 Windows
       生成并完成 NSIS + MSI，在 Linux 生成并完成 AppImage + deb；两平台均先通过
       `packaged-startup-smoke.mjs` 的真实 sidecar 启动验收。仍待补版本号策略
-      （tauri.conf.json 0.0.1 与 git tag 无联动）和 updater。
+      （tauri.conf.json 当前为 0.1.0，与 git tag 无一致性校验）和 updater；当前候选版验收见 [v0.1.1 清单](../../docs/release-v0.1.1-checklist.md)。
 - [ ] **WebView2 引导**：当前默认 `downloadBootstrapper`（安装时联网）。
       离线/企业分发可改 `bundle.windows.webviewInstallMode`：
       `embedBootstrapper`（+~2 MB）或 `offlineInstaller`（+~150 MB）。
@@ -170,9 +170,17 @@ rust-lld proxy）。③ sidecar 使产物体积大增（node ~88 MB + uv ~63 MB�
 LZMA 压缩后 setup 预计 60–140 MB），GitHub Release 附件与 actions 缓存时长
 会相应上涨。
 
-发布前的 `scripts/packaged-startup-smoke.mjs` 会直接启动本平台 sidecar，验证
-`/bridge-info` 发现、WS token 认证、`notebook.open` 与一次真实 `cell.run`；Windows
-与 Linux job 共用这条验收，不把“能编译”当作“能启动”。tauri-action 完成后，
+发布前的 `scripts/packaged-startup-smoke.mjs` 会以 packaged 环境直接启动本平台
+bundled node/bridge/uv，使用随机 token、临时 notebook/data 和 OS 分配端口。
+它核对私有 manifest 的 PID/token/精确 loopback URL 后直连认证，ping、open，
+真实 Python 检查 packaged 环境并计算 `42`；整棵自身进程树退出、临时文件删除后
+才打印成功。共享 `smoke-runtime.mjs` 负责 Windows 启动前 Job / POSIX 进程组，
+不会扫描或清理已有默认端口服务。Release 另运行
+`node --test --test-timeout=70000 scripts/packaged-startup-smoke.acceptance.mjs`，
+覆盖默认端口 decoy 请求 0、回调失败、端口冲突、超时、bridge 死亡与信号处理器；
+该套件需 7788 空闲，不得为了测试停止已有服务。Windows 与 Linux job 共用入口，
+本机实测平台与历史记录见 [验收清单](../../docs/release-v0.1.1-checklist.md)；
+构建目录运行不等于最终安装器、Tauri 窗口或干净机器首启验收。tauri-action 完成后，
 Windows job 还会运行 `scripts/verify_bundle.py` 核验 NSIS payload 必含 sidecar/
 resources 且不含 `.venv`/凭据，Linux job 核验 AppImage 与 deb 文件均已生成且非空。
 

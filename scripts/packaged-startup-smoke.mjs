@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 /**
- * Packaged runtime acceptance: launch the bundled node sidecar, discover and
- * authenticate the Bridge, then open and execute the real demo notebook.
- *
- * The Tauri window is intentionally not needed here; this exercises the same
- * sidecar command and environment that the Windows/Linux shell launches. Set
- * NOVALAB_SMOKE_PY_DIR to an existing uv project (CI uses the checked-out py/)
- * to avoid downloading dependencies during the acceptance run.
+ * Run the bundled node/bridge/uv with the packaged environment, using an owned
+ * Bridge and a temporary synthetic notebook. This does not run a Tauri window
+ * or installer. NOVALAB_SMOKE_PY_DIR may select an already provisioned uv project
+ * (Release CI uses the checked-out py/) to avoid first-run dependency downloads.
  */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { BridgeClient, discoverBridge } from './bridge-client.mjs';
+import { withSmokeBridge } from './smoke-runtime.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tauriDir = path.join(root, 'app', 'src-tauri');
@@ -27,74 +22,68 @@ function targetTriple() {
   throw new Error(`unsupported platform/arch: ${process.platform}/${process.arch}`);
 }
 
-const triple = targetTriple();
-const ext = process.platform === 'win32' ? '.exe' : '';
-const nodeSidecar = path.join(tauriDir, 'binaries', `node-${triple}${ext}`);
-const uvSidecar = path.join(tauriDir, 'binaries', `uv-${triple}${ext}`);
-const bridgeScript = path.join(tauriDir, 'bridge-dist', 'bridge.mjs');
-const sourcePyDir = process.env.NOVALAB_SMOKE_PY_SOURCE_DIR
-  ? path.resolve(process.env.NOVALAB_SMOKE_PY_SOURCE_DIR)
-  : process.env.NOVALAB_SMOKE_PY_DIR
-    ? path.resolve(process.env.NOVALAB_SMOKE_PY_DIR)
-    : path.join(root, 'py');
-const runtimePyDir = process.env.NOVALAB_SMOKE_PY_DIR
-  ? path.resolve(process.env.NOVALAB_SMOKE_PY_DIR)
-  : sourcePyDir;
+export const PACKAGED_SMOKE_FIXTURE = `# %% [cell-id: abcdef01]
+import os
+assert os.environ["NOVALAB_PACKAGED"] == "1"
+assert os.path.isabs(os.environ["NOVALAB_UV_BIN"])
+packaged_answer = 6 * 7
+packaged_answer
+`;
 
-for (const required of [nodeSidecar, uvSidecar, bridgeScript, path.join(sourcePyDir, 'pyproject.toml')]) {
-  if (!fs.existsSync(required)) throw new Error(`packaged smoke 缺少产物: ${required}`);
+export async function runPackagedStartupSmoke({ fixture = PACKAGED_SMOKE_FIXTURE, ...options } = {}) {
+  const triple = targetTriple();
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const nodeSidecar = path.join(tauriDir, 'binaries', `node-${triple}${ext}`);
+  const uvSidecar = path.join(tauriDir, 'binaries', `uv-${triple}${ext}`);
+  const bridgeScript = path.join(tauriDir, 'bridge-dist', 'bridge.mjs');
+  const sourcePyDir = path.resolve(process.env.NOVALAB_SMOKE_PY_SOURCE_DIR ?? process.env.NOVALAB_SMOKE_PY_DIR ?? path.join(root, 'py'));
+  const runtimePyDir = path.resolve(process.env.NOVALAB_SMOKE_PY_DIR ?? sourcePyDir);
+  for (const required of [nodeSidecar, uvSidecar, bridgeScript, path.join(sourcePyDir, 'pyproject.toml')]) {
+    if (!fs.existsSync(required)) throw new Error(`packaged smoke 缺少产物: ${required}`);
+  }
+
+  let info;
+  await withSmokeBridge(fixture, async ({ bridge, notebookPath, stage }) => {
+    info = bridge.info;
+    const ping = await bridge.rpc('ping');
+    if (!ping?.pong) throw new Error('packaged ping 响应异常');
+    const opened = await bridge.rpc('notebook.open', { path: notebookPath });
+    await stage('opened');
+    if (!opened?.notebookId || opened.state?.cells?.length !== 1) {
+      throw new Error('packaged notebook.open 应返回一个合成 cell');
+    }
+    const cell = opened.state.cells[0];
+    const mark = bridge.notifications.length;
+    const run = await bridge.rpc('cell.run', { cellId: cell.id, cascade: false });
+    if (!run?.ok) throw new Error(`packaged cell.run 失败: ${JSON.stringify(run)}`);
+    await bridge.waitNotif('run.done', (p) => p?.cellId === cell.id, 15_000, mark);
+    const result = bridge.notifications.slice(mark).find((n) =>
+      n.method === 'run.mime' && n.params?.cellId === cell.id && n.params?.mime === 'text/plain');
+    if (result?.params.data !== '42') throw new Error('packaged Python 计算结果应为 42');
+    await stage('executed');
+  }, {
+    ...options,
+    launch: () => ({
+      node: nodeSidecar,
+      main: bridgeScript,
+      cwd: path.dirname(nodeSidecar),
+      env: {
+        NOVALAB_PACKAGED: '1',
+        NOVALAB_PY_DIR: runtimePyDir,
+        NOVALAB_PY_SOURCE_DIR: sourcePyDir,
+        NOVALAB_UV_BIN: uvSidecar,
+      },
+    }),
+  });
+  // withSmokeBridge resolves only after owned descendants exit and temp removal.
+  console.log(`PACKAGED_STARTUP_SMOKE_OK triple=${triple} wsPort=${info.wsPort} llmPort=${info.llmPort}`);
 }
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'novalab-packaged-smoke-'));
-const dataDir = path.join(tempDir, 'data');
-const notebookPath = path.join(root, 'demos', 'demo.py');
-const child = spawn(nodeSidecar, [bridgeScript], {
-  cwd: path.dirname(nodeSidecar),
-  env: {
-    ...process.env,
-    NOVALAB_PACKAGED: '1',
-    NOVALAB_DATA_DIR: dataDir,
-    NOVALAB_PY_DIR: runtimePyDir,
-    NOVALAB_PY_SOURCE_DIR: sourcePyDir,
-    NOVALAB_UV_BIN: uvSidecar,
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-  windowsHide: true,
-});
-
-child.stdout.on('data', (d) => process.stdout.write(`[packaged-bridge] ${d}`));
-child.stderr.on('data', (d) => process.stderr.write(`[packaged-bridge!] ${d}`));
-
-const waitForBridge = async () => {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    try {
-      const info = await discoverBridge();
-      const client = new BridgeClient();
-      await client.connect();
-      return { client, info };
-    } catch (error) {
-      if (attempt === 119) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await runPackagedStartupSmoke();
+  } catch (error) {
+    console.error('PACKAGED_STARTUP_SMOKE_FAIL:', error.message);
+    process.exitCode = error.signal === 'SIGINT' ? 130 : error.signal === 'SIGTERM' ? 143 : error.signal === 'SIGHUP' ? 129 : 1;
   }
-  throw new Error('packaged bridge 未就绪');
-};
-
-try {
-  const { client, info } = await waitForBridge();
-  const ping = await client.rpc('ping');
-  if (!ping?.pong) throw new Error(`ping 响应异常: ${JSON.stringify(ping)}`);
-  const opened = await client.rpc('notebook.open', { path: notebookPath });
-  if (!opened?.notebookId || !Array.isArray(opened.state?.cells)) {
-    throw new Error(`notebook.open 响应异常: ${JSON.stringify(opened)}`);
-  }
-  const firstCell = opened.state.cells[0];
-  const run = await client.rpc('cell.run', { cellId: firstCell.id, cascade: false });
-  if (!run?.ok) throw new Error(`cell.run 失败: ${JSON.stringify(run)}`);
-  console.log(`PACKAGED_STARTUP_SMOKE_OK triple=${triple} wsPort=${info.wsPort} llmPort=${info.llmPort}`);
-  client.close();
-} finally {
-  child.kill();
-  if (child.exitCode === null) await new Promise((resolve) => child.once('exit', resolve));
-  fs.rmSync(tempDir, { recursive: true, force: true });
 }

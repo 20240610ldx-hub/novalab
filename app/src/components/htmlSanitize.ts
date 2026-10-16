@@ -3,11 +3,11 @@
  *
  * 内核经 `_repr_html_()` 给出的 HTML 是不可信输入（数据内容可经劣质 repr 未转义地
  * 流入标签）。这里不"过滤字符串"，而是**解析后重建**：
- *   DOMParser（惰性文档：不执行脚本、不加载资源）→ 本文件遍历节点树 →
+ *   DOMParser（脱离页面的文档；解析期脚本/网络行为须在目标浏览器验收）→ 遍历节点树 →
  *   只产出白名单标签 + 两个整数属性的 SafeHtmlNode 树 → React createElement 渲染。
- * 全程不把 HTML 串回写进 DOM（无 innerHTML / dangerouslySetInnerHTML），因此不存在
- * mutation-XSS；白名单里没有任何带 URL 的属性、没有 style / class / id / on*，
- * 因此也没有网络外发面。
+ * 重建阶段不把 HTML 串回写进 DOM（无 innerHTML / dangerouslySetInnerHTML），避开
+ * 消毒后回写字符串的 mutation-XSS 路径；输出树不保留带 URL 的属性、style / class /
+ * id / on* 或脚本/资源标签。解析期行为仍须由目标浏览器验收，不能从输出树反推。
  *
  * 遍历函数对结构化节点接口 HtmlNodeLike 编程（DOM Node 结构兼容），无 DOM 依赖，
  * 可在 node 环境单测（htmlSanitize.test.ts）。

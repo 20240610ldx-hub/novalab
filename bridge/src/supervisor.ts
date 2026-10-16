@@ -45,6 +45,7 @@ export class KernelError extends Error {
   constructor(
     message: string,
     readonly code: number = ERR_KERNEL,
+    readonly data?: unknown,
   ) {
     super(message);
     this.name = 'KernelError';
@@ -340,6 +341,11 @@ interface PendingRequest {
   method: string;
 }
 
+interface QueuedExecution extends PendingRequest {
+  params?: Record<string, unknown>;
+  generation: number;
+}
+
 /** 走 FIFO 队列的方法（内核执行语义要求串行）。 */
 const QUEUED_METHODS = new Set(['exec_cell', 'exec_repl']);
 
@@ -347,8 +353,9 @@ export class KernelSupervisor extends EventEmitter {
   private transport?: KernelTransport;
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
-  private execQueue: (() => Promise<void>)[] = [];
-  private execInFlight = false;
+  private generation = 0;
+  private execQueue: QueuedExecution[] = [];
+  private activeExec?: QueuedExecution;
   private _state: KernelState = 'dead';
   private lastPath?: string;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -383,21 +390,28 @@ export class KernelSupervisor extends EventEmitter {
   /** spawn 内核并 load_file；1 文件 = 1 进程，重复 open 会先杀掉旧进程。 */
   async start(path: string): Promise<NotebookState> {
     this.stopTransport();
+    const generation = this.generation;
     this.lastPath = path;
     this.setState('restarting');
     this.spawnTransport();
     try {
       const state = (await this.request('load_file', { path })) as NotebookState;
-      this.setState('idle');
+      if (generation !== this.generation) {
+        throw new KernelError('内核请求被取消（load_file）：进程已停止');
+      }
+      this.setState(this.activeExec ? 'busy' : 'idle');
       return state;
     } catch (err) {
-      this.stopTransport();
-      this.setState('dead');
+      // stop/restart 可在 load_file 的 await 续体之前发生；旧 start 不能杀掉新核。
+      if (generation === this.generation) {
+        this.stopTransport();
+        this.setState('dead');
+      }
       throw err;
     }
   }
 
-  /** 杀进程重 spawn + load_file 回放（spec §2 崩溃恢复）。 */
+  /** 杀进程重 spawn + load_file 冷解析，不自动重放执行（spec §2）。 */
   async restart(): Promise<NotebookState> {
     if (!this.lastPath) throw new KernelError('restart 失败：尚无已加载的 notebook');
     return this.start(this.lastPath);
@@ -429,9 +443,12 @@ export class KernelSupervisor extends EventEmitter {
   private spawnTransport(): void {
     const t = this.opts.transportFactory();
     this.transport = t;
-    t.onMessage((msg) => this.onWire(msg));
+    const generation = this.generation;
+    t.onMessage((msg) => {
+      if (this.generation === generation && this.transport === t) this.onWire(msg);
+    });
     t.onExit((code) => {
-      if (this.transport === t) this.handleCrash(code);
+      if (this.generation === generation && this.transport === t) this.handleCrash(code);
     });
     this.startPing();
   }
@@ -440,12 +457,19 @@ export class KernelSupervisor extends EventEmitter {
     this.stopPing();
     const t = this.transport;
     this.transport = undefined;
+    // 先使旧执行/await 续体失效，再拒绝请求；kill 也可能同步触发旧回调。
+    this.generation++;
     for (const p of this.pending.values()) {
       p.reject(new KernelError(`内核请求被取消（${p.method}）：进程已停止`));
     }
     this.pending.clear();
+    const cancelled = this.execQueue;
     this.execQueue = [];
-    this.execInFlight = false;
+    if (this.activeExec) cancelled.push(this.activeExec);
+    this.activeExec = undefined;
+    for (const job of cancelled) {
+      job.reject(new KernelError(`内核请求被取消（${job.method}）：进程已停止`));
+    }
     t?.kill();
   }
 
@@ -462,7 +486,7 @@ export class KernelSupervisor extends EventEmitter {
       if (!pending) return; // 迟到的响应（如已被超时清理的 ping）
       this.pending.delete(msg.id);
       if (msg.error) {
-        pending.reject(new KernelError(msg.error.message, msg.error.code || ERR_KERNEL));
+        pending.reject(new KernelError(msg.error.message, msg.error.code || ERR_KERNEL, msg.error.data));
       } else {
         pending.resolve(msg.result);
       }
@@ -487,37 +511,43 @@ export class KernelSupervisor extends EventEmitter {
   }
 
   private enqueueExec(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    if (!this.transport) return Promise.reject(new KernelError(`内核未运行，无法执行 ${method}`));
     return new Promise<unknown>((resolve, reject) => {
-      this.execQueue.push(async () => {
-        try {
-          resolve(await this.sendRequest(method, params));
-        } catch (err) {
-          reject(err);
-        }
-      });
+      this.execQueue.push({ method, params, resolve, reject, generation: this.generation });
       this.emitStatus();
       this.drainQueue();
     });
   }
 
   private drainQueue(): void {
-    if (this.execInFlight) return;
+    if (this.activeExec) return;
     const next = this.execQueue.shift();
     if (!next) {
       if (this._state === 'busy') this.setState('idle');
       else this.emitStatus();
       return;
     }
-    this.execInFlight = true;
-    // 内核已死/无传输时不切 busy：任务会立即 reject，state 保持 dead。
+    this.activeExec = next;
     if (this.transport && this._state !== 'dead') this.setState('busy');
     else this.emitStatus();
-    void Promise.resolve()
-      .then(next)
-      .finally(() => {
-        this.execInFlight = false;
+    void this.runExecution(next);
+  }
+
+  private async runExecution(job: QueuedExecution): Promise<void> {
+    try {
+      // 保留异步发送窗口；stop/restart 必须能取消已出队但尚未发出的任务。
+      await Promise.resolve();
+      if (job.generation !== this.generation || this.activeExec !== job) return;
+      job.resolve(await this.sendRequest(job.method, job.params));
+    } catch (err) {
+      job.reject(err instanceof Error ? err : new KernelError(String(err)));
+    } finally {
+      // 旧执行的 finally 不拥有新一代槽位，也不能推进新队列。
+      if (job.generation === this.generation && this.activeExec === job) {
+        this.activeExec = undefined;
         this.drainQueue();
-      });
+      }
+    }
   }
 
   private startPing(): void {

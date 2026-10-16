@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
@@ -7,9 +7,10 @@ import {
   resolveKernelSpawnSpec,
   ensureKernelVenv,
   type CommandRunner,
+  type KernelTransport,
 } from './supervisor';
 import { FakeKernel } from './testing/fake-kernel';
-import type { KernelStatusParams, NotebookState } from './protocol';
+import type { KernelRequest, KernelStatusParams, KernelWireMessage, NotebookState } from './protocol';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -137,6 +138,263 @@ describe('KernelSupervisor', () => {
     await s.start('D:/nb/demo.py');
     await expect(s.request('no_such_method', {})).rejects.toThrow(/method not found/);
     expect(s.state).toBe('idle');
+  });
+});
+
+/** 手动交付响应/exit；kill 后仍允许迟到消息，复现真实子进程回调竞态。 */
+class ControlledTransport implements KernelTransport {
+  readonly sent: KernelRequest[] = [];
+  killed = false;
+  private messageCb?: (msg: KernelWireMessage) => void;
+  private exitCb?: (code: number | null) => void;
+
+  constructor(private readonly autoLoad = true) {}
+
+  send(msg: KernelRequest): void {
+    this.sent.push(msg);
+    if (msg.method === 'load_file' && this.autoLoad) {
+      this.reply(msg, { cells: [], dagEdges: [], schemas: [], staleSet: [], execCounts: {} });
+    } else if (msg.method === 'ping') {
+      this.reply(msg, {});
+    }
+  }
+
+  onMessage(cb: (msg: KernelWireMessage) => void): void {
+    this.messageCb = cb;
+  }
+
+  onExit(cb: (code: number | null) => void): void {
+    this.exitCb = cb;
+  }
+
+  kill(): void {
+    this.killed = true;
+  }
+
+  deliver(msg: KernelWireMessage): void {
+    this.messageCb?.(msg);
+  }
+
+  reply(request: KernelRequest, result: unknown = { ok: true }): void {
+    this.deliver({ id: request.id, result });
+  }
+
+  crash(): void {
+    this.exitCb?.(1);
+  }
+
+  get executions(): KernelRequest[] {
+    return this.sent.filter((r) => r.method === 'exec_cell' || r.method === 'exec_repl');
+  }
+}
+
+// 排空 Promise 链，不推进真实时间；未结算的请求会保持 pending，让断言立即失败。
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+function observe(promise: Promise<unknown>) {
+  const result: { status: 'pending' | 'fulfilled' | 'rejected'; value?: unknown } = { status: 'pending' };
+  void promise.then(
+    (value) => { result.status = 'fulfilled'; result.value = value; },
+    (error: unknown) => { result.status = 'rejected'; result.value = error; },
+  );
+  return result;
+}
+
+function makeControlledSupervisor(autoLoad = true): { s: KernelSupervisor; transports: ControlledTransport[] } {
+  const transports: ControlledTransport[] = [];
+  statuses.length = 0;
+  const s = new KernelSupervisor({
+    transportFactory: () => {
+      const t = new ControlledTransport(autoLoad);
+      transports.push(t);
+      return t;
+    },
+    pingIntervalMs: 10,
+    pingTimeoutMs: 5,
+  });
+  s.on('status', (p: KernelStatusParams) => statuses.push(p));
+  sup = s;
+  return { s, transports };
+}
+
+describe('KernelSupervisor 执行队列生命周期回归', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['stop', 'crash'] as const)('%s：在途、FIFO 排队和普通 pending 全部拒绝', async (end) => {
+    const { s, transports } = makeControlledSupervisor();
+    await s.start('D:/nb/queue.py');
+    const t = transports[0]!;
+    const outcomes = [
+      observe(s.request('exec_cell', { cellId: 'active' })),
+      observe(s.request('exec_repl', { code: 'queued-1' })),
+      observe(s.request('exec_cell', { cellId: 'queued-2' })),
+      observe(s.request('introspect')),
+    ];
+    await flushMicrotasks();
+    expect(t.executions).toHaveLength(1);
+    expect(s.queueDepth).toBe(2);
+
+    if (end === 'stop') s.stop();
+    else t.crash();
+    await flushMicrotasks();
+
+    expect(outcomes.map((r) => r.status)).toEqual(Array(4).fill('rejected'));
+    for (const r of outcomes) expect(r.value).toBeInstanceOf(Error);
+    expect(s.state).toBe('dead');
+    expect(s.queueDepth).toBe(0);
+    expect(t.killed).toBe(true);
+    expect(t.executions).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['stop', 'crash'] as const)('%s 后立即 restart：已出队但尚未发送的旧执行不能进入新核', async (end) => {
+    const { s, transports } = makeControlledSupervisor();
+    await s.start('D:/nb/queue.py');
+    const old = transports[0]!;
+    const outcomes = [
+      observe(s.request('exec_cell', { cellId: 'old-active' })),
+      observe(s.request('exec_repl', { code: 'old-queued' })),
+    ];
+    // 不 await：第一个 .then(next) 尚未运行，正是 restart 微任务窗口。
+    if (end === 'stop') s.stop();
+    else old.crash();
+    const restarting = s.restart();
+    await restarting;
+    await flushMicrotasks();
+
+    expect(transports[1]!.sent.map((r) => r.method)).toEqual(['load_file']);
+    expect(outcomes.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    expect(old.executions).toHaveLength(0);
+    expect(s.state).toBe('idle');
+    expect(s.queueDepth).toBe(0);
+  });
+
+  it.each(['stop', 'crash', 'reply'] as const)('旧执行 %s 的 finally 不得释放新一代在途槽位或推进新队列', async (end) => {
+    const { s, transports } = makeControlledSupervisor();
+    await s.start('D:/nb/queue.py');
+    const old = transports[0]!;
+    const oldOutcome = observe(s.request('exec_cell', { cellId: 'old' }));
+    await flushMicrotasks();
+    expect(old.executions).toHaveLength(1);
+
+    if (end === 'stop') s.stop();
+    else if (end === 'crash') old.crash();
+    else old.reply(old.executions[0]!);
+    const restarting = s.restart();
+    const first = observe(s.request('exec_cell', { cellId: 'new-1' }));
+    await restarting;
+    await flushMicrotasks();
+    const current = transports[1]!;
+    expect(current.executions).toHaveLength(1);
+    const second = observe(s.request('exec_repl', { code: 'new-2' }));
+    const third = observe(s.request('exec_cell', { cellId: 'new-3' }));
+    await flushMicrotasks();
+
+    expect(current.executions.map((r) => r.params)).toEqual([{ cellId: 'new-1' }]);
+    expect(s.queueDepth).toBe(2);
+    expect(s.state).toBe('busy');
+    // 长跑 cell 的 busy 状态必须保持，health timer 也不能插入 ping。
+    await vi.advanceTimersByTimeAsync(100);
+    expect(current.sent.some((r) => r.method === 'ping')).toBe(false);
+    expect(s.state).toBe('busy');
+
+    current.reply(current.executions[0]!);
+    await flushMicrotasks();
+    expect(current.executions.map((r) => r.params)).toEqual([{ cellId: 'new-1' }, { code: 'new-2' }]);
+    expect(s.queueDepth).toBe(1);
+    current.reply(current.executions[1]!);
+    await flushMicrotasks();
+    expect(current.executions.map((r) => r.params)).toEqual([
+      { cellId: 'new-1' }, { code: 'new-2' }, { cellId: 'new-3' },
+    ]);
+    current.reply(current.executions[2]!);
+    await flushMicrotasks();
+    expect([first, second, third].map((r) => r.status)).toEqual(Array(3).fill('fulfilled'));
+    // 即使 wire 已回包，调用方尚未结算的 active job 仍由 restart 统一取消。
+    expect(oldOutcome.status).toBe('rejected');
+    expect(s.state).toBe('idle');
+    expect(s.queueDepth).toBe(0);
+  });
+
+  it.each(['stop', 'crash'] as const)('%s 后旧 transport 的通知、响应、exit 均不污染重启状态', async (end) => {
+    const { s, transports } = makeControlledSupervisor();
+    await s.start('D:/nb/queue.py');
+    const old = transports[0]!;
+    if (end === 'stop') s.stop();
+    else old.crash();
+    await s.restart();
+    const current = transports[1]!;
+    const notifications: unknown[] = [];
+    const crashes: unknown[] = [];
+    s.on('notification', (n) => notifications.push(n));
+    s.on('crash', (c) => crashes.push(c));
+    const fresh = observe(s.request('exec_cell', { cellId: 'fresh' }));
+    await flushMicrotasks();
+    const sent = current.executions[0]!;
+    const before = statuses.length;
+
+    old.deliver({ method: 'cell.output', params: { cellId: 'old', value: 'stale' } });
+    old.deliver({ method: 'run.finished', params: { cellId: 'old' } });
+    // 故意使用当前 id：验证隔离依靠 transport 身份，而非仅依靠递增 id。
+    old.deliver({ id: sent.id, result: { source: 'old' } });
+    old.crash();
+    await flushMicrotasks();
+    expect(notifications).toEqual([]);
+    expect(crashes).toEqual([]);
+    expect(statuses).toHaveLength(before);
+    expect(fresh.status).toBe('pending');
+    expect(s.state).toBe('busy');
+    current.deliver({ method: 'cell.output', params: { cellId: 'fresh' } });
+    expect(notifications).toEqual([{ method: 'cell.output', params: { cellId: 'fresh' } }]);
+    current.reply(sent, { source: 'current' });
+    await flushMicrotasks();
+    expect(fresh).toEqual({ status: 'fulfilled', value: { source: 'current' } });
+    expect(s.state).toBe('idle');
+  });
+
+  it('旧 load_file rejection 的 catch 不得杀掉立即重启的新核', async () => {
+    const { s, transports } = makeControlledSupervisor(false);
+    const opening = observe(s.start('D:/nb/queue.py'));
+    // load_file 尚未回包：stop 的 reject 会在新核已建立后进入旧 start 的 catch。
+    s.stop();
+    const restarting = observe(s.restart());
+    transports[1]!.reply(transports[1]!.sent[0]!, {
+      cells: [], dagEdges: [], schemas: [], staleSet: [], execCounts: {},
+    });
+    await flushMicrotasks();
+
+    expect(opening.status).toBe('rejected');
+    expect(restarting.status).toBe('fulfilled');
+    expect(transports[1]!.killed).toBe(false);
+    expect(transports[1]!.sent.map((r) => r.method)).toEqual(['load_file']);
+    expect(s.state).toBe('idle');
+  });
+
+  it('停止后旧 load_file 的成功续体不得把状态从 dead 改回 idle', async () => {
+    const { s } = makeControlledSupervisor();
+    const opening = observe(s.start('D:/nb/queue.py'));
+    s.stop();
+    await flushMicrotasks();
+
+    expect(opening.status).toBe('rejected');
+    expect(s.state).toBe('dead');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('start/restart 只冷解析 load_file，不自动执行；停止时的 exec 立即拒绝', async () => {
+    const { s, transports } = makeControlledSupervisor();
+    await s.start('D:/nb/queue.py');
+    await s.restart();
+    expect(transports.map((t) => t.sent.map((r) => r.method))).toEqual([['load_file'], ['load_file']]);
+    s.stop();
+    const outcome = observe(s.request('exec_cell', { cellId: 'after-stop' }));
+    await flushMicrotasks();
+    expect(outcome.status).toBe('rejected');
+    expect(s.state).toBe('dead');
+    expect(s.queueDepth).toBe(0);
   });
 });
 

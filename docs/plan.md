@@ -1,6 +1,6 @@
 # NovaLab 实施计划（Plan）
 
-> 状态：v0.1 · 2026-10-06（2026-10-10 增补 §5b v0.1.1） · 上游：[intent.md](intent.md) · [spec.md](spec.md)
+> 状态：v0.1 · 2026-10-06（2026-10-10 增补 §5b v0.1.1；2026-10-13 整理验收与阻塞项） · 上游：[intent.md](intent.md) · [spec.md](spec.md)
 > 周期口径：1 周 = 5 个工作日；W1 从开工日算起。任务 id：`P<阶段>.<序号>`，spike `S< n>`，门 `G<n>`。
 
 ---
@@ -88,14 +88,20 @@ P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（
 | H8 | 量化指标基准脚本 `scripts/bench.mjs`（intent §8） | ✅（数字需空闲机器重测） |
 | H9 | 普通 cell 尾表达式回显（L-5）、text/html 白名单表格渲染（ADR-011 提案）、.ipynb 导出含 text/html | ✅ |
 
-**下一步（按优先级）**
-1. **Owner 真实数据自用验收**：装 v0.1.1 安装包，用一份人口预测或 POI 清洗工作跑 intent §3 N1–N4，记录卡点（这是目前最缺的信号：发布页下载数为 0）。
-2. ~~普通 cell 尾表达式显示~~ ✅ 内核回显（L-5）+ 前端表格渲染（ADR-011 提案，**待 Owner 裁决**）+ .ipynb 导出含 text/html。
-3. ~~量化指标基准~~ ✅ `scripts/bench.mjs`（2026-10-10 首测：3 项达标，滚动 57.9fps 需真机复核）；剩余：Tauri 窗口首帧计时、重输出 notebook 场景、安装包体积（37MB vs 目标 20MB）。
-4. **首启离线/镜像安装**：可配 PyPI / python-build-standalone 镜像，或预置 wheel 的离线包；国内网络下首启是最大失败点。
-5. **i18n 深度迁移**：侧栏树、AgentPanel、FixCard 等仍为硬编码中文。
-6. **Tauri CSP 收紧**（当前 `csp: null`）与代码签名 secrets。
-7. 清理：`claude/suspicious-banach-bfca7a` 分支落后 main 32 commit，可删除。
+**验收收口（2026-10-14，工程验证与 O-2 修复）**
+
+详细范围、建议发布门、B01–B07 阻塞项、A01–A18 操作清单与证据模板见 [v0.1.1 验收清单与阻塞项](release-v0.1.1-checklist.md)。上表 ✅ 表示已有实现/历史证据，**不表示当前候选安装版验收通过或已发布**。
+
+**下一步（建议顺序；发布门与例外待 Owner 确认）**
+1. **范围与决策**：ADR-011 白名单表格已实现，仍待 Owner 裁决；确认本版保留限制与性能目标例外，不擅自调整阈值。
+2. **当前基线回归与证据**：类型/三套单测/生产前端构建/集成已通过（bridge 242、app 266、Python 191）。O-2 已补后台 live 投影、归属与延迟列表回归；`--skip-agent` 已接入循环，11 态明确跳过。完整无 Agent 画廊 16/16、无页面 console 错误，O-2 内容断言通过；构建目录 `PACKAGED_STARTUP_SMOKE_OK`。后续已补真实进程 A04/A05（2 文件/6 项含纯预检）、Python 219 项及 HTML 浏览器子项，详见清单；其余安全/隐私子项仍待执行。optional Agent 失败不影响退出码，必须单列实际结果。
+3. **版本与候选包**：明确产品/内部包版本联动，核对 tag 与安装显示；Windows NSIS/MSI、Linux AppImage/deb 最终产物安装后验证，不能只凭构建目录 sidecar smoke 放行。当前没有本轮 v0.1.1 候选包验收证据。
+4. **Agent 与 Owner 自用**：真实 provider 的 Fix/多格重构、真实 stdio MCP 同一前端审阅闭环；候选安装版上跑人口预测或 POI 清洗 N1–N4。敏感数据留本地，远端模型发送范围须事先确认。
+5. **量化验收**：`scripts/bench.mjs` 已有；旧 dev 数不能替代当前鉴权基线和真实 Tauri 窗口。空闲机器重测并补首帧、重输出、候选包体积；旧 NSIS 37MB 超过 <20MB 目标，须优化或 Owner 明确裁决。
+6. **后续项（不自动全部纳入 v0.1.1 硬门）**：首启离线/镜像、i18n 深度迁移、Tauri CSP（当前 `csp: null`）、代码签名接线与材料、真实 scipy/geopandas 兼容验收。保留时须披露限制并由 Owner 确认；实际安全/隐私/数据丢失回归仍阻塞。
+7. **正式发布另行授权**：本轮在工作树内修复、构建与验证；提交、版本调整、tag 和上传尚未执行。旧分支/工作树清理与本版验收无关，不在本轮删除范围。
+
+**科研需求驱动的后续闭环（2026-10-14）**：公开研究与竞品反馈、intent N1–N4 映射、五阶段工作包、实测门和重大决策边界见 [科研自动化迭代路线与证据台账](research-iteration-roadmap.md)。可信入口与提议隔离第一轮已封存（RPC 22 项、真实进程 6 项、HTML、集成与构建目录启动通过；Diff/Session 补测 2/2）。第二轮保存 ACK / tab 归属 / 关闭失败保留已通过前端 288 项、bridge 248+8 项、真实浏览器磁盘验收与受影响画廊 5/5；独立进程隔离工作树已集成并由主线复测（客户端 24、Windows 进程 13 项），前端/bridge 构建与构建目录启动通过。第三轮执行队列生命周期已补真实先红并修复，主线独立 bridge 260 项、真实验收 11 项与类型检查通过；stop/restart/本次内核进程崩溃后全部旧调用结算，冷核无旧排队执行。第四轮原子写入与外部冲突已完成父独立工程门（Python 258+5 项权限跳过、bridge 269+真实 13、app 312、客户端 24）及真实浏览器备份/冷加载/失败重试；新开文件串 REPL 也已先红修复并复测。第五轮 dead/ended 前端冷重启已验收（2026-10-16，Windows-only）：clean owner 显式冷重启、dirty 拒绝并保留草稿，真实 Chromium `KERNEL_RESTART_SMOKE_OK`、真实 stdio router 1/1、bridge 274 / app 316 / Python 258+5 跳过 / 客户端 24、集成与构建目录启动通过，证据见 `manifest-restart-round5.json`。第六轮 bridge 死亡→桌面重连已验收（2026-10-16，Windows-only）：断线结算 pending、允许编辑、新一代 tab 保留为 bridge-lost、clean 点击冷重开、dirty 保留草稿，60 s 内最多 3 次自动重启；真实 Chromium `BRIDGE_RECONNECT_SMOKE_OK`、app 336 / bridge 274 / Rust 5 / Python 258+5 跳过 / 客户端 24、集成与构建目录启动通过，证据见 `manifest-reconnect-round6.json`。同日 D4 获批并补充验收：内核/bridge 协议新增 `baselineSha256`，dirty bridge-lost tab 重开时核对指纹，未变续存、已变走冲突流程；app 339 / bridge 278 / Python 261+5 跳过，真实 Chromium 三 tab smoke 通过，证据见 `manifest-reconnect-round6-d4.json`。接下来做跨应用草稿恢复、生产环境旧内核清理与跨平台复测（A15 仍开放），随后共享 Agent、环境/运行可复核与交付。打包启动归属修复已落地主线，父独立 Windows source 13/13、packaged 12/12 通过，默认端口诱饵请求为 0、自身进程树与临时目录全部回收；只代表已有 Python 环境的构建目录，不代表安装器/干净机器首启。旧轮次证据保留；常规修复自主执行，不能把历史竞品 issue 当作当前缺陷。
 
 ---
 
@@ -103,7 +109,7 @@ P4.1b **D1/D2 录屏（Owner 裁决：做）**：playwright video 两条 reel（
 
 | 仓库 | 必读路径 | 学什么 |
 |---|---|---|
-| `refs/marimo` | `_ast/compiler.py`、`_ast/visitor.py`（defs/refs 提取边角）；`_runtime/runner`、`_runtime/graph`（失效/级联/glitch-free）；`_server/api` + `websockets`（协议形态，S1 用）；`examples/`（serialize fixtures 来源） | 路线 A/B 共同的知识源；**读思路，抄测试用例形状，不抄代码**（Q4 许可证落定前） |
+| `refs/marimo` | `_ast/compiler.py`、`_ast/visitor.py`（defs/refs 提取边角）；`_runtime/runner`、`_runtime/graph`（失效/级联/glitch-free）；`_server/api` + `websockets`（协议形态，S1 用）；`examples/`（serialize fixtures 来源） | 路线 A/B 共同的知识源；**只理解设计思路；实现、测试用例与断言依据本项目 spec 独立编写，不复制表达**（以 CONTRIBUTING clean-room 纪律为准） |
 | `refs/codemirror-merge` | `src/merge.ts`、examples/inline | MergeView 内嵌模式、hunk API、装饰器样式 hook（P2.3） |
 | `refs/vercel-ai` | `examples/ai-sdk-*`、`packages/ai/src/mcp` | useChat 流式、tool zod 单源、MCP client/server 装配（P2.1/P2.6） |
 | `refs/jupyterlab` | `packages/filebrowser/src/{listing.tsx,model.ts}`、`packages/docmanager` | 文件浏览器交互范式（双击打开、面包屑、选择与删除确认语义），P2.8 clean-room 参考 |

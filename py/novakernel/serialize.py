@@ -17,7 +17,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 
@@ -162,5 +165,34 @@ def write(
 
 
 def write_file(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    """Stage UTF-8/LF beside the resolved target, then atomically replace it.
+
+    Replacement changes the inode (other hard links keep the old contents).
+    File fsync is not a guarantee of directory durability across power loss.
+    """
+    # Match open(..., "w") following symlinks, including a dangling final link.
+    target = os.path.realpath(path)
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except FileNotFoundError:
+        mode = None
+
+    fd, temporary = tempfile.mkstemp(prefix=".novalab-", suffix=".tmp", dir=os.path.dirname(target))
+    try:
+        try:
+            stream = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
+            stream.write(text)
+            stream.flush()
+            if mode is not None and os.name == "posix":
+                os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass

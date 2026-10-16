@@ -33,11 +33,13 @@ let fakes: FakeKernel[] = [];
 let notes: { method: string; params?: unknown }[] = [];
 let router: RpcRouter;
 let reqId = 0;
+let notebookId = '';
 
 function setup(seed?: (fake: FakeKernel) => void): void {
   fakes = [];
   notes = [];
   reqId = 0;
+  notebookId = '';
   sup = new KernelSupervisor({
     transportFactory: () => {
       const f = new FakeKernel();
@@ -61,6 +63,7 @@ async function openNotebook(): Promise<NotebookState> {
   const res = await call('notebook.open', { path: NB_PATH });
   expect(res.error).toBeUndefined();
   // P3.1：notebook.open 响应升级为 {notebookId, state}
+  notebookId = (res.result as { notebookId: string }).notebookId;
   return (res.result as { state: NotebookState }).state;
 }
 
@@ -262,15 +265,20 @@ describe('RpcRouter · kernel', () => {
     expect(sessionEvents().at(-1)).toMatchObject({ kind: 'repl', cellId: 'repl' });
   });
 
-  it('kernel.restart：重 spawn + load_file 回放 + kernel.status 通知', async () => {
+  it('kernel.restart：dead owner 冷加载 + owner 响应，不执行用户代码', async () => {
     setup();
     await openNotebook();
+    fakes[0]!.crash(1);
     notes = [];
-    const res = await call('kernel.restart');
+    const res = await call('kernel.restart', { notebookId });
     expect(res.error).toBeUndefined();
-    expect((res.result as NotebookState).cells).toHaveLength(3);
+    const result = res.result as { notebookId: string; notebookPath: string; state: NotebookState };
+    expect(result.notebookId).toBe(notebookId);
+    expect(result.notebookPath).toBe(NB_PATH);
+    expect(result.state.cells).toHaveLength(3);
     expect(fakes).toHaveLength(2);
     expect(fakes[1]!.loadedPath).toBe(NB_PATH);
+    expect(fakes[1]!.requests.map((r) => r.method)).toEqual(['load_file']);
     const states = notes
       .filter((n) => n.method === 'kernel.status')
       .map((n) => (n.params as KernelStatusParams).state);
@@ -332,9 +340,10 @@ describe('RpcRouter · diff 暂存队列', () => {
     expect(out.run).toMatchObject({ cellId: 'b', ok: true });
 
     const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    // P2.7：diff.stage 编译预检（试探 + 回滚）2 次 + diff.accept 保存 1 次
-    expect(setCells).toHaveLength(3);
-    const cells = (setCells[2]!.params as { cells: { id: string; code: string }[] }).cells;
+    // stage 只验证；accept 才首次提交全量 cells。
+    expect(fakes[0]!.countOf('validate_cells')).toBe(1);
+    expect(setCells).toHaveLength(1);
+    const cells = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
     expect(cells.find((c) => c.id === 'b')!.code).toBe('y = x + 2');
 
     const exec = fakes[0]!.requests.filter((r) => r.method === 'exec_cell');
@@ -358,8 +367,9 @@ describe('RpcRouter · diff 暂存队列', () => {
     expect(newId).toMatch(/^[0-9a-f]{8}$/);
 
     const setCells = fakes[0]!.requests.filter((r) => r.method === 'set_cells');
-    // 最后一次 = diff.accept 的保存（前面是 stage 预检的试探 + 回滚）
-    const cells = (setCells.at(-1)!.params as { cells: { id: string; code: string }[] }).cells;
+    expect(fakes[0]!.countOf('validate_cells')).toBe(1);
+    expect(setCells).toHaveLength(1); // stage 不提交候选，accept 才保存
+    const cells = (setCells[0]!.params as { cells: { id: string; code: string }[] }).cells;
     expect(cells).toHaveLength(4);
     expect(cells[0]!.id).toBe('a');
     expect(cells[1]).toEqual({ id: newId, code: 'z = x * 10' });

@@ -1,5 +1,5 @@
 /**
- * NotebookWatcher —— 外部 .py 变更热重载（spec §4, plan P1.8）。
+ * NotebookWatcher —— 外部 .py 变更提醒（spec §4, plan P1.8）。
  *
  * - notebook.open 成功后 watch 该文件；关闭/重开时 unwatch 旧路径。
  * - 事件 debounce（默认 300ms）合并连发；生产事件源为 chokidar
@@ -65,7 +65,7 @@ export function createChokidarEventSource(): FsEventSource {
 export interface NotebookWatcherOptions {
   /** 事件源工厂（生产注入 createChokidarEventSource，单测注入假事件源）。 */
   sourceFactory: () => FsEventSource;
-  /** debounce 静默期结束后的外部变更回调——router 在此 load_file + 广播 + session 留痕。 */
+  /** debounce 静默期结束后的外部变更回调；router 提醒冲突，显式重载另走 RPC。 */
   onExternalChange: (filePath: string) => void | Promise<void>;
   /** 事件合并窗口，默认 300ms。 */
   debounceMs?: number;

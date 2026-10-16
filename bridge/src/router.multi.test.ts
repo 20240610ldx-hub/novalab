@@ -8,7 +8,7 @@
  * - notebook.list 的 rssMB 字段形状（FakeKernel 无 pid → null）。
  */
 
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -20,7 +20,10 @@ import type {
   NotebookSummary,
   RpcResponse,
   RunReport,
+  KernelRequest,
   SessionEndedParams,
+  SessionMeta,
+  SessionOpenResult,
 } from './protocol';
 
 let multi: MultiSupervisor | undefined;
@@ -71,6 +74,27 @@ function lastParams<T>(method: string): T | undefined {
     if (notes[i]!.method === method) return notes[i]!.params as T;
   }
   return undefined;
+}
+
+/** Hold one request before the fake applies/responds, with deterministic release. */
+function holdNext(fake: FakeKernel, method: string) {
+  const send = fake.send.bind(fake);
+  let held: KernelRequest | undefined;
+  let signal!: () => void;
+  const reached = new Promise<void>((resolve) => { signal = resolve; });
+  fake.send = (request) => {
+    if (request.method === method && !held) {
+      held = request;
+      signal();
+    } else send(request);
+  };
+  return {
+    reached,
+    release: () => {
+      fake.send = send;
+      if (held) send(held);
+    },
+  };
 }
 
 afterEach(() => {
@@ -148,6 +172,140 @@ describe('RpcRouter · P3.1 多 tab 多内核', () => {
     expect(fakes[0]!.countOf('exec_cell')).toBe(1); // A 仍只有先前那一次
   });
 
+  it('cell.save notebookId 显式定位后台tab；无id兼容焦点，未知/非法id不得退回焦点', async () => {
+    setup();
+    const a = await open(NB_A);
+    const b = await open(NB_B);
+    const noteStart = notes.length;
+    const saved = await call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 42' });
+    expect(saved.error).toBeUndefined();
+    expect(notes.slice(noteStart).filter((n) => ['notebook.state', 'kernel.schemas', 'kernel.status', 'focus.changed'].includes(n.method))).toEqual([]);
+    expect(fakes[0]!.cells[0]!.code).toBe('v0 = 42');
+    expect(fakes[1]!.countOf('set_cells')).toBe(0);
+    expect(lastParams<{ notebookId: string }>('focus.changed')).toEqual({ notebookId: b.notebookId });
+    for (const notebookId of ['nb-unknown', '', null, 7]) {
+      expect((await call('cell.save', { notebookId, cellId: 'k1', code: 'v1 = 99' })).error?.code).toBe(-32602);
+    }
+    expect(fakes[1]!.countOf('set_cells')).toBe(0);
+    expect((await call('cell.save', { cellId: 'k1', code: 'v1 = 2' })).error).toBeUndefined();
+    expect(fakes[1]!.cells[0]!.code).toBe('v1 = 2');
+  });
+
+  it('同notebook saves整链串行；后台切换和另一个notebook保存不被阻塞', async () => {
+    setup();
+    const a = await open(NB_A);
+    const fake = fakes[0]!;
+    const gate = holdNext(fake, 'set_cells');
+    const first = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 10' });
+    await gate.reached;
+    const second = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 20' });
+    const b = await open(NB_B);
+    expect((await call('cell.save', { notebookId: b.notebookId, cellId: 'k1', code: 'v1 = 30' })).error).toBeUndefined();
+    try {
+      expect(fake.countOf('set_cells')).toBe(0); // 第二次保存尚未进入内核
+    } finally {
+      gate.release();
+    }
+    const results = await Promise.all([first, second]);
+    expect(results.every((r) => !r.error)).toBe(true);
+    expect(fake.requests.filter((r) => ['set_cells', 'save_file'].includes(r.method)).map((r) => r.method)).toEqual([
+      'set_cells', 'save_file', 'set_cells', 'save_file',
+    ]);
+    const saves = fake.requests.filter((r) => r.method === 'save_file');
+    expect((saves[0]!.params!['cells'] as { code: string }[])[0]!.code).toBe('v0 = 10');
+    expect((saves[1]!.params!['cells'] as { code: string }[])[0]!.code).toBe('v0 = 20');
+    expect(fake.cells[0]!.code).toBe('v0 = 20');
+  });
+
+  it('close排在保存之后；成功close后的排队save明确拒绝，不能再触碰释放的内核', async () => {
+    setup();
+    const a = await open(NB_A);
+    const fake = fakes[0]!;
+    const gate = holdNext(fake, 'set_cells');
+    const saving = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 8' });
+    await gate.reached;
+    const closing = call('notebook.close', { notebookId: a.notebookId });
+    const late = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 9' });
+    try {
+      await Promise.resolve();
+      expect(fake.countOf('save_file')).toBe(0);
+    } finally {
+      gate.release();
+    }
+    expect((await saving).error).toBeUndefined();
+    expect((await closing).result).toEqual({ notebookId: a.notebookId, closed: true });
+    expect((await late).error?.code).toBe(-32602);
+    expect(fake.requests.filter((r) => ['set_cells', 'save_file'].includes(r.method)).map((r) => r.method)).toEqual([
+      'set_cells', 'save_file', 'save_file',
+    ]);
+  });
+
+  it('diff.accept与保存共用队列；排队中已reject的diff不能再写盘执行', async () => {
+    setup();
+    const a = await open(NB_A);
+    const staged = await call('diff.stage', { targetCellId: 'k0', action: 'update', newCode: 'v0 = 11' });
+    const { diffId } = staged.result as { diffId: string };
+    const fake = fakes[0]!;
+    const gate = holdNext(fake, 'set_cells');
+    const saving = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 5' });
+    await gate.reached;
+    const accepting = call('diff.accept', { diffId });
+    expect((await call('diff.reject', { diffId })).error).toBeUndefined();
+    gate.release();
+    expect((await saving).error).toBeUndefined();
+    expect((await accepting).error?.code).toBe(-32602);
+    expect(fake.cells[0]!.code).toBe('v0 = 5');
+    expect(fake.countOf('set_cells')).toBe(1);
+    expect(fake.countOf('exec_cell')).toBe(0);
+
+    const next = await call('diff.stage', { targetCellId: 'k0', action: 'update', newCode: 'v0 = 12' });
+    const nextId = (next.result as { diffId: string }).diffId;
+    const secondGate = holdNext(fake, 'set_cells');
+    const secondSave = call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 6' });
+    await secondGate.reached;
+    const nextAccept = call('diff.accept', { diffId: nextId });
+    secondGate.release();
+    expect((await secondSave).error).toBeUndefined();
+    expect((await nextAccept).error).toBeUndefined();
+    expect(fake.cells[0]!.code).toBe('v0 = 12');
+    expect(fake.requests.filter((r) => ['set_cells', 'save_file', 'exec_cell'].includes(r.method)).map((r) => r.method)).toEqual([
+      'set_cells', 'save_file', 'set_cells', 'save_file', 'set_cells', 'save_file', 'exec_cell',
+    ]);
+  });
+
+  it('live close写盘失败保留ctx/kernel/session；失败队列后能重试保存并关闭', async () => {
+    setup();
+    const a = await open(NB_A);
+    const fake = fakes[0]!;
+    const sessionId = lastParams<{ sessionId: string }>('session.started')!.sessionId;
+    fake.failSaveFile = 'disk full';
+    const failed = await call('notebook.close', { notebookId: a.notebookId });
+    expect(failed.error).toMatchObject({ code: -32000, message: expect.stringContaining('disk full') });
+    expect((await call('notebook.list')).result).toMatchObject([{ notebookId: a.notebookId, kernelState: 'idle' }]);
+    expect(notes.filter((n) => n.method === 'session.ended')).toHaveLength(0);
+    expect((await call('session.open', { notebookPath: NB_A, sessionId })).result).toMatchObject({ endedAt: null });
+    fake.failSaveFile = undefined;
+    expect((await call('cell.save', { notebookId: a.notebookId, cellId: 'k0', code: 'v0 = 5' })).error).toBeUndefined();
+    expect((await call('notebook.close', { notebookId: a.notebookId })).error).toBeUndefined();
+    expect((await call('notebook.list')).result).toEqual([]);
+  });
+
+  it('dead close允许无未落盘cache；已失败的保存草稿不能在内核死后被close丢掉', async () => {
+    setup();
+    const a = await open(NB_A);
+    fakes[0]!.crash(1);
+    expect((await call('notebook.close', { notebookId: a.notebookId })).result).toEqual({ notebookId: a.notebookId, closed: true });
+    const b = await open(NB_B);
+    const fake = fakes[1]!;
+    fake.failSaveFile = 'disk full';
+    expect((await call('cell.save', { notebookId: b.notebookId, cellId: 'k1', code: 'v1 = 7' })).error?.code).toBe(-32000);
+    fake.crash(1);
+    const closed = await call('notebook.close', { notebookId: b.notebookId });
+    expect(closed.error).toMatchObject({ code: -32000, message: expect.stringContaining('unsaved') });
+    expect((await call('notebook.list')).result).toMatchObject([{ notebookId: b.notebookId, ended: true }]);
+    expect((await call('notebook.switch', { notebookId: b.notebookId })).result).toMatchObject({ state: { cells: [{ code: 'v1 = 7' }] } });
+  });
+
   it('切 tab 不杀内核：切走再切回，进程保活、执行计数仍在', async () => {
     setup();
     const a = await open(NB_A);
@@ -161,6 +319,39 @@ describe('RpcRouter · P3.1 多 tab 多内核', () => {
     expect(fakes[0]!.countOf('load_file')).toBe(1);
     const aState = (await call('notebook.switch', { notebookId: a.notebookId })).result as NotebookOpenResult;
     expect(aState.state.cells[0]!.execCount).toBe(1); // 执行计数保活
+  });
+
+  it('O-2：后台 live 会话按所属 notebook 投影，不切焦点、不借用当前 cells', async () => {
+    setup();
+    const dir = mkdtempSync(path.join(tmpdir(), 'novalab-session-owned-'));
+    const aPath = path.join(dir, 'a.py');
+    const bPath = path.join(dir, 'b.py');
+    const a = await open(aPath);
+    const aSession = lastParams<{ sessionId: string }>('session.started')!.sessionId;
+    await call('cell.run', { cellId: 'k0', cascade: false });
+    const b = await open(bPath);
+    const bSession = lastParams<{ sessionId: string }>('session.started')!.sessionId;
+
+    const listed = await call('session.list', { notebookPath: aPath });
+    expect((listed.result as SessionMeta[]).map((m) => m.id)).toEqual([aSession]);
+    const projected = await call('session.open', { notebookPath: aPath, sessionId: aSession });
+    expect(projected.error).toBeUndefined();
+    expect(projected.result as SessionOpenResult).toMatchObject({
+      sessionId: aSession,
+      endedAt: null,
+      readOnly: true,
+      cells: [{ id: 'k0', code: 'v0 = 0', execCount: 1 }],
+    });
+    // 同目录也不能把 B 的 live id 与 A 的路径配对。
+    expect((await call('session.open', { notebookPath: aPath, sessionId: bSession })).error?.code).toBe(-32602);
+    expect(((await call('agent.listCells')).result as { id: string }[]).map((c) => c.id)).toEqual(['k1']);
+    expect((await call('notebook.switch', { notebookId: b.notebookId })).result).toMatchObject({ notebookId: b.notebookId });
+
+    // A 结束落盘后仍可查询，错配 B 路径则拒绝。
+    await call('notebook.close', { notebookId: a.notebookId });
+    const ended = await call('session.open', { notebookPath: aPath, sessionId: aSession });
+    expect((ended.result as SessionOpenResult).endedAt).toBeTruthy();
+    expect((await call('session.open', { notebookPath: bPath, sessionId: aSession })).error?.code).toBe(-32602);
   });
 
   it('notebook.close：save_file + 会话 ended(shutdown) + snapshot 落盘 + tab 摘除 + 焦点转移', async () => {
@@ -179,9 +370,10 @@ describe('RpcRouter · P3.1 多 tab 多内核', () => {
     // 会话 ended 广播，reason=shutdown
     expect(lastParams<SessionEndedParams>('session.ended')).toMatchObject({ reason: 'shutdown' });
     // snapshot 落盘：A 的 sessions 目录出现 <id>.snapshot.json
-    const snapshotFiles = readdirSync(SESSIONS_A).filter((f) => f.endsWith('.snapshot.json'));
-    expect(snapshotFiles.length).toBeGreaterThanOrEqual(1);
-    const snap = JSON.parse(readFileSync(path.join(SESSIONS_A, snapshotFiles[0]!), 'utf8')) as {
+    const ended = lastParams<SessionEndedParams>('session.ended')!;
+    const snapshotPath = path.join(SESSIONS_A, `${ended.sessionId}.snapshot.json`);
+    expect(existsSync(snapshotPath)).toBe(true);
+    const snap = JSON.parse(readFileSync(snapshotPath, 'utf8')) as {
       endReason?: string;
       cells: { id: string }[];
     };

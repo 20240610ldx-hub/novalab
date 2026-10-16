@@ -3,109 +3,100 @@
  * 用法（仓库根）：node scripts/integration-smoke.mjs
  * 前置：bridge 依赖已装、uv 环境已 sync。仅依赖冻结协议（spec §6.1/§6.2）。
  */
-import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BridgeClient } from './bridge-client.mjs';
+import { withSmokeBridge } from './smoke-runtime.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(join(root, 'bridge', 'package.json'));
+// 自建 fixture：notebook 与相邻的 UI/session sidecar 都只写入本次临时目录。
+export const SMOKE_FIXTURE = `# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pandas"]
+# ///
 
-const DEMO = join(root, 'demos', 'demo.py');
-// smoke 的 cell.save 会落盘（幂等 toggle 改 pop 值）：进程退出时还原字节，保持仓库干净
-const demoOriginal = readFileSync(DEMO, 'utf8');
-process.on('exit', () => {
+# %% [cell-id: a0b0c001]
+import pandas as pd
+
+df = pd.DataFrame({
+    "county": ["沈阳", "大连", "沈阳", "鞍山"],
+    "pop": [9.1, 7.5, 0.9, 3.4],
+    "year": [2024, 2024, 2025, 2025],
+})
+df
+
+# %% [cell-id: a0b0c002]
+total = df.groupby("county")["pop"].sum()
+total
+
+# %% [cell-id: a0b0c003]
+print(f"counties={len(total)} max={total.max()}")
+`;
+
+const fail = (msg) => { throw new Error(msg); };
+
+export async function runIntegrationSmoke({ fixture = SMOKE_FIXTURE, ...options } = {}) {
+  await withSmokeBridge(fixture, async ({ bridge, notebookPath, stage }) => {
+    const rpc = (method, params = {}, options = {}) => bridge.rpc(method, params, options);
+    const waitNotif = (method, timeoutMs = 15000) => bridge.waitNotif(method, () => true, timeoutMs);
+
+    // P3.1：notebook.open 响应升级为 {notebookId, state}
+    const openRes = await rpc('notebook.open', { path: notebookPath });
+    await stage('opened');
+    if (!openRes?.notebookId) fail(`notebook.open 缺 notebookId: ${JSON.stringify(openRes)}`);
+    const state = openRes.state;
+    if (state?.cells?.length !== 3) fail(`notebook.open cells=${state?.cells?.length}`);
+    console.log(`open ok: notebookId=${openRes.notebookId} cells=${state.cells.length} edges=${state.dagEdges.length}`);
+
+    // P3.1：notebook.list 反映已打开的 tab（含 rssMB 字段形状）
+    const list = await rpc('notebook.list');
+    if (!Array.isArray(list) || list.length !== 1) fail(`notebook.list len=${list?.length}`);
+    if (list[0].notebookId !== openRes.notebookId) fail('notebook.list notebookId 不匹配');
+    if (!('rssMB' in list[0])) fail('notebook.list 缺 rssMB 字段');
+    console.log(`list ok: n=${list.length} kernelState=${list[0].kernelState} rssMB=${list[0].rssMB}`);
+
+    const [c1, c2, c3] = state.cells;
+    for (const cell of [c1, c2, c3]) {
+      const result = await rpc('cell.run', { cellId: cell.id, cascade: false });
+      if (!result?.ok) fail(`run ${cell.id}: ${JSON.stringify(result)}`);
+    }
+    await waitNotif('run.done');
+
+    // L-5：DataFrame → plain + html；Series → plain；print → 无 mime。
+    const mimesOf = (cellId) =>
+      bridge.notifications.filter((n) => n.method === 'run.mime' && n.params?.cellId === cellId).map((n) => n.params.mime);
+    const m1 = mimesOf(c1.id).sort().join(',');
+    if (m1 !== 'text/html,text/plain') fail(`c1 run.mime=${m1 || '(none)'}，应为 text/html,text/plain`);
+    const m2 = mimesOf(c2.id).join(',');
+    if (m2 !== 'text/plain') fail(`c2 run.mime=${m2 || '(none)'}，应为 text/plain`);
+    if (mimesOf(c3.id).length !== 0) fail(`c3 不应有 run.mime: ${mimesOf(c3.id)}`);
+    // 隐私（spec §8）：agent 读面只拿 mime 键名，不得含 DataFrame 单元格值。
+    const agentOut = await rpc('agent.cellOutput', { cellId: c1.id });
+    if (agentOut?.mimeKeys?.slice().sort().join(',') !== 'text/html,text/plain') {
+      fail(`agent.cellOutput mimeKeys=${JSON.stringify(agentOut?.mimeKeys)}`);
+    }
+    if (JSON.stringify(agentOut).includes('沈阳')) fail('agent.cellOutput 泄漏了 mime 数据');
+    console.log(`display ok: c1=[${m1}] c2=[${m2}] agent mimeKeys=${agentOut.mimeKeys.join(',')}`);
+
+    const vars = await rpc('kernel.vars');
+    const dfSchema = vars.schemas.find((s) => s.name === 'df');
+    if (!dfSchema?.shape) fail('kernel.vars 缺 df schema');
+    console.log(`vars ok: df shape=${dfSchema.shape} columns=${dfSchema.columns?.length}`);
+
+    // 反应式语义：改 c1 → c2/c3 应进 staleSet；落盘只作用于临时 notebook。
+    const editedCode = c1.code.replace('0.9', '1.9');
+    if (editedCode === c1.code) fail('smoke fixture 缺少可修改的 pop 值');
+    const saved = await rpc('cell.save', { cellId: c1.id, code: editedCode });
+    if (!saved?.staleSet?.includes(c2.id)) fail(`cell.save staleSet=${JSON.stringify(saved)}`);
+    console.log(`reactive ok: staleSet=${saved.staleSet.length} cells`);
+    await stage('saved');
+  }, options);
+  console.log('INTEGRATION_SMOKE_OK');
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    writeFileSync(DEMO, demoOriginal);
-  } catch {
-    /* best-effort */
-  }
-});
-const fail = (msg) => {
-  console.error('SMOKE_FAIL:', msg);
-  process.exit(1);
-};
-
-const bridgeProcess = spawn(process.execPath, [require.resolve('tsx/cli'), join(root, 'bridge', 'src', 'main.ts')], {
-  cwd: join(root, 'bridge'),
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-bridgeProcess.stdout.on('data', (d) => process.stdout.write(`[bridge] ${d}`));
-bridgeProcess.stderr.on('data', (d) => process.stderr.write(`[bridge!] ${d}`));
-
-const bridge = new BridgeClient();
-let connected = false;
-for (let attempt = 0; attempt < 30 && !connected; attempt += 1) {
-  try {
-    await bridge.connect();
-    connected = true;
-  } catch {
-    if (attempt === 29) throw new Error('bridge 未就绪');
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await runIntegrationSmoke();
+  } catch (error) {
+    console.error('SMOKE_FAIL:', error.message);
+    process.exitCode = error.signal === 'SIGINT' ? 130 : error.signal === 'SIGTERM' ? 143 : error.signal === 'SIGHUP' ? 129 : 1;
   }
 }
-const rpc = (method, params = {}) => bridge.rpc(method, params);
-const waitNotif = (method, timeoutMs = 15000) => bridge.waitNotif(method, () => true, timeoutMs);
-
-// P3.1：notebook.open 响应升级为 {notebookId, state}
-const openRes = await rpc('notebook.open', { path: DEMO });
-if (!openRes?.notebookId) fail(`notebook.open 缺 notebookId: ${JSON.stringify(openRes)}`);
-const state = openRes.state;
-if (state?.cells?.length !== 3) fail(`notebook.open cells=${state?.cells?.length}`);
-console.log(`open ok: notebookId=${openRes.notebookId} cells=${state.cells.length} edges=${state.dagEdges.length}`);
-
-// P3.1：notebook.list 反映已打开的 tab（含 rssMB 字段形状）
-const list = await rpc('notebook.list');
-if (!Array.isArray(list) || list.length !== 1) fail(`notebook.list len=${list?.length}`);
-if (list[0].notebookId !== openRes.notebookId) fail('notebook.list notebookId 不匹配');
-if (!('rssMB' in list[0])) fail('notebook.list 缺 rssMB 字段');
-console.log(`list ok: n=${list.length} kernelState=${list[0].kernelState} rssMB=${list[0].rssMB}`);
-
-const [c1, c2, c3] = state.cells;
-const r1 = await rpc('cell.run', { cellId: c1.id, cascade: false });
-if (!r1?.ok) fail(`run c1: ${JSON.stringify(r1)}`);
-const r2 = await rpc('cell.run', { cellId: c2.id, cascade: false });
-if (!r2?.ok) fail(`run c2: ${JSON.stringify(r2)}`);
-const r3 = await rpc('cell.run', { cellId: c3.id, cascade: false });
-if (!r3?.ok) fail(`run c3: ${JSON.stringify(r3)}`);
-await waitNotif('run.done');
-
-// L-5 普通 cell 收尾裸表达式回显：c1 `df`（DataFrame）→ text/plain + text/html；
-// c2 `total`（Series，无 _repr_html_）→ text/plain；c3 print → 无 mime。
-const mimesOf = (cellId) =>
-  bridge.notifications.filter((n) => n.method === 'run.mime' && n.params?.cellId === cellId).map((n) => n.params.mime);
-const m1 = mimesOf(c1.id).sort().join(',');
-if (m1 !== 'text/html,text/plain') fail(`c1 run.mime=${m1 || '(none)'}，应为 text/html,text/plain`);
-const m2 = mimesOf(c2.id).join(',');
-if (m2 !== 'text/plain') fail(`c2 run.mime=${m2 || '(none)'}，应为 text/plain`);
-if (mimesOf(c3.id).length !== 0) fail(`c3 不应有 run.mime: ${mimesOf(c3.id)}`);
-// 隐私（spec §8）：agent 读面只拿 mime 键名，DataFrame 单元格值（县名）不得出现
-const agentOut = await rpc('agent.cellOutput', { cellId: c1.id });
-if (agentOut?.mimeKeys?.slice().sort().join(',') !== 'text/html,text/plain') {
-  fail(`agent.cellOutput mimeKeys=${JSON.stringify(agentOut?.mimeKeys)}`);
-}
-if (JSON.stringify(agentOut).includes('沈阳')) fail('agent.cellOutput 泄漏了 mime 数据');
-console.log(`display ok: c1=[${m1}] c2=[${m2}] agent mimeKeys=${agentOut.mimeKeys.join(',')}`);
-
-const vars = await rpc('kernel.vars');
-const dfSchema = vars.schemas.find((s) => s.name === 'df');
-if (!dfSchema?.shape) fail('kernel.vars 缺 df schema');
-console.log(`vars ok: df shape=${dfSchema.shape} columns=${dfSchema.columns?.length}`);
-
-// 反应式语义：改 c1 → c2/c3 应进 staleSet。
-// cell.save 会落盘（P1.8 起），故用幂等 toggle：当前含 1.9 则写回 0.9，反之亦然，
-// 保证每次运行都产生真实代码变更且 fixture 语义不变。
-const editedCode = c1.code.includes('1.9')
-  ? c1.code.replace('1.9', '0.9')
-  : c1.code.replace('0.9', '1.9');
-if (editedCode === c1.code) fail('demo.py 缺少可 toggle 的 pop 值（0.9/1.9）');
-const saved = await rpc('cell.save', { cellId: c1.id, code: editedCode });
-if (!saved?.staleSet?.includes(c2.id)) fail(`cell.save staleSet=${JSON.stringify(saved)}`);
-console.log(`reactive ok: staleSet=${saved.staleSet.length} cells`);
-
-console.log('INTEGRATION_SMOKE_OK');
-bridge.close();
-bridgeProcess.kill();
-process.exit(0);

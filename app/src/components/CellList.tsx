@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNotebook } from '../store/notebook';
+import { useNotebooks } from '../store/notebooks';
 import { isOutputEmpty, lastCellFrameLine, type Cell } from '../kernel/types';
 import { CellHeader } from './CellHeader';
 import { CellEditor } from './CellEditor';
@@ -87,14 +88,12 @@ export function CellList() {
   const compileErrors = useNotebook((s) => s.compileErrors);
   const setActive = useNotebook((s) => s.setActive);
   const setCellCode = useNotebook((s) => s.setCellCode);
-  const saveCell = useNotebook((s) => s.saveCell);
   const runCell = useNotebook((s) => s.runCell);
+  const closing = useNotebooks((s) => s.tabs.find((tab) => tab.notebookId === s.activeId)?.closing ?? false);
 
   // 视口内（±2 屏）的 cell id 集合
   const [inView, setInView] = useState<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement>(null);
-  // 本地 debounce：编辑 → 立即更新 store.code，300ms 静默后发 cell.save
-  const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   // 观察依赖用 id 序列而非 length：换 notebook 时 DOM 节点被替换，需重建 observer
   const cellIds = useMemo(() => cells.map((c) => c.id).join('|'), [cells]);
@@ -130,32 +129,6 @@ export function CellList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cellIds]);
 
-  // 卸载时清空 debounce 计时器
-  useEffect(() => {
-    const timers = saveTimers.current;
-    return () => {
-      for (const t of timers.values()) clearTimeout(t);
-      timers.clear();
-    };
-  }, []);
-
-  const handleCodeChange = useMemo(
-    () => (id: string, code: string) => {
-      setCellCode(id, code); // 受控：立即回写 store.cell.code
-      const timers = saveTimers.current;
-      const prev = timers.get(id);
-      if (prev) clearTimeout(prev);
-      timers.set(
-        id,
-        setTimeout(() => {
-          timers.delete(id);
-          void saveCell(id, code); // 300ms debounce → cell.save（重算 DAG/stale）
-        }, 300),
-      );
-    },
-    [setCellCode, saveCell],
-  );
-
   if (cells.length === 0) {
     return (
       <p className="p-4 text-[var(--muted)]">
@@ -165,7 +138,7 @@ export function CellList() {
   }
 
   return (
-    <div ref={listRef} className="pb-4">
+    <div ref={listRef} className="pb-4" inert={closing} aria-busy={closing}>
       {cells.map((c) => (
         <CellView
           key={c.id}
@@ -174,7 +147,7 @@ export function CellList() {
           mounted={inView.has(c.id)}
           compileError={compileErrors[c.id]}
           onActivate={setActive}
-          onCodeChange={handleCodeChange}
+          onCodeChange={setCellCode}
           onRun={(id) => void runCell(id)}
         />
       ))}

@@ -1,6 +1,7 @@
 """runtime.py — 单一共享 globals 的反应式执行核心（spec §5 + 2026-10-06 契约增补）。
 
 职责：
+- validate_cells：纯静态候选分析，返回 cells / edges / compileError；不改运行态、不执行；
 - set_cells：重建 DAG；对变更 cell 及其下游传递闭包标 stale（不自动运行）；
   被删除 cell 的 defs 从 globals 移除；结果回传重算后的 cells（含 defs/refs/sideEffect）；
 - load_file：返回完整 NotebookState {cells, dagEdges, schemas, staleSet, execCounts}；
@@ -38,10 +39,12 @@ from __future__ import annotations
 import ast
 import builtins as _builtins_mod
 import contextlib
+import hashlib
 import io
 import linecache
 import os
 import sys
+import tempfile
 import time
 import traceback as tbmod
 from dataclasses import dataclass, field
@@ -71,9 +74,10 @@ class KernelError(Exception):
 
     code = -32000
 
-    def __init__(self, message: str, code: int | None = None) -> None:
+    def __init__(self, message: str, code: int | None = None, data: dict | None = None) -> None:
         super().__init__(message)
         self.message = message
+        self.data = data
         if code is not None:
             self.code = code
 
@@ -262,6 +266,9 @@ class Runtime:
         self.header_lines: list[str] | None = None
         self.config: dict[str, str] = {}
         self.sources: dict[str, list[str]] = {}
+        self._loaded_path: str | None = None
+        self._file_baseline: bytes | None = None
+        self._recovery_copies: dict[tuple[str, bytes], str] = {}
         self._reset_state()
 
     # ------------------------------------------------------------------ infra
@@ -291,7 +298,8 @@ class Runtime:
             return []
         return [{"from": a, "to": b} for a, b in graph.edges]
 
-    def _cells_payload(self) -> list[dict]:
+    @staticmethod
+    def _cells_payload(cells: dict[str, CellRecord]) -> list[dict]:
         return [
             {
                 "id": r.id,
@@ -300,23 +308,53 @@ class Runtime:
                 "refs": sorted(r.refs),
                 "sideEffect": r.side_effect,
             }
-            for r in self.cells.values()
+            for r in cells.values()
         ]
 
-    # ------------------------------------------------------------- set_cells
-    def set_cells(self, cells: list[dict], *, initial: bool = False) -> dict:
+    @staticmethod
+    def _analyze_cells(cells: list[dict], method: str) -> tuple[dict[str, CellRecord], dag.Graph]:
+        """Shared static analysis; all records and the graph belong to the candidate."""
+        if not isinstance(cells, list):
+            raise KernelError("param cells must be list", -32602)
         incoming: list[tuple[str, str]] = []
         for c in cells:
             if not isinstance(c, dict) or "id" not in c or "code" not in c:
-                raise KernelError("set_cells: each cell needs {id, code}", -32602)
+                raise KernelError(f"{method}: each cell needs {{id, code}}", -32602)
             incoming.append((str(c["id"]), str(c["code"])))
         new_ids = [cid for cid, _ in incoming]
         if len(set(new_ids)) != len(new_ids):
-            raise KernelError("set_cells: duplicate cell ids", -32602)
+            raise KernelError(f"{method}: duplicate cell ids", -32602)
 
+        analyses: dict[str, dag.CellAnalysis] = {}
+        recs: dict[str, CellRecord] = {}
+        for cid, code in incoming:
+            an = dag.analyze_cell(cid, code)
+            analyses[cid] = an
+            recs[cid] = CellRecord(
+                id=cid, code=code,
+                side_effect=dag.detect_side_effect(code),
+                defs=an.defs, refs=an.refs,
+            )
+        return recs, dag.build_graph(new_ids, analyses)
+
+    def validate_cells(self, cells: list[dict]) -> dict:
+        """Analyze a candidate without changing runtime state or executing user code."""
+        recs, graph = self._analyze_cells(cells, "validate_cells")
+        out: dict = {
+            "cells": self._cells_payload(recs),
+            "edges": self._edges_payload(graph),
+        }
+        if graph.compile_error:
+            out["compileError"] = graph.compile_error
+        return out
+
+    # ------------------------------------------------------------- set_cells
+    def set_cells(self, cells: list[dict], *, initial: bool = False) -> dict:
+        recs, graph = self._analyze_cells(cells, "set_cells")
+        new_ids = list(recs)
         old = self.cells
-        changed = {cid for cid, code in incoming if cid not in old or old[cid].code != code}
-        removed = [cid for cid in old if cid not in set(new_ids)]
+        changed = {cid for cid, rec in recs.items() if cid not in old or old[cid].code != rec.code}
+        removed = [cid for cid in old if cid not in recs]
 
         # 删除的 cell：其 defs 从 globals 移除（spec §5）；控件同步注销（§15.1）
         removed_names: set[str] = set()
@@ -330,31 +368,21 @@ class Runtime:
             self.exec_counts.pop(cid, None)
             self._unregister_cell_controls(cid)
 
-        # 重建记录与 DAG
-        analyses: dict[str, dag.CellAnalysis] = {}
-        recs: dict[str, CellRecord] = {}
-        for cid, code in incoming:
-            an = dag.analyze_cell(cid, code)
-            analyses[cid] = an
-            recs[cid] = CellRecord(
-                id=cid, code=code,
-                side_effect=dag.detect_side_effect(code),
-                defs=an.defs, refs=an.refs,
-            )
+        # 提交已分析的记录与 DAG
         self.cells = recs
-        self.graph = dag.build_graph(new_ids, analyses)
-        self.compile_error = self.graph.compile_error
+        self.graph = graph
+        self.compile_error = graph.compile_error
 
         if initial:
             self.stale = set()
         else:
-            consumers = {cid for cid in new_ids if analyses[cid].refs & removed_names}
+            consumers = {cid for cid in new_ids if recs[cid].refs & removed_names}
             affected = set(changed) | consumers
             affected |= self.graph.downstream(affected)
             self.stale = (self.stale | affected) & set(new_ids)
 
         out: dict = {
-            "cells": self._cells_payload(),
+            "cells": self._cells_payload(self.cells),
             "edges": self._edges_payload(self.graph),
             "staleSet": self._stale_ordered(),
         }
@@ -363,8 +391,24 @@ class Runtime:
         return out
 
     # -------------------------------------------------------------- load/save
+    @staticmethod
+    def _normalized_file_path(path: str) -> str:
+        return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+    def _baseline_sha256(self) -> str | None:
+        return None if self._file_baseline is None else hashlib.sha256(self._file_baseline).hexdigest()
+
+    @staticmethod
+    def _read_file_bytes(path: str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
     def load_file(self, path: str) -> dict:
-        nb = serialize.parse_file(path)
+        normalized_path = self._normalized_file_path(path)
+        raw = self._read_file_bytes(normalized_path)
+        # Parse the same read as the raw-byte baseline; match universal-newline input.
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        nb = serialize.parse(text)
         # Jupyter 语义：内核 cwd 跟随 notebook 目录（科研 notebook 的相对路径硬需求，
         # 如 reproducibility bundle 的 inputs/outputs 相对引用）
         try:
@@ -375,23 +419,103 @@ class Runtime:
         self.config = nb.config
         self._reset_state()
         self.set_cells([{"id": c.id, "code": c.code} for c in nb.cells], initial=True)
+        self._loaded_path = normalized_path
+        self._file_baseline = raw
         # 契约增补 #2：完整 NotebookState
         out: dict = {
-            "cells": self._cells_payload(),
+            "cells": self._cells_payload(self.cells),
             "dagEdges": self._edges_payload(self.graph),
             "schemas": _introspect.snapshot(self.globals),
             "staleSet": self._stale_ordered(),
             "execCounts": {cid: 0 for cid in self.cells},
+            # D4: fingerprint of the exact baseline bytes, so a client can tell after a
+            # bridge restart whether the disk still holds what this kernel last confirmed.
+            "baselineSha256": self._baseline_sha256(),
         }
         if self.compile_error:
             out["compileError"] = self.compile_error
         return out
 
+    def _candidate_text(self, cells: list[dict], method: str) -> str:
+        # Static validation is pure, including when the candidate has a compile error.
+        recs, _ = self._analyze_cells(cells, method)
+        candidate = [{"id": c.id, "code": c.code} for c in recs.values()]
+        return serialize.write(candidate, header_lines=self.header_lines, config=self.config)
+
+    def _preserve_candidate(self, path: str, text: str) -> str:
+        """Exclusive complete .py copy; POSIX 0600, Windows inherits directory ACL."""
+        target = self._normalized_file_path(path)
+        raw = text.encode("utf-8")
+        key = (target, hashlib.sha256(raw).digest())
+        previous = self._recovery_copies.get(key)
+        if previous is not None:
+            try:
+                if self._read_file_bytes(previous) == raw:
+                    return previous
+            except OSError:
+                pass
+            self._recovery_copies.pop(key, None)
+
+        fd, recovery = tempfile.mkstemp(
+            prefix=f"{os.path.basename(target)}.novalab-recovery-",
+            suffix=".py", dir=os.path.dirname(target),
+        )
+        try:
+            # mkstemp creates exclusively with 0600. Never rewrite an existing copy.
+            stream = os.fdopen(fd, "wb")
+            fd = None
+            with stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            if fd is not None:
+                os.close(fd)
+            try:
+                os.unlink(recovery)
+            except OSError:
+                pass
+            raise
+        self._recovery_copies[key] = recovery
+        return recovery
+
+    def _recovery_data(self, path: str, text: str, kind: str) -> dict:
+        data = {"kind": kind, "notebookPath": path, "recoveryPath": None}
+        try:
+            data["recoveryPath"] = self._preserve_candidate(path, text)
+        except Exception:  # Recovery failure must never permit overwrite or disclose content.
+            data["recoveryError"] = "Unable to preserve the local notebook copy."
+        return data
+
+    def backup_file(self, path: str, cells: list[dict]) -> dict:
+        """Preserve a candidate before explicit reload; leave all kernel state intact."""
+        text = self._candidate_text(cells, "backup_file")
+        data = self._recovery_data(path, text, "recovery-failure")
+        if data["recoveryPath"] is None:
+            raise KernelError("Unable to preserve the local notebook copy.", data=data)
+        return {"recoveryPath": data["recoveryPath"]}
+
     def save_file(self, path: str, cells: list[dict]) -> dict:
-        self.set_cells(cells)
-        text = serialize.write(cells, header_lines=self.header_lines, config=self.config)
+        text = self._candidate_text(cells, "save_file")
+        normalized_path = self._normalized_file_path(path)
+        if self._loaded_path == normalized_path:
+            try:
+                current = self._read_file_bytes(normalized_path)
+            except FileNotFoundError:
+                current = None
+            # Other read errors (including a directory at the path) stay -32000.
+            if current != self._file_baseline:
+                data = self._recovery_data(path, text, "external-modification")
+                raise KernelError("Notebook changed on disk; save was refused.", -32002, data)
+        elif self._loaded_path is not None and os.path.lexists(os.path.abspath(path)):
+            raise KernelError("Cannot save to another existing path; load it first.", -32602)
+        # This comparison is not a cross-process CAS: an external writer can still
+        # race the subsequent atomic write. A failed write never advances baseline.
         serialize.write_file(path, text)
-        return {"ok": True}
+        self.set_cells(cells)
+        self._loaded_path = normalized_path
+        self._file_baseline = text.encode("utf-8")
+        return {"ok": True, "baselineSha256": self._baseline_sha256()}
 
     # -------------------------------------------------------------- execution
     def exec_cell(self, cell_id: str, cascade: bool = False) -> dict:

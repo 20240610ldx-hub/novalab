@@ -54,12 +54,16 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: node scripts/build-bridge.mjs
       - run: node scripts/sync-py-resources.mjs
-      # ---- 安装包运行时验收：实际启动 node/uv sidecar + bundled bridge + novakernel ----
+      # ---- 构建目录运行时验收（非 installer）：真实 sidecars/bridge/kernel ----
       # 使用工作区已同步的 .venv，避免验收阶段重复下载；Tauri 正式安装仍会
       # 把 py-resources 复制到用户可写目录后按需执行 uv sync。
       - run: uv sync --directory py --all-extras
       - name: packaged startup smoke
         run: node scripts/packaged-startup-smoke.mjs
+        env:
+          NOVALAB_SMOKE_PY_DIR: ${{ github.workspace }}/py
+      - name: packaged startup ownership regressions
+        run: node --test --test-timeout=70000 scripts/packaged-startup-smoke.acceptance.mjs
         env:
           NOVALAB_SMOKE_PY_DIR: ${{ github.workspace }}/py
 

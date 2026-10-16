@@ -24,8 +24,19 @@ import { MultiSupervisor, StdioKernelTransport } from './supervisor';
 import { createChokidarEventSource } from './watch';
 import { startMcpServer } from './mcp/server';
 
-const BASE_PORT = 7788;
-const MAX_PORT_TRIES = 10;
+function configuredPort(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`${name} must be an integer port (0-65535)`);
+  }
+  return port;
+}
+
+const BASE_PORT = configuredPort('NOVALAB_BRIDGE_PORT', 7788);
+const LLM_PORT = configuredPort('NOVALAB_LLM_PORT', LLM_PROXY_BASE_PORT);
+const MAX_PORT_TRIES = process.env.NOVALAB_BRIDGE_PORT === undefined ? 10 : 0;
 const BRIDGE_INFO_PATH = '/bridge-info';
 const BRIDGE_WS_PATH = '/';
 const AUTH_TIMEOUT_MS = 3_000;
@@ -58,8 +69,8 @@ const supervisor = new MultiSupervisor({
 let activeWss: WebSocketServer | undefined;
 let activeHttpServer: http.Server | undefined;
 let activeLlmProxy: LlmProxyHandle | undefined;
-let actualBridgePort = BASE_PORT;
-let actualLlmPort = LLM_PROXY_BASE_PORT;
+let actualBridgePort = 0;
+let actualLlmPort = 0;
 let llmProxyReady: Promise<number> = Promise.resolve(LLM_PROXY_BASE_PORT);
 const bridgeToken = process.env.NOVALAB_BRIDGE_TOKEN ?? randomBytes(32).toString('base64url');
 const authenticatedClients = new Set<WebSocket>();
@@ -68,6 +79,7 @@ const dataDir = process.env.NOVALAB_DATA_DIR ?? path.join(repoRoot, '.novalab');
 const manifestPath = path.join(dataDir, 'bridge.json');
 
 function writeBridgeManifest(): void {
+  if (actualBridgePort === 0 || actualLlmPort === 0) return;
   mkdirSync(dataDir, { recursive: true });
   const payload = {
     version: '0.1.0',
@@ -184,6 +196,11 @@ function start(port: number): void {
         return;
       }
 
+      if (typeof req !== 'object' || req === null || Array.isArray(req)) {
+        socket.close(1008, 'invalid request');
+        return;
+      }
+
       if (!authenticated) {
         if (req.method !== 'bridge.auth') {
           socket.close(1008, 'authentication required');
@@ -252,7 +269,7 @@ function start(port: number): void {
   });
 }
 
-function shutdown(): void {
+function shutdown(exitCode = 0): never {
   router.dispose(); // 停 watcher + ui.json 落盘 + 全部会话快照
   supervisor.stopAll();
   activeLlmProxy?.close();
@@ -261,11 +278,11 @@ function shutdown(): void {
   activeWss?.close();
   activeHttpServer?.close();
   removeBridgeManifest();
-  process.exit(0);
+  process.exit(exitCode);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown());
+process.on('SIGTERM', () => shutdown());
 
 // ---------- 模式分支：--mcp = stdio MCP server（不起 WS）；默认 = WS 服务 ----------
 
@@ -295,7 +312,12 @@ if (mcpFlagIdx >= 0) {
 } else {
   start(BASE_PORT);
   // P4：LLM 反向代理（默认分支专属；--mcp 分支不起，stdout 是 MCP 协议帧专属）
-  activeLlmProxy = startLlmProxy({ store: providersStore, authToken: bridgeToken });
+  activeLlmProxy = startLlmProxy({
+    store: providersStore,
+    authToken: bridgeToken,
+    basePort: LLM_PORT,
+    maxPortTries: process.env.NOVALAB_LLM_PORT === undefined ? 10 : 0,
+  });
   llmProxyReady = activeLlmProxy.listening
     .then((port) => {
       actualLlmPort = port;
@@ -307,6 +329,6 @@ if (mcpFlagIdx >= 0) {
       process.stderr.write(
         `[bridge] llm-proxy 启动失败: ${err instanceof Error ? err.message : String(err)}\n`,
       );
-      return LLM_PROXY_BASE_PORT;
+      shutdown(1);
     });
 }

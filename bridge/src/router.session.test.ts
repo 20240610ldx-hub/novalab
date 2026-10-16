@@ -35,6 +35,7 @@ let fakes: FakeKernel[] = [];
 let notes: { method: string; params?: unknown }[] = [];
 let router: RpcRouter;
 let reqId = 0;
+let notebookId = '';
 
 /** 会话时钟：每次调用前进 1 分钟，时间戳可预期且 id 不冲突。 */
 let clockNow = new Date('2026-10-06T08:00:00Z');
@@ -77,6 +78,7 @@ async function call(method: string, params?: unknown): Promise<RpcResponse> {
 async function openNotebook(): Promise<NotebookState> {
   const res = await call('notebook.open', { path: nbPath });
   expect(res.error).toBeUndefined();
+  notebookId = (res.result as { notebookId: string }).notebookId;
   return (res.result as { state: NotebookState }).state;
 }
 
@@ -199,7 +201,7 @@ describe('RpcRouter · session 生命周期', () => {
     await call('cell.run', { cellId: 'a', cascade: false }); // execCount/输出进快照
     notes = [];
 
-    const res = await call('kernel.restart');
+    const res = await call('kernel.restart', { notebookId });
     expect(res.error).toBeUndefined();
 
     const ended = lastParams<SessionEndedParams>('session.ended');
@@ -232,7 +234,7 @@ describe('RpcRouter · session 生命周期', () => {
     expect(ended).toMatchObject({ sessionId: first.sessionId, reason: 'crash' });
     expect(index()[0]!.endedAt).toBe(ended!.endedAt);
 
-    await call('kernel.restart');
+    await call('kernel.restart', { notebookId });
     const second = allParams<SessionStartedParams>('session.started').at(-1)!;
     expect(second.sessionId).not.toBe(first.sessionId);
     expect(index()).toHaveLength(2);
@@ -303,7 +305,7 @@ describe('RpcRouter · session.list / session.open', () => {
     await openNotebook();
     const first = lastParams<SessionStartedParams>('session.started')!;
     await call('cell.run', { cellId: 'b', cascade: false });
-    await call('kernel.restart');
+    await call('kernel.restart', { notebookId });
 
     const res = await call('session.open', { sessionId: first.sessionId });
     expect(res.error).toBeUndefined();

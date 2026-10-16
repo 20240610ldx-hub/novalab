@@ -71,6 +71,13 @@ export function ContextChip() {
                       <span className="font-mono text-[var(--text)]">{e.tool}</span>
                       <span className="shrink-0 text-[var(--muted)]">{e.bytes} B</span>
                     </div>
+                    {(e.redacted || e.droppedKeys.length > 0) && (
+                      <p className="px-1.5 text-[var(--accent-err)]">
+                        {e.redacted
+                          ? t('chip.toolRedacted')
+                          : t('chip.toolDropped', { keys: e.droppedKeys.join(', ') })}
+                      </p>
+                    )}
                     <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-all px-1.5 pb-1 text-[var(--muted)]">
                       {e.preview}
                     </pre>

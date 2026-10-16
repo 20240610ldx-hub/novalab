@@ -223,14 +223,15 @@ function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defau
   );
 
   useEffect(() => {
-    if (expanded && !isLive) void loadSnapshot(seg.sessionId);
-  }, [expanded, isLive, loadSnapshot, seg.sessionId]);
+    // O-2：按会话所属 notebook 查询，而非当前 notebook（列表可能来自另一个文件）
+    if (expanded && !isLive) void loadSnapshot(seg.sessionId, seg.notebookPath);
+  }, [expanded, isLive, loadSnapshot, seg.sessionId, seg.notebookPath]);
 
   const banner = !isLive && snapshot ? truncationBanner(total) : null;
   const count = isLive ? executed.length : (snapshot?.length ?? seg.cellCount);
 
   return (
-    <section data-testid="session-group" data-live={isLive}>
+    <section data-testid="session-group" data-session-id={seg.sessionId} data-live={isLive}>
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -280,6 +281,7 @@ export function SessionModal() {
   const closeModal = useSession((s) => s.closeModal);
   const sessions = useSession((s) => s.sessions);
   const currentId = useSession((s) => s.currentId);
+  const readOnly = useSession((s) => s.readOnly);
   const exportState = useSession((s) => s.exportState);
   const importState = useSession((s) => s.importState);
   const exportIpynb = useSession((s) => s.exportIpynb);
@@ -346,7 +348,8 @@ export function SessionModal() {
               key={seg.sessionId}
               seg={seg}
               defaultOpen={i === 0}
-              isLive={seg.live && seg.sessionId === currentId}
+              // 只有当前 notebook 的当前会话可用编辑区富输出；其余按来源查询投影。
+              isLive={seg.live && seg.sessionId === currentId && seg.notebookPath === notebookPath && !readOnly}
             />
           ))}
           {importState.warnings.length > 0 && (

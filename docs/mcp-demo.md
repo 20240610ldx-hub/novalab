@@ -58,4 +58,4 @@ claude mcp add novalab -- pnpm --dir "D:/Notebook Agent/bridge" exec tsx src/mai
 
 - **Staged-only**：`propose_code_change` 永远只把 diff 放入暂存队列，前端弹行内审阅（Tab 采纳 / Esc 拒绝）；外部 Agent **不存在特权写入通道**——MCP 与前端 in-process 工具落到同一批 `router.invoke` 方法，无旁路。
 - **隐私契约（spec §8 / ADR-006）**：出进程数据白名单 = 代码文本、traceback、DAG 边、schema 元信息与 MIME 类型键；stdout/stderr、文件写入路径、DataFrame 全量、二进制和文件内容留在本地 UI/session。`agent.context` 的 schema 过 PreviewSerializer 4KB 硬截断，traceback 仍按 8KB 截断。
-- **编译预检**：stage 前把"应用该 diff 后的全量 cells"发给内核 `set_cells` 试探（纯静态分析、不执行），随后无条件回滚为原 cells；两次额外往返的成本可接受，换来无效提议不进审阅队列。
+- **编译预检**：stage 前通过 `validate_cells` 纯静态分析候选全量 cells；多重定义、环或语法错误不进入队列。预检不修改源码、DAG、变量、控件、执行计数或 stale，不执行候选代码；人工采纳才提交变更。旧候选 `set_cells` / 回滚方式已移除，因为源码恢复不能恢复运行状态。

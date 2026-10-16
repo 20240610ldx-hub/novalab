@@ -14,6 +14,7 @@
 import { create } from 'zustand';
 import { bridge } from '../bridge/client';
 import { useNotebook } from './notebook';
+import { emptyCache, useNotebooks } from './notebooks';
 import type { Cell } from '../kernel/types';
 
 /* ------------------------------------------------------------------ */
@@ -27,6 +28,8 @@ export interface SessionMeta {
   endedAt?: string;
   cellCount: number;
   source: 'local' | 'agent';
+  /** 该会话所属 notebook；列表与快照查询据此配对（O-2）。缺省 = 当前 notebook。 */
+  notebookPath?: string;
 }
 
 /** session.open 快照 cell（输出为摘要：stdout/stderr 已截断、mime 仅键名、writes 为 P2.9 文件写入路径）。 */
@@ -144,8 +147,12 @@ export function snapshotToCells(cells: readonly SessionSnapshotCell[]): Cell[] {
   });
 }
 
-/** session.list 载荷宽容归一化（坏条目丢弃）。 */
-export function normalizeSessionMetas(payload: unknown): SessionMeta[] {
+/**
+ * session.list 载荷宽容归一化（坏条目丢弃）。
+ * `notebookPath` 标记每个会话的来源 notebook：会话列表可能属于另一个文件，
+ * 而当前 notebook 可能已切换，快照查询必须按来源配对（O-2）。
+ */
+export function normalizeSessionMetas(payload: unknown, notebookPath?: string): SessionMeta[] {
   if (!Array.isArray(payload)) return [];
   const out: SessionMeta[] = [];
   for (const e of payload) {
@@ -158,6 +165,9 @@ export function normalizeSessionMetas(payload: unknown): SessionMeta[] {
       ...(typeof r.endedAt === 'string' ? { endedAt: r.endedAt } : {}),
       cellCount: typeof r.cellCount === 'number' ? r.cellCount : 0,
       source: r.source === 'agent' ? 'agent' : 'local',
+      ...(typeof r.notebookPath === 'string' && r.notebookPath !== ''
+        ? { notebookPath: r.notebookPath }
+        : notebookPath ? { notebookPath } : {}),
     });
   }
   return out;
@@ -187,6 +197,8 @@ export interface SessionSegment {
   parts: number;
   /** 各子段起点 ISO 时间（长度 = parts；首元素 = 会话内首个有效 ts 或 startedAt）。 */
   partStarts: string[];
+  /** 会话所属 notebook（O-2：快照查询按此配对，而非当前 notebook）。 */
+  notebookPath?: string;
 }
 
 /** 纯函数 selector：sessions（+ 可选会话内 ts）→ 段落列表（最新在前，与 SessionMenu 同序）。 */
@@ -218,6 +230,7 @@ export function buildSegments(
       live,
       parts: Math.max(1, partStarts.length),
       partStarts: partStarts.length > 0 ? partStarts : [m.startedAt],
+      ...(m.notebookPath !== undefined ? { notebookPath: m.notebookPath } : {}),
     };
   });
 }
@@ -311,13 +324,13 @@ interface SessionStore {
   /** 回到 live 会话（还原备份切片，readOnly=false）。 */
   backToLive: () => Promise<void>;
   onStarted: (p: { sessionId?: string; startedAt?: string; notebookPath?: string }) => void;
-  onEnded: (p: { sessionId?: string; endedAt?: string }) => void;
+  onEnded: (p: { sessionId?: string; endedAt?: string; notebookPath?: string }) => void;
 
   /* ---- P3.4 SessionModal actions ---- */
   openModal: () => void;
   closeModal: () => void;
   /** 展开会话时惰性拉快照（已缓存则跳过；live 会话由 router 内存投影兜底）。 */
-  loadSnapshot: (sessionId: string) => Promise<void>;
+  loadSnapshot: (sessionId: string, notebookPath?: string) => Promise<void>;
   /** 导出会话 .ipynb（export.ipynb rpc；-32600/-32601 → pending-wiring 降级）。 */
   exportIpynb: (sessionId?: string | null) => Promise<void>;
   /** 导入 .ipynb → 成功后 openNotebook 新 .py（import.ipynb rpc；同样降级）。 */
@@ -326,6 +339,7 @@ interface SessionStore {
 
 /** 最近一次已知 notebook 路径（session.* 通知不带路径时的 fallback）。 */
 let lastNotebookPath: string | null = null;
+let latestRefreshRequest = 0;
 
 export const useSession = create<SessionStore>((set, get) => ({
   root: null,
@@ -364,16 +378,21 @@ export const useSession = create<SessionStore>((set, get) => ({
 
   refreshSessions: async (notebookPath) => {
     const nb = notebookPath ?? useNotebook.getState().notebookPath;
+    const request = ++latestRefreshRequest;
     if (!nb) return;
     lastNotebookPath = nb;
     try {
       const metas = await bridge.rpc<unknown>('session.list', { notebookPath: nb });
-      const sessions = normalizeSessionMetas(metas);
+      // 只接纳当前路径的最新响应；新路径提交后 TabBar 会补刷新。
+      if (request !== latestRefreshRequest || useNotebook.getState().notebookPath !== nb) return;
+      const sessions = normalizeSessionMetas(metas, nb);
       // live 条目（无 endedAt）= 当前会话；与通知驱动字段互相校准
       const live = sessions.find((m) => m.endedAt === undefined);
       set({
         sessions,
-        ...(live ? { currentId: live.id, currentStartedAt: live.startedAt, currentEndedAt: null } : {}),
+        ...(live
+          ? { currentId: live.id, currentStartedAt: live.startedAt, currentEndedAt: null }
+          : { currentId: null, currentStartedAt: null }),
       });
     } catch (err) {
       console.error('session.list 失败:', err);
@@ -390,11 +409,22 @@ export const useSession = create<SessionStore>((set, get) => ({
       console.error('session.open 失败:', err);
       return;
     }
-    if (!liveBackup) liveBackup = captureLive();
+    if (!useNotebook.getState().historyView) liveBackup = captureLive();
+    const notebookId = useNotebooks.getState().activeId;
+    if (notebookId && !useNotebook.getState().historyView) {
+      // Capture the full live cache before projecting history; in-flight autosave stays live.
+      const live = useNotebook.getState();
+      const cached = useNotebooks.getState().readCache(notebookId) ?? emptyCache();
+      useNotebooks.getState().saveCache(notebookId, {
+        ...cached, ...captureLive(), schemas: live.schemas,
+        uiCollapsed: live.uiCollapsed, lastRunMs: live.lastRunMs,
+      });
+    }
     const cells = snapshotToCells(res.cells ?? []);
     const { shown, total } = truncateHistory(cells);
     // 历史视图 = 只读投影：DAG/stale/编译错/diff 队列全部清空（backToLive 还原）
     useNotebook.setState({
+      historyView: true,
       cells: shown,
       dagEdges: [],
       staleSet: [],
@@ -415,9 +445,14 @@ export const useSession = create<SessionStore>((set, get) => ({
   backToLive: async () => {
     const backup = liveBackup;
     liveBackup = null;
-    if (backup) useNotebook.setState(backup);
+    const liveCache = useNotebooks.getState().readCache(useNotebooks.getState().activeId ?? '');
+    if (backup && useNotebook.getState().historyView) {
+      useNotebook.setState({ ...backup, ...(liveCache ?? {}), historyView: false });
+    }
+    else useNotebook.setState({ historyView: false });
+    const tab = useNotebooks.getState().activeTab();
     set({
-      readOnly: false,
+      readOnly: tab?.ended === true || tab?.reloading === true,
       viewingId: null,
       viewingEndedAt: null,
       historyTotal: 0,
@@ -433,10 +468,14 @@ export const useSession = create<SessionStore>((set, get) => ({
 
   closeModal: () => set({ modalOpen: false }),
 
-  loadSnapshot: async (sessionId) => {
+  /**
+   * 拉会话快照。`notebookPath` 为该会话**所属** notebook，缺省才回落到当前/最近
+   * notebook。切 tab 或导入期间，仍展开的旧分组要按来源查询自己的投影。
+   */
+  loadSnapshot: async (sessionId, notebookPath) => {
     const s = get();
     if (s.snapshotCells[sessionId] || s.snapshotLoading[sessionId]) return; // 已缓存/在途
-    const nb = useNotebook.getState().notebookPath ?? lastNotebookPath;
+    const nb = notebookPath ?? useNotebook.getState().notebookPath ?? lastNotebookPath;
     if (!nb) return;
     set({ snapshotLoading: { ...get().snapshotLoading, [sessionId]: true } });
     try {
@@ -520,6 +559,8 @@ export const useSession = create<SessionStore>((set, get) => ({
 
   onStarted: (p) => {
     if (typeof p.sessionId !== 'string') return;
+    const currentPath = useNotebook.getState().notebookPath;
+    if (typeof p.notebookPath === 'string' && currentPath && p.notebookPath !== currentPath) return;
     if (typeof p.notebookPath === 'string') lastNotebookPath = p.notebookPath;
     set({
       currentId: p.sessionId,
@@ -531,6 +572,10 @@ export const useSession = create<SessionStore>((set, get) => ({
 
   onEnded: (p) => {
     if (typeof p.sessionId !== 'string') return;
+    const currentPath = useNotebook.getState().notebookPath;
+    if (typeof p.notebookPath === 'string' && p.notebookPath !== currentPath) return;
+    const owner = get().sessions.find((s) => s.id === p.sessionId)?.notebookPath;
+    if (owner && owner !== currentPath) return;
     const endedAt = typeof p.endedAt === 'string' ? p.endedAt : new Date().toISOString();
     // 只有当前 live 会话结束才影响右 pill；历史视图不受干扰
     if (p.sessionId === get().currentId) set({ currentEndedAt: endedAt });
@@ -580,9 +625,10 @@ function installReadOnlyGuards(): void {
     runRepl: async (code) => {
       if (!blocked()) return orig.runRepl(code);
     },
-    restartKernel: async () => {
-      if (!blocked()) return orig.restartKernel();
-    },
+    // Lifecycle restart has its own dead-owner guard in notebook.ts. It must
+    // remain callable while readOnly reflects an ended live tab; history still
+    // returns immediately from the underlying action.
+    restartKernel: async (options) => orig.restartKernel(options),
     acceptDiff: async (diffId) => {
       if (!blocked()) return orig.acceptDiff(diffId);
     },
@@ -628,6 +674,7 @@ bridge.onNotification((method, params) => {
     useSession.getState().onEnded({
       sessionId: p.sessionId as string | undefined,
       endedAt: p.endedAt as string | undefined,
+      notebookPath: p.notebookPath as string | undefined,
     });
   }
 });

@@ -6,7 +6,7 @@ import { NotebookWatcher, type FsEventSource } from './watch';
 import { KernelSupervisor } from './supervisor';
 import { RpcRouter } from './router';
 import { FakeKernel } from './testing/fake-kernel';
-import type { NotebookState, RpcResponse } from './protocol';
+import type { NotebookOpenResult, RpcResponse } from './protocol';
 
 /** 假事件源：手动 emit，单测不碰真 fs/chokidar。 */
 class FakeEventSource implements FsEventSource {
@@ -177,7 +177,7 @@ function sessionEvents(): SessionEventLike[] {
     .map((l) => JSON.parse(l) as SessionEventLike);
 }
 
-describe('RpcRouter · 外部变更热重载', () => {
+describe('RpcRouter · 外部变更提示', () => {
   let sup: KernelSupervisor | undefined;
   let router: RpcRouter | undefined;
 
@@ -224,32 +224,33 @@ describe('RpcRouter · 外部变更热重载', () => {
     expect(source().added).toEqual([path.resolve(NB_PATH)]);
   });
 
-  it('外部变更 → load_file + notebook.state 广播 + session external_reload', async () => {
+  it('外部变更只发所属notebook提示，不load、不改缓存/计数、不执行或推进基线', async () => {
     const { fakes, notes, call, source } = setup();
-    await call('notebook.open', { path: NB_PATH });
-    // 外部改文件后内核侧的新状态（FakeKernel：改内存 cells 再 emit 事件）
+    const opened = (await call('notebook.open', { path: NB_PATH })).result as NotebookOpenResult;
+    await call('cell.run', { cellId: 'a' });
+    await call('kernel.vars'); // 等待run.done触发的异步introspect也完成后再取观察基线
+    // kernel可返回的新内容不应被自动load；router原缓存仍归用户审阅。
     fakes[0]!.cells = [
       { id: 'a', code: 'x = 99', execCount: 0, defs: ['x'], refs: [] },
     ];
-    expect(fakes[0]!.countOf('load_file')).toBe(1);
-
+    const before = (await call('notebook.switch', { notebookId: opened.notebookId })).result;
+    const eventCount = sessionEvents().length;
+    const requestCount = fakes[0]!.requests.length;
+    const noteCount = notes.length;
     source().emit('change', NB_PATH);
-    source().emit('change', NB_PATH); // debounce 合并
+    source().emit('change', NB_PATH);
     await sleep(60);
 
-    expect(fakes[0]!.countOf('load_file')).toBe(2);
-    const states = notes.filter((n) => n.method === 'notebook.state');
-    expect(states).toHaveLength(1);
-    const state = states[0]!.params as NotebookState;
-    expect(state.cells).toHaveLength(1);
-    expect(state.cells[0]!.code).toBe('x = 99');
-    expect(sessionEvents().at(-1)).toMatchObject({
-      kind: 'external_reload',
-      payloadRef: path.resolve(NB_PATH),
-    });
+    expect(fakes[0]!.requests.slice(requestCount)).toEqual([]);
+    expect(notes.slice(noteCount)).toEqual([{
+      method: 'notebook.externalChange',
+      params: { notebookId: opened.notebookId, notebookPath: NB_PATH },
+    }]);
+    expect((await call('notebook.switch', { notebookId: opened.notebookId })).result).toEqual(before);
+    expect(sessionEvents()).toHaveLength(eventCount);
   });
 
-  it('自写跳过：cell.save 写盘（save_file）前后维持 suppress 窗口，事件不触发重载', async () => {
+  it('自写跳过：save_file窗口内不提示，窗口后只提示不重载', async () => {
     const { fakes, notes, call, source } = setup();
     await call('notebook.open', { path: NB_PATH });
 
@@ -264,13 +265,16 @@ describe('RpcRouter · 外部变更热重载', () => {
     source().emit('change', NB_PATH);
     await sleep(40);
     expect(fakes[0]!.countOf('load_file')).toBe(1);
+    expect(notes.filter((n) => n.method === 'notebook.externalChange')).toHaveLength(0);
     expect(notes.filter((n) => n.method === 'notebook.state')).toHaveLength(0);
 
-    // 窗口过后的真实外部变更 → 仍然触发
+    // 窗口过后的真实外部变更只提示，旧基线留待显式reload。
     await sleep(80);
     source().emit('change', NB_PATH);
     await sleep(40);
-    expect(fakes[0]!.countOf('load_file')).toBe(2);
+    expect(fakes[0]!.countOf('load_file')).toBe(1);
+    expect(notes.filter((n) => n.method === 'notebook.externalChange')).toHaveLength(1);
+    expect(notes.filter((n) => n.method === 'notebook.state')).toHaveLength(0);
   });
 
   it('重开另一 notebook：旧路径 unwatch，旧路径事件不再重载', async () => {

@@ -152,6 +152,8 @@ export interface CellSaveResult {
   dagEdges: DagEdge[];
   staleSet: string[];
   compileError?: string;
+  /** D4：本次落盘后的基线指纹。 */
+  baselineSha256?: string;
 }
 
 /** kernel.status 通知载荷。state=idle 在前端映射为 KernelState 'live'。 */

@@ -46,7 +46,7 @@ function analyze(code: string): { defs: string[]; refs: string[] } {
   return { defs: [...defs], refs: [...refs] };
 }
 
-function buildEdges(cells: CellInfo[]): DagEdge[] {
+function buildEdges(cells: Pick<CellInfo, 'id' | 'defs' | 'refs'>[]): DagEdge[] {
   const edges: DagEdge[] = [];
   for (const c1 of cells) {
     for (const c2 of cells) {
@@ -84,11 +84,13 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
   requests: { method: string; params?: Record<string, unknown> }[] = [];
   /** exec 类请求的模拟耗时（排队/并发测试用）。 */
   execDelayMs = 0;
+  /** 脚本化写盘失败（保持进程存活，供保存/关闭回归）。 */
+  failSaveFile?: string;
   /** 脚本化失败：exec 该 cell 时回 run.error + ok:false。 */
   failCell?: { cellId: string; traceback: string };
   /** 脚本化写事件（P2.9）：exec 该 cell 时对每个 path 发 run.notify file-write。 */
   notifyWrites?: { cellId: string; paths: string[] };
-  /** 脚本化编译错：下一次 set_cells 返回 compileError。 */
+  /** 脚本化编译错：下一次 set_cells / validate_cells 返回 compileError。 */
   nextCompileError?: { message: string; cellIds: string[] };
   /** 不回 ping（测 supervisor 超时判死）。 */
   ignorePing = false;
@@ -152,8 +154,36 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
         return;
       }
       case 'save_file':
-        this.respond(msg.id, { ok: true });
+        if (this.failSaveFile) this.respondError(msg.id, -32000, this.failSaveFile);
+        else this.respond(msg.id, { ok: true });
         return;
+      case 'validate_cells': {
+        const cells = params['cells'];
+        if (!Array.isArray(cells)) {
+          this.respondError(msg.id, -32602, cells === undefined ? 'missing param: cells' : 'param cells must be list');
+          return;
+        }
+        if (cells.some((c) => !c || typeof c !== 'object' || !('id' in c) || !('code' in c))) {
+          this.respondError(msg.id, -32602, 'validate_cells: each cell needs {id, code}');
+          return;
+        }
+        const incoming = cells as { id: unknown; code: unknown }[];
+        if (new Set(incoming.map((c) => String(c.id))).size !== incoming.length) {
+          this.respondError(msg.id, -32602, 'validate_cells: duplicate cell ids');
+          return;
+        }
+        const analyzed = incoming.map((c) => ({
+          id: String(c.id), code: String(c.code), ...analyze(String(c.code)), sideEffect: false,
+        }));
+        const compileError = this.nextCompileError;
+        this.nextCompileError = undefined;
+        this.respond(msg.id, {
+          cells: analyzed,
+          edges: buildEdges(analyzed),
+          ...(compileError ? { compileError } : {}),
+        });
+        return;
+      }
       case 'set_cells':
         this.respond(msg.id, this.setCells(params));
         return;

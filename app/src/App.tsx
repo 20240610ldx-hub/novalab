@@ -38,6 +38,7 @@ import { TitleBar } from './components/Workbench/TitleBar';
  */
 export function App() {
   const bridgeConnected = useNotebook((s) => s.bridgeConnected);
+  const bridgeStatus = useNotebook((s) => s.bridgeStatus);
   const notebookPath = useNotebook((s) => s.notebookPath);
   const appMode = useUi((s) => s.appMode);
   const sideOpen = useLayout((s) => s.sideOpen);
@@ -144,7 +145,23 @@ export function App() {
 
         <main className="flex min-w-0 flex-1 flex-col bg-[var(--bg)]" data-testid="editor">
           {/* 降级横幅：bridge 连接失败（编辑器 UI 仍可浏览，内核功能不可用） */}
-          {attempted && !bridgeConnected && (
+          {bridgeStatus === 'reconnecting' && (
+            <div role="status" data-testid="bridge-reconnecting" className="border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
+              {t('app.bridgeReconnecting')}
+            </div>
+          )}
+          {bridgeStatus === 'down' && (
+            <div role="alert" data-testid="bridge-down" className="flex items-center gap-2 border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
+              <span className="min-w-0 flex-1">{t('app.bridgeGaveUp')}</span>
+              <button
+                type="button"
+                data-testid="bridge-retry"
+                onClick={() => void useNotebook.getState().retryBridge()}
+                className="shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)]"
+              >{t('app.bridgeRetry')}</button>
+            </div>
+          )}
+          {attempted && !bridgeConnected && bridgeStatus === 'idle' && (
             <div className="border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
               {t('app.bridgeDown')}
             </div>
