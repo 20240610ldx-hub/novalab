@@ -133,6 +133,15 @@ export function forwardHeaders(
   return out;
 }
 
+/**
+ * 前端 retryFetch 依赖的响应头。均非 CORS 安全列表头，不显式 expose 时浏览器读不到，
+ * 会退化成「看不到 Retry-After、看不到配置错误标记」。
+ */
+const RETRY_SIGNAL_HEADERS = 'retry-after, retry-after-ms, x-should-retry, x-novalab-retryable';
+
+/** 配置类错误（未知 provider / 解密失败 / baseURL 非法）：重试无意义，告知前端不要重试。 */
+const NOT_RETRYABLE = { 'x-novalab-retryable': '0' } as const;
+
 function filterResponseHeaders(headers: http.IncomingHttpHeaders): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
@@ -254,13 +263,13 @@ async function handleRequest(
     resolved = store.resolveForProxy(providerId);
   } catch (err) {
     if (err instanceof ProvidersStoreError) {
-      json(res, 502, { error: err.message }, cors);
+      json(res, 502, { error: err.message }, cors, NOT_RETRYABLE);
       return;
     }
     throw err;
   }
   if (!resolved) {
-    json(res, 404, { error: `unknown provider: ${providerId}` }, cors);
+    json(res, 404, { error: `unknown provider: ${providerId}` }, cors, NOT_RETRYABLE);
     return;
   }
 
@@ -268,7 +277,7 @@ async function handleRequest(
   try {
     target = new URL(joinUpstream(resolved.provider.baseURL, rest) + reqUrl.search);
   } catch {
-    json(res, 502, { error: `provider baseURL 非法: ${resolved.provider.baseURL}` }, cors);
+    json(res, 502, { error: `provider baseURL 非法: ${resolved.provider.baseURL}` }, cors, NOT_RETRYABLE);
     return;
   }
 
@@ -287,6 +296,7 @@ async function handleRequest(
       const outHeaders = filterResponseHeaders(upstreamRes.headers);
       if (cors) {
         outHeaders['access-control-allow-origin'] = cors;
+        outHeaders['access-control-expose-headers'] = RETRY_SIGNAL_HEADERS;
         outHeaders['vary'] = 'Origin';
       }
       res.writeHead(upstreamRes.statusCode ?? 502, outHeaders);
@@ -335,12 +345,14 @@ function json(
   status: number,
   body: unknown,
   cors: string | undefined,
+  extraHeaders: Record<string, string> = {},
 ): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': String(Buffer.byteLength(payload)),
-    ...(cors ? { 'access-control-allow-origin': cors, vary: 'Origin' } : {}),
+    ...extraHeaders,
+    ...(cors ? { 'access-control-allow-origin': cors, 'access-control-expose-headers': RETRY_SIGNAL_HEADERS, vary: 'Origin' } : {}),
   });
   res.end(payload);
 }

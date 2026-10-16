@@ -44,6 +44,11 @@ async function startUpstream(): Promise<Upstream> {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       const url = req.url ?? '/';
+      if (url.includes('/ratelimit')) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '2', 'x-should-retry': 'true' });
+        res.end('{"error":"rate limited"}');
+        return;
+      }
       if (url.includes('/stream')) {
         // SSE：分三帧、间隔 60ms —— 若代理缓冲，客户端会在结束时一次性收到全部
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
@@ -305,6 +310,53 @@ describe('llm-proxy · 错误路径', () => {
     const res = await fetch(`http://127.0.0.1:${port}/llm/tp/v1/messages`, { method: 'POST', body: '{}' });
     expect(res.status).toBe(502);
     expect(((await res.json()) as { error: string }).error).toContain('解密失败');
+  });
+});
+
+/* ---------------- 重试语义（前端 retryFetch 依赖的信号） ---------------- */
+
+describe('llm-proxy · 重试信号', () => {
+  const ORIGIN = 'http://127.0.0.1:5199';
+
+  it('配置类错误（未知 provider / 解密失败 / baseURL 非法）标记 x-novalab-retryable: 0，并对浏览器暴露该头', async () => {
+    const ctx = await setup([{ id: 'bad', baseURL: 'not a url' }]);
+    const unknown = await fetch(ctx.proxyURL('nope', 'v1/messages'), { method: 'POST', body: '{}', headers: { origin: ORIGIN } });
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get('x-novalab-retryable')).toBe('0');
+    expect(unknown.headers.get('access-control-expose-headers')).toContain('x-novalab-retryable');
+    const invalid = await fetch(ctx.proxyURL('bad', 'v1/messages'), { method: 'POST', body: '{}', headers: { origin: ORIGIN } });
+    expect(invalid.status).toBe(502);
+    expect(invalid.headers.get('x-novalab-retryable')).toBe('0');
+
+    const dir = path.dirname(ctx.store.file);
+    const tp = new ProvidersStore({ dir, secret: SECRET });
+    tp.set({ kind: 'anthropic-compat', name: 'tp', baseURL: 'http://127.0.0.1:1/v1', model: 'm', id: 'tp', apiKey: 'sk-1' });
+    const otherStore = new ProvidersStore({ dir, secret: machineSecret({ NOVALAB_SECRET: 'another' }) });
+    const handle = startLlmProxy({ store: otherStore, basePort: 0 });
+    cleanups.push(() => handle.close());
+    const port = await handle.listening;
+    const decrypt = await fetch(`http://127.0.0.1:${port}/llm/tp/v1/messages`, { method: 'POST', body: '{}' });
+    expect(decrypt.status).toBe(502);
+    expect(decrypt.headers.get('x-novalab-retryable')).toBe('0');
+  });
+
+  it('上游不可达的 502 属于网络波动：不带 x-novalab-retryable: 0', async () => {
+    const dead = await startUpstream();
+    const deadPort = dead.port;
+    await dead.close();
+    const ctx = await setup([{ id: 'dead', baseURL: `http://127.0.0.1:${deadPort}/v1` }]);
+    const res = await fetch(ctx.proxyURL('dead', 'v1/messages'), { method: 'POST', body: '{}', headers: { origin: ORIGIN } });
+    expect(res.status).toBe(502);
+    expect(res.headers.get('x-novalab-retryable')).toBeNull();
+  });
+
+  it('透传上游 429 时把 retry-after / x-should-retry 暴露给浏览器（否则 CORS 下读不到）', async () => {
+    const ctx = await setup([{ id: 'rl', kind: 'openai-compat', apiKey: 'sk-1' }]);
+    const res = await fetch(ctx.proxyURL('rl', 'v1/ratelimit'), { method: 'POST', body: '{}', headers: { origin: ORIGIN } });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('2');
+    const exposed = (res.headers.get('access-control-expose-headers') ?? '').split(/\s*,\s*/);
+    expect(exposed).toEqual(expect.arrayContaining(['retry-after', 'retry-after-ms', 'x-should-retry', 'x-novalab-retryable']));
   });
 });
 

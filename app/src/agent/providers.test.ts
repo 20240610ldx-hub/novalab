@@ -315,6 +315,33 @@ describe('保留行为（P2.1 契约不变）', () => {
     expect(o.modelId).toBe('qwen3');
   });
 
+  it('createLanguageModel 的请求走重试 fetch：一次网络错误后自动重放并成功', async () => {
+    const payload = { id: 'c', model: 'qwen3', choices: [{ message: { content: 'pong' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed: ECONNRESET'))
+      .mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const mod = await freshProviders();
+      const model = mod.createLanguageModel(
+        makeConfig({ id: 'p2', kind: 'openai-compat', baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen3' }),
+      ) as unknown as { doGenerate: (o: unknown) => Promise<{ content: Array<{ text?: string }> }> };
+      const res = await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }] });
+      expect(res.content[0]?.text).toBe('pong');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]).toEqual(fetchMock.mock.calls[0]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('streamText 不叠加 SDK 自带重试（统一由 fetch 层处理）', async () => {
+    const { AGENT_SDK_MAX_RETRIES } = await import('./useAgentChat');
+    expect(AGENT_SDK_MAX_RETRIES).toBe(0);
+  });
+
   it('resolveActiveModel：用户选中优先 → dev 兜底 → 未配置（形状不变）', async () => {
     vi.stubEnv('VITE_NOVALAB_LLM_BASE_URL', 'https://dev.local/v1');
     vi.stubEnv('VITE_NOVALAB_LLM_API_KEY', 'sk-dev');
