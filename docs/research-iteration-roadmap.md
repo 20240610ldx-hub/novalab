@@ -130,7 +130,17 @@ Watcher 改为仅通知；前端暂停所属 tab 自动保存，继续保留本�
 
 证据单列 gitignored `validation-20261014/manifest-restart-round5.json` / `results-restart-round5.json` 与 `stage5-restart-*.log`（路径脱敏），记录源码/产物/资源 SHA256、toolchain、owned PID 与清理；前四轮封存指纹未变。仅 Windows 开发 Chromium 证据，非 Tauri WebView/安装器。A15 仍未整体关闭：下一包为 bridge 死亡→桌面恢复/重连与跨应用或有界 dirty 草稿恢复，并需跨平台复测。
 
-## 11. 决策停点
+## 11. 第六轮记录：bridge 死亡→桌面重连（本包已验收，Windows-only，2026-10-16）
+
+对应阶段 2「后续另做 … bridge reconnect」。Owner 裁决：新一代 bridge 上线后 clean tab 等用户点击才冷重开（只 `notebook.open`，不执行、不重放）；bridge 自动重启 60 s 内最多 3 次；断线期间允许继续编辑。前端连接状态机在断线时以 `BridgeDisconnectedError` 结算 pending、拒绝新 RPC（不排队、不重放），每次重连重新 discovery 与认证；tab 在新代上保留为 bridge-lost，不被 `notebook.list` 抹掉，点击后按 path 冷重开并改键。核实发现第四轮基线字节只存在内核内存，bridge 死后会丢：跨代 `baselineSha256`（D4）未裁决前，dirty bridge-lost tab 只保留草稿、拒绝重开/保存，以免覆盖断线期间的外部修改。Tauri 以纯策略 `RestartPolicy` + 监督线程 + `restart_bridge` 命令实现有界重启。
+
+真实 Chromium smoke 用两代自有 bridge：只杀自身 gen-1 bridge PID，断言重连横幅、pending 结算、断线编辑不发写、gen-2 重新认证后两 tab 保留且无自动打开（gen-2 内核 0）、点击 clean tab 恰一次 `notebook.open` 冷加载且无重放、dirty tab 拒绝且磁盘外部字节保留、页面错误 0、18 个自有 PID 全部退出、临时目录删除，输出 `BRIDGE_RECONNECT_SMOKE_OK`。前两跑因 harness 缺陷（只读调用计入写、Windows PID 复用）失败，三、四跑因判定/清理不严谨作废，均保留日志。附带内核探针表明：空闲内核在 bridge 管道关闭后立即退出，忙内核会先跑完当前 cell。工程门：app 336、bridge 274、Rust 5、Python 258+5 跳过、脚本 24、类型检查、生产构建、集成与构建目录 packaged smoke 通过。
+
+证据单列本工作树 gitignored `validation-20261014/manifest-reconnect-round6.json` / `results-reconnect-round6.json` 与 `stage6-*.log`；前五轮封存（基线工作树）仅读取核对未变。仅 Windows 开发 Chromium 证据，Tauri 监督线程只有单测与编译，非安装器。A15 仍未关闭：D4 跨代基线指纹与 dirty 恢复、跨应用草稿恢复、跨平台复测；运行/保存在断线期间禁止与退避/预算默认值待 Owner 确认。
+
+**D4 补充（同日，Owner 批准）**：内核 `load_file`/`save_file` 报告基线原始字节的 `baselineSha256`，bridge 在 notebook 状态、`cell.save`、`diff.accept` 中透传；前端按 tab 记录，bridge 换代后 dirty tab 也可点击重开——指纹与旧代一致才恢复自动保存，不一致或未知走第四轮冲突流程，不盲写。先红（Python 13、bridge 4、app 4 失败）后绿；app 339、bridge 278、Python 261+5 跳过、Rust 5、脚本 24、构建与集成/packaged smoke 通过；同一真实 Chromium smoke 扩为三 tab，覆盖"磁盘已变 → 冲突 → 保留副本加载磁盘"与"磁盘未变 → 草稿落盘、指纹推进"，页面错误 0、31 个自有 PID 全部退出。证据为新增 `manifest-reconnect-round6-d4.json` / `results-reconnect-round6-d4.json` 与 `stage6d4-*.log`，第六轮封存只读核对未变。A15 仍开放：跨应用草稿恢复、生产环境旧内核清理（Job Object 跟进项）、跨平台复测。
+
+## 12. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

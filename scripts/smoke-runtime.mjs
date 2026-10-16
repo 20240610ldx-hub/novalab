@@ -23,7 +23,7 @@ export function verifyOwnedManifest(info, pid, token) {
   return info;
 }
 
-async function waitForManifest(file, child, token, signal) {
+export async function waitForManifest(file, child, token, signal) {
   for (;;) {
     signal.throwIfAborted();
     if (child.exitCode !== null || child.signalCode !== null) throw new Error('bridge 在就绪前退出');
@@ -41,7 +41,7 @@ async function waitForManifest(file, child, token, signal) {
   }
 }
 
-async function stopOwnedTree(child, closed) {
+export async function stopOwnedTree(child, closed) {
   if (!child.pid) return;
   let forceTimer;
   if (process.platform === 'win32') {

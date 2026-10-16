@@ -395,6 +395,9 @@ class Runtime:
     def _normalized_file_path(path: str) -> str:
         return os.path.normcase(os.path.realpath(os.path.abspath(path)))
 
+    def _baseline_sha256(self) -> str | None:
+        return None if self._file_baseline is None else hashlib.sha256(self._file_baseline).hexdigest()
+
     @staticmethod
     def _read_file_bytes(path: str) -> bytes:
         with open(path, "rb") as f:
@@ -425,6 +428,9 @@ class Runtime:
             "schemas": _introspect.snapshot(self.globals),
             "staleSet": self._stale_ordered(),
             "execCounts": {cid: 0 for cid in self.cells},
+            # D4: fingerprint of the exact baseline bytes, so a client can tell after a
+            # bridge restart whether the disk still holds what this kernel last confirmed.
+            "baselineSha256": self._baseline_sha256(),
         }
         if self.compile_error:
             out["compileError"] = self.compile_error
@@ -509,7 +515,7 @@ class Runtime:
         self.set_cells(cells)
         self._loaded_path = normalized_path
         self._file_baseline = text.encode("utf-8")
-        return {"ok": True}
+        return {"ok": True, "baselineSha256": self._baseline_sha256()}
 
     # -------------------------------------------------------------- execution
     def exec_cell(self, cell_id: str, cascade: bool = False) -> dict:

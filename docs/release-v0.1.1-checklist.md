@@ -76,7 +76,7 @@ A01–A05 的已执行结果见 §9；A07/A08 已补专项子项，尚未完整�
 ### 3.4 桌面、恢复与边界场景
 
 - [ ] **A14 四种最终产物**：Windows NSIS/MSI、Linux AppImage/deb 安装/解包与真实窗口启动；从实际安装目录打开 notebook、运行、保存、导出。检查只读资源复制到可写运行目录；首次依赖安装错误有可理解提示/恢复路径；初始化后断网可跑本地链路。开发目录或 CI 已准备环境不算“全新机器首启”。
-- [ ] **A15 崩溃/重启与外部修改**：已验 clean dead/ended notebook 的 owner-addressed 冷重启、同 notebook FIFO、重复请求拒绝、失败保留 dead/session、旧 outputs/Diff/REPL 清理与 A→B owner 隔离；dirty dead 草稿保留并阻止重启。bridge 死亡→桌面恢复/重连、跨应用草稿恢复仍待独立包；外部编辑文件的冲突提示不丢未保存内容。副作用重放须在临时文件夹/合成任务中验证，不对真实研究目录杀进程试验。
+- [ ] **A15 崩溃/重启与外部修改**：已验 clean dead/ended notebook 的 owner-addressed 冷重启、同 notebook FIFO、重复请求拒绝、失败保留 dead/session、旧 outputs/Diff/REPL 清理与 A→B owner 隔离；dirty dead 草稿保留并阻止重启。bridge 死亡→桌面重连已验（2026-10-16 第六轮，Windows-only）：断线结算 pending、允许编辑、新一代 tab 保留为 bridge-lost、clean 点击冷重开、dirty 保留草稿；D4 补充（同日 Owner 批准）：dirty tab 重开时以跨代 `baselineSha256` 核对磁盘，未变则续存草稿、已变或未知则进入冲突流程不覆盖；跨应用草稿恢复仍待独立包；外部编辑文件的冲突提示不丢未保存内容。副作用重放须在临时文件夹/合成任务中验证，不对真实研究目录杀进程试验。
 - [ ] **A16 多 tab、历史与 >500 cells**：前后台切换状态不串；后台刷新行为按 K1；历史 ended 只读；构造 501+ cell 会话，显示前 500 与截断说明，导出包含完整会话而非截断投影。
 - [ ] **A17 长输出、控件与布局**：>420px 输出内部滚动不撑坏编辑区，宽表横滚，折叠/复制/焦点样式有效；布局缩放、Ctrl+B/Ctrl+Alt+B、重开持久化、Welcome 状态和两主题正常。slider 交互按 spec §15 自动级联，但副作用下游只标 stale；重开控件值回默认需提示/文档一致。
 - [ ] **A18 性能与体积**：按 §6 记录真实数字、环境与统计口径；安装版窗口计时和首次运行时准备分开，不以 dev/headless 数替代全部桌面指标。
@@ -423,6 +423,45 @@ Owner 策略：clean dead/ended notebook 可显式冷重启；dirty dead/ended �
 | 边界 | Windows-only；Chromium + Vite dev，非 Tauri WebView/安装器；内核死亡仅由自身 taskkill 诱发；dirty dead 只拒绝、不恢复。bridge 死亡→桌面重连、watchdog/session resume、跨应用或有界草稿恢复、macOS/Linux 未验证 |
 
 本轮关闭 A15 的「clean dead/ended 前端显式冷重启 + dirty 拒绝保留草稿」子项（仅 Windows）；bridge 重连、草稿恢复与跨平台仍缺，**A15 保持未勾选**。
+
+### 2026-10-16 第六轮：bridge 死亡→桌面重连（Windows-only）
+
+Owner 裁决（2026-10-16）：D1 新一代 bridge 上线后 clean tab **等用户点击**才冷重开；D2 bridge 自动重启 **60 s 内最多 3 次**；D3 **断线期间允许继续编辑**。D4（跨代基线指纹 `baselineSha256` 协议字段）**未裁决、未实现**。基线 `bce0c2d`（第 1–5 轮）加未提交修改，分支 `claude/novalab-bridge-reconnect`；设计见 `docs/proposal-bridge-reconnect.md`。
+
+| 项 | 操作 / 实际结果 |
+|---|---|
+| 实现范围 | 前端 `BridgeClient` 状态机 idle/connected/reconnecting/down：已认证连接关闭即以 `BridgeDisconnectedError` 结算全部 pending，每次重连都重新 discovery + `bridge.auth`（新 token → generation+1），有界退避后 down，「重试连接」重置预算；断线/down 期间新 RPC 立即失败，不排队、不重放。store：断线时运行中 cell 标 stale、保存定时器暂停、编辑只留草稿；新一代上线所有 tab 标 `bridgeLost`（`notebook.list` 合并不再抹 tab，同 path 新条目隐藏），只在用户点击后 `notebook.open` 冷重开并改键到新 id，不执行、不重放；dirty bridgeLost tab 拒绝重开/保存/关闭并保留草稿；同一实例重连补发草稿。Tauri：`RestartPolicy`（60 s 窗口 / 3 次 / 退避 1·2·4 s）+ 监督线程（`try_wait` 轮询，退出时先置 shutting_down 不误重启）+ `restart_bridge` 命令重置额度 |
+| 先红后绿 | 新增 app `client.test.ts` 7 例与 `bridgeRecovery.test.ts` 13 例，实现前 18 失败 / 2 通过；Rust `RestartPolicy` 5 例 `todo!()` 桩 5 失败（首次因新工作树缺 sidecar 无法构建，生成后重跑）。两处测试自身缺陷已修并记录（初始 connected 事件被当成第一条；fixture 的 `notebook.list` 空响应异步抹 tab），产品逻辑未因此改动 |
+| 真实 Chromium | `node scripts/bridge-reconnect-smoke.mjs http://127.0.0.1:5299/` → `BRIDGE_RECONNECT_SMOKE_OK`，退出 0。两代自有 bridge（Job Object 启动器）与真实内核/临时文件：A 长 cell 运行中按 PID 只杀 gen-1 bridge（非内核）→ 重连横幅出现、pending `cell.run` 以 `BridgeDisconnectedError` 结算、cell 标 stale；断线中切到 B 编辑成功（dirty），未发任何 save/run/notebook 写；断线期间外部改写 b.py；gen-1 Job 空、bridge 与两内核均消失，页面持续重新 discovery；harness 拉起 gen-2（新 token/端口）→ 页面重新认证，两 tab 保留为 bridge-lost 且可编辑，**无自动 `notebook.open`、gen-2 内核数 0**；点击 A「重新打开」→ 恰 1 次 `notebook.open`、改键、冷 cell（无计数/旧输出）、之后无 run/repl/restart/diff，gen-2 内核 1，中断 cell 未被重放（标记文件不存在）；B 重开被拒（`error.operation = reopen`）、草稿保留、磁盘保持外部字节；页面错误 0；自有 PID 18 个全部退出（按创建时间核对），临时目录删除 |
+| 内核 EOF 探针 | 同脚本内单独启动自有内核：空闲内核在 stdin 关闭后约 16 ms 退出；忙内核执行完当前 3 s cell 后（约 2.7 s）才退出。生产（无 Job）中 bridge 死亡后忙内核会把当前 cell 跑完；Windows smoke 中旧内核由 harness Job 终止，不代表生产行为 |
+| 失败 / 作废保留 | run 1：两处 harness 缺陷（"断线无写"把只读 `fs.root`/`session.list` 计入；进程树遍历因 PID 复用误收 OneDrive），收窄为写类方法并按创建时间过滤；run 2：业务全过，末尾 PID 复用误报；run 3、4 通过但分别因 PID 复用判定不严谨、失败路径不删临时目录被作废；run 5 为最终证据。run 1–2 遗留的自身临时目录核对后手动删除 |
+| 工程门 | app 类型检查 + 生产构建（主 JS 1377.06 kB / gzip 401.69 kB，>500 kB 提示保留）；app 27 文件 / 336（+20）；bridge 类型检查、20 文件 / 274；Rust `cargo test --lib` 5/5、`cargo build` 通过；Python 258 通过、5 项 Windows 权限跳过；`pnpm test:scripts` 24/24 |
+| 集成 / 构建目录 | `INTEGRATION_SMOKE_OK`；bridge 重建 275 modules / 1.6 MB，Python resources 32 文件与源码一致；`PACKAGED_STARTUP_SMOKE_OK triple=x86_64-pc-windows-msvc`，仅构建目录回归，不运行 Tauri 壳，不是安装器验收 |
+| 归属 / 清理 | 每次启动 Vite 前确认 5299 无监听；三棵 Vite 树（根 5492 / 30692 / 31236，均来自本工作树）结束后逐 PID 核对已退出、无本树 vite 进程、HTTP 拒绝（最后 netstat 仍列出一条 pid 0 的 LISTENING 残行，无进程、无响应）。只杀过本 smoke 自有 gen-1 bridge PID；未停止任何非本包进程 |
+| 证据 | 本工作树 gitignored `demos/.novalab/validation-20261014/`：`seal-reconnect-round6.mjs`、`manifest-reconnect-round6.json` / `results-reconnect-round6.json` 与 20 份 `stage6-*.log`（`<home>`/`<worktree>`/`<repo>` 脱敏）。276 个源码、3 个 sidecar、前端 dist 30 文件、32 个 Python resources 的 SHA256，toolchain（win32/x64、Node v24.19.0、pnpm 10.33.2、uv 0.11.15、内核 Python 3.12.13、rustc 1.94.1、Playwright 1.63.0），命令与结果、红跑/作废运行、owned PID 与清理。前五轮 12 份 manifest/results 位于基线工作树，仅读取并核对指纹未变 |
+| 边界 | Windows-only；Chromium + Vite dev，非 Tauri WebView/安装器；bridge 重启由 harness 模拟 Tauri 监督完成，Tauri 监督线程只有策略单测与编译覆盖；down + 重试按钮仅单测；dirty bridge-lost tab 只能保留草稿（D4 未裁决）；忙内核在 bridge 死后会跑完当前 cell（Windows 无法按已退出父进程杀树）；草稿只在 WebView 内存 |
+
+默认值（Owner 未单独确认，待确认）：Tauri 退避 1/2/4 s；超限后「重试连接」重置 Rust 额度并重启前端循环；前端重连预算 90 s、退避 0.25/0.5/1/2/4/5 s；断线期间及 bridge-lost tab 禁止运行/保存/Diff/REPL/重启。
+
+本轮关闭 A15 的「bridge 死亡→桌面重连（clean 手动冷重开、dirty 保留草稿）」子项（仅 Windows）；D4 跨代基线指纹 / dirty 恢复、跨应用草稿恢复与跨平台仍缺，**A15 保持未勾选**。
+
+### 2026-10-16 第六轮补充：D4 跨代基线指纹（Windows-only）
+
+Owner 批准（2026-10-16）原话："D4 approved: add a baselineSha256 field to both the kernel and bridge protocols, as the proposal recommends." 第六轮正文保持原样作为 D4 前记录；本补充只追加。
+
+| 项 | 结果 |
+|---|---|
+| 协议 | 内核 `load_file` 结果新增 `baselineSha256`（基线原始字节 SHA-256，含 CRLF），`save_file` 成功返回 `{ok:true, baselineSha256}`，-32002 拒写时不变；bridge `NotebookState.baselineSha256?` 与 `SaveResult.baselineSha256?`（`cell.save` / `diff.accept`），可选、只增不改，旧内核缺省 → 前端视为未知 |
+| 前端 | 每个 tab 记录最后确认的指纹（open / reload / restart / switch / 保存与 Diff 接受 ACK 更新）；bridge 换代后 dirty bridge-lost tab 也显示「重新打开」：`notebook.open` 得到新指纹，与旧代一致 → 保留草稿、改键、恢复自动保存；不一致或未知 → 走第四轮冲突流程（暂停保存、可「保留本地副本并加载磁盘版本」） |
+| 先红 | Python 13 失败 / 54 通过（3 个新指纹用例 + 10 处改用 `saved_ok()` 的保存断言）；bridge `router.baseline.test.ts` 4 失败；app `bridgeRecovery.test.ts` 4 失败 / 12 通过 |
+| 测试改动 | 第六轮 "dirty tab 拒绝重开" 用例被 4 个 D4 用例替换（匹配续存、不匹配冲突、未知冲突、open/保存 ACK 记录指纹）；Python 精确 `== {"ok": True}` 断言改为 `saved_ok()`（同时校验指纹 = 磁盘字节 SHA-256，更严格） |
+| 工程门 | app vitest 339（27 文件）、生产构建（含 `tsc -b`，主 JS 1377.93 kB）；bridge `tsc --noEmit` + vitest 278（21 文件）；Python 261 通过 + 5 跳过；Rust `cargo test --lib` 5 + `cargo build`；`pnpm test:scripts` 24；sidecar/py-resources 重建后集成 smoke 与构建目录 packaged smoke 通过 |
+| 真实 Chromium | 同一 `scripts/bridge-reconnect-smoke.mjs` 扩为三 tab，一跑通过 `BRIDGE_RECONNECT_SMOKE_OK`：gen-1 c.py 指纹等于磁盘字节 SHA-256；断线中编辑 B、C 均不发写；gen-2 三行三个重开按钮、内核 0；A clean 冷重开同前；**B（断线期间被外部改写）→ 冲突流程，草稿保留可见，未发 `cell.save`，磁盘保持外部字节**，点击「保留本地副本并加载磁盘版本」后加载外部版本、文件旁副本含草稿、tab 指纹 = 外部字节；**C（磁盘未变）→ 草稿自动保存落盘、tab 变 clean、指纹推进为新字节**；中断 cell 未重放；页面错误 0；自有 PID 31 个全部退出，临时目录（含恢复副本）删除 |
+| 归属 / 清理 | 启动 Vite 前确认 5299 无监听；Vite 根 cmd 12284（→ pnpm 24164 → node 27516）由 preview_stop 结束，`taskkill /T` 复核无残留、HTTP 拒绝（仍有已知 pid 0 残行）。只杀本 smoke 自有 gen-1 bridge PID |
+| 证据 | 本工作树 gitignored `validation-20261014/`：`seal-reconnect-round6-d4.mjs`、`manifest-reconnect-round6-d4.json` / `results-reconnect-round6-d4.json` 与 16 份 `stage6d4-*.log`（脱敏）。277 个源码（较第六轮变 20 个，含第六轮封存后追加的文档）、sidecar、dist、Python resources 的 SHA256；第六轮 manifest/results/seal 与其 20 份日志、前五轮 12 份封存均只读核对未变 |
+| 边界 | Windows-only；Chromium + Vite dev，非 Tauri WebView/安装器；未知指纹（旧内核）按"已变"处理；字节完全还原的外部编辑视为未变；忙内核在 bridge 死后仍跑完当前 cell；草稿只在 WebView 内存 |
+
+本补充关闭第六轮遗留的「dirty bridge-lost tab 跨代恢复（D4）」（仅 Windows）；跨应用草稿恢复、生产环境旧内核清理与跨平台仍缺，**A15 保持未勾选**。
 
 ### 当前放行结论
 

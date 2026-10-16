@@ -1,5 +1,6 @@
 """test_server.py — stdio JSON-lines 协议端到端（subprocess 冒烟，spec §6.2 + 契约增补）。"""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -188,7 +189,10 @@ def test_load_save_file_flow(tmp_path):
     assert state["staleSet"] == []
     assert state["execCounts"] == {"11111111": 0, "22222222": 0}
     assert by_id(resps, 2)["result"]["cascaded"] == ["22222222"]
-    assert by_id(resps, 3)["result"] == {"ok": True}
+    saved = by_id(resps, 3)["result"]
+    assert saved["ok"] is True
+    assert saved["baselineSha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+    assert state["baselineSha256"] == hashlib.sha256(nb.read_bytes()).hexdigest()
     assert "# %% [cell-id: 11111111]" in out.read_text(encoding="utf-8")
 
 

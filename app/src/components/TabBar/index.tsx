@@ -41,6 +41,7 @@ function dotColor(t: NotebookTab): string {
 }
 
 function stateTitle(t: TFn, tab: NotebookTab): string {
+  if (tab.bridgeLost) return t('tab.bridgeLostTitle');
   if (tab.ended) return t('tab.endedTitle');
   const mem = tab.rssMB !== null ? ` · ${tab.rssMB}MB` : '';
   return t('tab.stateTitle', { state: tab.kernelState, mem, path: tab.path });
@@ -57,6 +58,8 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const closeTab = useNotebook((s) => s.closeTab);
   const flushSaves = useNotebook((s) => s.flushSaves);
   const reloadFromDisk = useNotebook((s) => s.reloadFromDisk);
+  const reopenLostTab = useNotebook((s) => s.reopenLostTab);
+  const bridgeStatus = useNotebook((s) => s.bridgeStatus);
   const historyView = useNotebook((s) => s.historyView);
   const openNotebook = useNotebook((s) => s.openNotebook);
   const refreshList = useNotebooks((s) => s.refreshList);
@@ -147,21 +150,25 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
               active
                 ? 'border-[var(--border)] bg-[var(--panel)] text-[var(--text)]'
                 : 'border-transparent bg-transparent text-[var(--muted)] hover:bg-[var(--bg)]'
-            } ${tab.ended ? 'opacity-60' : ''}`}
+            } ${tab.ended || tab.bridgeLost ? 'opacity-60' : ''}`}
+            data-bridge-lost={tab.bridgeLost ? 'true' : undefined}
           >
             {/* 内核状态点（ended 灰） */}
             <span aria-hidden style={{ color: dotColor(tab), fontSize: 9 }}>
               ●
             </span>
-            <span className={`max-w-40 truncate ${tab.ended ? 'italic' : ''}`}>{tabLabel(tab.path)}</span>
+            <span className={`max-w-40 truncate ${tab.ended || tab.bridgeLost ? 'italic' : ''}`}>{tabLabel(tab.path)}</span>
             {/* 未保存改动标记 */}
             {tab.dirty && (
               <span aria-hidden title={t('tab.dirtyTitle')} className="text-[9px] text-[var(--accent-run)]">
                 ●
               </span>
             )}
-            {tab.ended && (
+            {tab.ended && !tab.bridgeLost && (
               <span className="rounded bg-[var(--bg)] px-1 text-[9px] text-[var(--muted)]">ended</span>
+            )}
+            {tab.bridgeLost && (
+              <span className="rounded bg-[var(--bg)] px-1 text-[9px] text-[var(--muted)]">{t('tab.bridgeLostBadge')}</span>
             )}
             {/* × 关闭 */}
             <button
@@ -212,6 +219,21 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
         </button>
       )}
     </div>
+    {tabs.filter((tab) => tab.bridgeLost && !tab.conflict).map((tab) => (
+      <div key={`lost-${tab.notebookId}`} role="status" data-testid="bridge-lost-row"
+        className="flex items-center gap-2 border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)]">
+        <span className="min-w-0 flex-1">
+          {tabLabel(tab.path)} · {tab.dirty ? t('tab.bridgeLostDirty') : t('tab.bridgeLostClean')}
+        </span>
+        <button
+          type="button"
+          data-testid="bridge-lost-reopen"
+          disabled={bridgeStatus !== 'connected'}
+          onClick={() => void reopenLostTab(tab.notebookId)}
+          className="shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)] disabled:opacity-50"
+        >{t('tab.bridgeLostReopen')}</button>
+      </div>
+    ))}
     {tabs.filter((tab) => tab.conflict).map((tab) => (
       <div key={tab.notebookId} role="alert" className="space-y-1 border-t border-[var(--border)] px-2 py-2 text-[12px] text-[var(--accent-err)]">
         <p>{tabLabel(tab.path)} 的文件已有外部版本。本地编辑仍保留，自动保存已暂停。</p>
@@ -235,12 +257,13 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
     ))}
     {tabs.filter((tab) => tab.error && !tab.conflict).map((tab) => (
       <div key={tab.notebookId} role="alert" className="flex items-center gap-2 border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--accent-err)]">
-        <span>{tabLabel(tab.path)} · {tab.error!.operation === 'close' ? '关闭失败' : tab.error!.operation === 'restart' ? '重启失败' : '保存失败'}：{tab.error!.message}</span>
+        <span>{tabLabel(tab.path)} · {tab.error!.operation === 'close' ? '关闭失败' : tab.error!.operation === 'restart' ? '重启失败' : tab.error!.operation === 'reopen' ? '重新打开失败' : '保存失败'}：{tab.error!.message}</span>
         <button
           type="button"
           disabled={tab.closing}
           onClick={() => {
             if (tab.error!.operation === 'close') void closeTab(tab.notebookId);
+            else if (tab.error!.operation === 'reopen') void reopenLostTab(tab.notebookId);
             else if (tab.error!.operation === 'restart') {
               void (async () => {
                 if (useNotebooks.getState().activeId !== tab.notebookId) await switchTab(tab.notebookId);

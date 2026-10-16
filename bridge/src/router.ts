@@ -613,6 +613,7 @@ export class RpcRouter {
       schemas: c.schemas,
       staleSet: c.staleSet,
       execCounts: c.execCounts,
+      ...(c.baselineSha256 ? { baselineSha256: c.baselineSha256 } : {}),
     });
   }
 
@@ -642,6 +643,7 @@ export class RpcRouter {
         dagEdges: res.dagEdges,
         staleSet: res.staleSet,
         ...(res.compileError ? { compileError: res.compileError } : {}),
+        ...(ctx.cache?.baselineSha256 ? { baselineSha256: ctx.cache.baselineSha256 } : {}),
       };
     });
   }
@@ -699,10 +701,12 @@ export class RpcRouter {
     ctx.needsPersist = true;
     this.watcher?.markSelfWrite(ctx.path);
     try {
-      await ctx.supervisor.request('save_file', {
+      const saved = (await ctx.supervisor.request('save_file', {
         path: ctx.path,
         cells: cache.cells.map((c) => ({ id: c.id, code: c.code })),
-      });
+      })) as { baselineSha256?: unknown } | null;
+      // D4：成功落盘推进基线指纹；失败（含 -32002）抛出，指纹保持旧值。
+      if (typeof saved?.baselineSha256 === 'string') cache.baselineSha256 = saved.baselineSha256;
       ctx.needsPersist = false;
     } finally {
       this.watcher?.markSelfWrite(ctx.path);
@@ -867,10 +871,11 @@ export class RpcRouter {
       this.emitDiffs(ctx);
       this.log(ctx, 'diff_accepted', runCellId, diff.diffId);
 
-      const out: { diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport } = {
+      const out: { diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport; baselineSha256?: string } = {
         diffId: diff.diffId,
         dagEdges: saved.dagEdges,
         staleSet: saved.staleSet,
+        ...(ctx.cache?.baselineSha256 ? { baselineSha256: ctx.cache.baselineSha256 } : {}),
       };
       if (saved.compileError) {
         out.compileError = saved.compileError;
@@ -1508,6 +1513,7 @@ function normalizeState(state: NotebookState): NotebookState {
     schemas: state.schemas ?? [],
     staleSet: state.staleSet ?? [],
     execCounts,
+    ...(typeof state.baselineSha256 === 'string' ? { baselineSha256: state.baselineSha256 } : {}),
   };
 }
 

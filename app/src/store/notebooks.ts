@@ -46,13 +46,23 @@ export interface NotebookTab {
   dirty: boolean;
   /** Close freezes new edits until the latest drafts are saved or close fails. */
   closing?: boolean;
-  error?: { operation: 'save' | 'close' | 'restart'; message: string };
+  error?: { operation: 'save' | 'close' | 'restart' | 'reopen'; message: string };
   conflict?: FileConflict;
   reloading?: boolean;
   /** Keep the confirmed local copy path visible after loading the external version. */
   recoveryPath?: string;
   /** Lifecycle restart is in flight; ordinary writes remain blocked. */
   restarting?: boolean;
+  /**
+   * 前端本地：这个 tab 属于已死亡的上一代 bridge（notebookId/内核/会话/输出均已失效）。
+   * 草稿仍可编辑；运行/保存/Diff/重启被阻止，直到用户点击冷重开（只 notebook.open）。
+   */
+  bridgeLost?: boolean;
+  /**
+   * D4：本 tab 内核最后确认的磁盘基线指纹（open/reload/restart/保存 ACK 更新）。
+   * bridge 换代后据此核对重开时的磁盘：一致才允许草稿继续保存，不一致或未知走冲突流程。
+   */
+  baselineSha256?: string;
 }
 
 /** 一个 notebook 的焦点视图切片缓存（切换时捕获/恢复）。 */
@@ -83,6 +93,7 @@ export interface NotebookStateResult {
     schemas?: VarSchema[];
     staleSet?: string[];
     execCounts?: Record<string, number | null>;
+    baselineSha256?: string;
   };
 }
 
@@ -124,8 +135,8 @@ export function hasUnsavedChanges(tab: Pick<NotebookTab, 'dirty' | 'ended'>): bo
 }
 
 /** Restart is a lifecycle action for a dead/ended live tab, never a history action. */
-export function canRestartTab(tab: Pick<NotebookTab, 'ended' | 'kernelState' | 'dirty' | 'closing' | 'reloading' | 'conflict' | 'restarting'>): boolean {
-  return (tab.ended || tab.kernelState === 'dead') && !tab.dirty && !tab.closing && !tab.reloading && !tab.conflict && !tab.restarting;
+export function canRestartTab(tab: Pick<NotebookTab, 'ended' | 'kernelState' | 'dirty' | 'closing' | 'reloading' | 'conflict' | 'restarting' | 'bridgeLost'>): boolean {
+  return (tab.ended || tab.kernelState === 'dead') && !tab.dirty && !tab.closing && !tab.reloading && !tab.conflict && !tab.restarting && !tab.bridgeLost;
 }
 
 /**
@@ -158,7 +169,29 @@ export function normalizeTabs(payload: unknown, prev: readonly NotebookTab[]): N
       ...(old?.reloading ? { reloading: true } : {}),
       ...(old?.recoveryPath ? { recoveryPath: old.recoveryPath } : {}),
       ...(old?.restarting ? { restarting: true } : {}),
+      ...(old?.baselineSha256 ? { baselineSha256: old.baselineSha256 } : {}),
     });
+  }
+  return out;
+}
+
+/**
+ * 新一代 bridge 的 notebook.list 不认识旧代 tab：保留 bridgeLost tab（含草稿）的位置，
+ * 并隐藏新代列表里与其同 path 的条目（冷重开时改键合并）。无 bridgeLost 时与原行为一致。
+ */
+export function mergeBridgeLost(fresh: NotebookTab[], prev: readonly NotebookTab[]): NotebookTab[] {
+  const lost = prev.filter((t) => t.bridgeLost);
+  if (lost.length === 0) return fresh;
+  const lostPaths = new Set(lost.map((t) => t.path));
+  const freshById = new Map(fresh.map((t) => [t.notebookId, t]));
+  const out: NotebookTab[] = [];
+  for (const t of prev) {
+    if (t.bridgeLost) out.push(t);
+    else if (freshById.has(t.notebookId)) out.push(freshById.get(t.notebookId)!);
+  }
+  const seen = new Set(out.map((t) => t.notebookId));
+  for (const t of fresh) {
+    if (!seen.has(t.notebookId) && !lostPaths.has(t.path)) out.push(t);
   }
   return out;
 }
@@ -174,6 +207,12 @@ interface NotebooksStore {
 
   /** notebook.list 拉取并归一化（保留本地 dirty）；activeId 失效时回退首个 tab。 */
   refreshList: () => Promise<void>;
+  /** 新一代 bridge 上线：全部 tab 标记 bridgeLost（保留草稿/缓存，清除在途生命周期标记）。 */
+  markBridgeLost: () => void;
+  /** 冷重开成功：把旧代 tab/cache/焦点原子改键到新 notebookId。 */
+  rekeyTab: (oldId: string, newId: string, cache: NotebookCache, patch?: Partial<NotebookTab>) => void;
+  /** D4：记录某 owner 最新确认的基线指纹（只接受字符串）。 */
+  setBaseline: (id: string, baselineSha256: unknown) => void;
   setTabs: (tabs: NotebookTab[]) => void;
   setActive: (id: string | null) => void;
   saveCache: (id: string, cache: NotebookCache) => void;
@@ -203,7 +242,7 @@ export const useNotebooks = create<NotebooksStore>((set, get) => ({
   refreshList: async () => {
     try {
       const res = await bridge.rpc<unknown>('notebook.list');
-      const tabs = normalizeTabs(res, get().tabs);
+      const tabs = mergeBridgeLost(normalizeTabs(res, get().tabs), get().tabs);
       const ids = new Set(tabs.map((t) => t.notebookId));
       const activeId = get().activeId;
       set({
@@ -214,6 +253,40 @@ export const useNotebooks = create<NotebooksStore>((set, get) => ({
     } catch (err) {
       console.error('notebook.list 失败:', err);
     }
+  },
+
+  markBridgeLost: () =>
+    set({
+      tabs: get().tabs.map((t) => ({
+        ...t,
+        bridgeLost: true,
+        kernelState: 'dead' as const,
+        restarting: false,
+        closing: false,
+        reloading: false,
+      })),
+    }),
+
+  rekeyTab: (oldId, newId, cache, patch = {}) => {
+    const old = get().tabs.find((t) => t.notebookId === oldId);
+    if (!old) return;
+    const caches = { ...get().caches };
+    delete caches[oldId];
+    caches[newId] = cache;
+    const tabs = get()
+      .tabs.filter((t) => t.notebookId !== newId)
+      .map((t): NotebookTab => {
+        if (t.notebookId !== oldId) return t;
+        const { bridgeLost: _lost, error: _error, ...rest } = t;
+        return { ...rest, notebookId: newId, kernelState: 'idle', ended: false,
+          dirty: Object.keys(cache.drafts).length > 0, cellCount: cache.cells.length, ...patch };
+      });
+    set({ tabs, caches, activeId: get().activeId === oldId ? newId : get().activeId });
+  },
+
+  setBaseline: (id, baselineSha256) => {
+    if (typeof baselineSha256 !== 'string' || !baselineSha256) return;
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, baselineSha256 } : t)) });
   },
 
   setTabs: (tabs) => set({ tabs }),

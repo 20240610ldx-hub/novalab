@@ -53,7 +53,7 @@
 1. Tauri（或 dev 脚本）spawn `bridge`（node），默认在 `127.0.0.1:7788` 起 loopback HTTP + WS（端口冲突自动 +1，至 7798），LLM 代理默认 7789。`NOVALAB_BRIDGE_PORT` / `NOVALAB_LLM_PORT` 可显式指定 0–65535，0 由 OS 分配；显式端口冲突直接失败，不递增。生成本次启动 token（或取 `NOVALAB_BRIDGE_TOKEN`）；两个 listener 就绪后才写运行清单 `<dataDir>/bridge.json`（0600，ADR-009）。隔离验收使用私有 data/notebook 目录，核对 PID/token/精确 loopback URL 后显式连接，避免扫描既有服务。
 2. 前端扫描 7788–7798 的 `GET /bridge-info`（要求白名单 Origin）取得 `{wsUrl, token, llmProxyOrigin}` → 连接 WS（upgrade 同样校验 Origin，否则 403）→ 首条消息 `bridge.auth {token}`（3 秒内，否则 1008 关闭）。随后发 `notebook.open {path}`。
 3. Bridge 创建该 .py 的 novakernel 子进程（uv 管理的 `.venv`，见 plan 环境清单），调用 `load_file` 解析源码、建立静态 DAG；冷启动不执行 cell。
-4. Bridge 回 `{notebookId, state:{cells, dagEdges, schemas, staleSet, execCounts}}`；前端渲染，内核转 `idle`。`execCounts` 从 0 开始，变量与结果须由用户显式执行重建。
+4. Bridge 回 `{notebookId, state:{cells, dagEdges, schemas, staleSet, execCounts, baselineSha256?}}`；前端渲染，内核转 `idle`。`execCounts` 从 0 开始，变量与结果须由用户显式执行重建。
 
 崩溃恢复：kernel 死后标记 `dead`，不自动重放代码或副作用。干净的 dead/ended notebook 只能通过 `kernel.restart {notebookId}` 显式重启；响应携带 `{notebookId, notebookPath, state}`，Bridge 按 owner 加入同 notebook 写队列，并只执行冷 `load_file`。重启成功后清理旧 outputs、schemas、execCounts、Diff 与临时 REPL 显示，并结束旧会话、开始新会话；加载失败保留 dead 状态和旧会话。存在未落盘的 bridge 改动或前端草稿时拒绝重启，不覆盖磁盘、不自动备份或恢复草稿。切换 tab 后延迟响应只更新原 owner 缓存。
 
@@ -140,8 +140,8 @@ introspect（M5 数据源）：对 globals 每名字产出
 | method | 方向 | payload 摘要 |
 |---|---|---|
 | `notebook.open` | req | `{path}` |
-| `notebook.state` | res | `{cells, dagEdges, schemas, staleSet, execCounts}` |
-| `cell.save` | req | `{notebookId?, cellId, code}` → 重算所属 notebook 的 DAG 并保存 → res `{dagEdges, staleSet, compileError?}`；显式 ID 不存在则拒绝，省略时兼容当前焦点 |
+| `notebook.state` | res | `{cells, dagEdges, schemas, staleSet, execCounts, baselineSha256?}` |
+| `cell.save` | req | `{notebookId?, cellId, code}` → 重算所属 notebook 的 DAG 并保存 → res `{dagEdges, staleSet, compileError?, baselineSha256?}`；显式 ID 不存在则拒绝，省略时兼容当前焦点 |
 | `cell.run` | req | `{cellId, cascade: bool?}` |
 | `run.started / run.stdout / run.stderr / run.mime / run.done / run.error` | notif | 流式；`run.done{cellId, execCount, cascaded:[ids], durationMs}`；`run.error{cellId, traceback, frames:[{file,line,fn,srcLine}]}` |
 | `kernel.status` | notif | `{state: idle|busy|restarting|dead, queueDepth}` |
@@ -167,7 +167,7 @@ Bridge 对同一 notebook 的 `cell.save`、`diff.accept`、`notebook.reload`、
 
 #### 外部修改与显式加载（阶段 2 修复契约）
 
-`load_file` 从同一次原始字节读取建立内容基线。已加载路径的 `save_file` 在写盘前比较实际字节（不依赖 mtime/长度），不同或已删除则以 `-32002` 拒绝覆盖，返回 `error.data = {kind:'external-modification', notebookPath, recoveryPath:string|null, recoveryError?}`。本地完整候选保存到同目录排它创建的 `.py` 副本；相同候选仅在现存副本字节一致时复用。副本失败仍拒绝覆盖，不推进基线，不把候选正文写入错误数据；界面明确显示备份失败。只有成功保存或显式重新加载才推进基线。该检查与替换之间仍有跨进程竞态，不构成文件 CAS。
+`load_file` 从同一次原始字节读取建立内容基线。已加载路径的 `save_file` 在写盘前比较实际字节（不依赖 mtime/长度），不同或已删除则以 `-32002` 拒绝覆盖，返回 `error.data = {kind:'external-modification', notebookPath, recoveryPath:string|null, recoveryError?}`。本地完整候选保存到同目录排它创建的 `.py` 副本；相同候选仅在现存副本字节一致时复用。副本失败仍拒绝覆盖，不推进基线，不把候选正文写入错误数据；界面明确显示备份失败。只有成功保存或显式重新加载才推进基线。`load_file` 结果与成功的 `save_file` 返回该基线原始字节的 `baselineSha256`（SHA-256 hex，CRLF 原样计入）；Bridge 在 notebook 状态、`cell.save` 与 `diff.accept` 响应中透传（可选字段，旧内核缺省）。该检查与替换之间仍有跨进程竞态，不构成文件 CAS。
 
 watcher 只发送 `notebook.externalChange {notebookId, notebookPath}`，不自动 load、覆盖缓存或运行。前端记录所属 tab 的冲突并暂停该 tab 的自动保存，允许继续保留本地编辑；保存/关闭遇冲突不清草稿、不移除 tab、不循环通用 Retry。错过 watcher 的后台变化或抑制窗口变化由每次保存的内容检查兜底。
 
@@ -185,8 +185,8 @@ watcher 只发送 `notebook.externalChange {notebookId, notebookPath}`，不自�
 ### 6.2 Bridge ↔ novakernel（子进程 stdout JSON-lines；P1.3 集成后冻结）
 kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
 - `ping` → `{pong, version}`；**内核单线程同步，exec 期间无法应答；supervisor 仅 idle 时健康探测**
-- `load_file {path}` → NotebookState `{cells:[{id,code,defs,refs,sideEffect}], dagEdges, schemas, staleSet, execCounts}`
-- `save_file {path, cells}` → `{ok}`；已加载路径内容冲突 → `-32002` 与本地恢复副本元数据
+- `load_file {path}` → NotebookState `{cells:[{id,code,defs,refs,sideEffect}], dagEdges, schemas, staleSet, execCounts, baselineSha256}`
+- `save_file {path, cells}` → `{ok, baselineSha256}`；已加载路径内容冲突 → `-32002` 与本地恢复副本元数据
 - `backup_file {path, cells}` → `{recoveryPath}`；纯源码副本，不改运行态/基线，不执行
 - `set_cells {cells:[{id,code}]}` → `{cells(重算含 defs/refs/sideEffect), edges, staleSet, compileError?}`
 - `validate_cells {cells:[{id,code}]}` → `{cells(静态 defs/refs/sideEffect), edges, compileError?}`；只分析候选，不改源码、DAG、变量、stale、执行计数或控件，不发 run 通知；Diff 入队前使用此方法
@@ -312,7 +312,7 @@ SessionModal = 该日志 + 当前 cells 的只读投影（segments = 按 >30min 
 - 内核编译错（DAG 环/多重定义）：保存即报，cell 红框 + 原因行内提示，不进运行队列。
 - 运行期异常：traceback 结构化（frames 带 srcLine）→ 存 cell + 触发 FixCard；内核进程存活（exec 隔离在 try/except，globals 不回滚但失败 cell 的 defs 不更新）。
 - 内核进程死：§2 崩溃恢复；session.jsonl 保证审计连续。
-- Bridge 死：Tauri watchdog 重启 + 前端重连带 session resume id。
+- Bridge 死：Tauri 监督线程有界重启（60 s 内最多 3 次，退避 1/2/4 s；超限后用户「重试连接」重置额度）；前端连接断开即以 `BridgeDisconnectedError` 结算全部 pending、拒绝新 RPC（不排队、不重放），运行中的 cell 标 stale，重连时重新 discovery 与认证（预算 90 s，之后进入 down 并提供重试）。断线期间允许编辑，禁止运行/保存/Diff/REPL/重启。新一代 bridge 上线后旧 notebookId 失效：tab 保留为 bridge-lost，不自动打开；用户点击后按 path 冷 `notebook.open` 并改键，不执行、不重放。dirty tab 重开时比较旧代最后确认的 `baselineSha256` 与新加载的值：一致则保留草稿并恢复自动保存，不一致或未知则进入外部冲突流程（§4），不覆盖磁盘。不做 session resume；WebView 同时死亡时草稿丢失（跨应用草稿恢复另包）。
 - LLM  provider 错/离线：AgentPanel 降级横幅；**notebook 全部本地功能不受影响**（M6 脱网承诺）。
 
 ---

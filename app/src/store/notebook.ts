@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { bridge } from '../bridge/client';
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { bridge, BridgeDisconnectedError, type BridgeStatus, type BridgeStatusEvent } from '../bridge/client';
 import { decideStalePolicy, type StaleContext, type StaleDecision } from '../kernel/stalePolicy';
 import {
   emptyCache,
@@ -409,6 +410,8 @@ export interface DiffAcceptResult {
   staleSet?: string[];
   compileError?: { message?: string; cellIds?: string[] } | string;
   run?: { cellId?: string; ok?: boolean; durationMs?: number };
+  /** D4：接受后落盘的基线指纹。 */
+  baselineSha256?: string;
 }
 
 /** 'ask' 档的确认弹窗请求（CascadeAskDialog 渲染；resolve 由弹窗按钮触发）。 */
@@ -438,6 +441,8 @@ interface NotebookStore {
   historyView: boolean;
   /** bridge WS 是否已连接；false → App 显示降级横幅。 */
   bridgeConnected: boolean;
+  /** 连接状态机投影：reconnecting / down 期间运行与保存暂停，编辑只留本地草稿。 */
+  bridgeStatus: BridgeStatus;
   /** cell.save 返回的编译错（cellId → message），P1.5 行内提示的数据源。 */
   compileErrors: Record<string, string>;
   /**
@@ -473,6 +478,10 @@ interface NotebookStore {
   runCell: (cellId: string) => Promise<void>;
   runRepl: (code: string) => Promise<void>;
   restartKernel: (options?: { allowLive?: boolean }) => Promise<void>;
+  /** 新一代 bridge 后由用户点击：clean tab 冷重开（只 notebook.open，不执行、不重放）。 */
+  reopenLostTab: (notebookId: string) => Promise<void>;
+  /** down 后「重试连接」：Tauri 内先重置监督额度并拉起 bridge，再重新进入重连循环。 */
+  retryBridge: () => Promise<void>;
 
   /** P3.1：切换焦点 tab（捕获旧 tab 切片 → 恢复目标 tab；内核进程保活）。 */
   switchTab: (notebookId: string) => Promise<void>;
@@ -494,6 +503,56 @@ interface NotebookStore {
 
 /** 连接 promise 记忆化：StrictMode 双挂载/多处调用只建一条 WS、只订阅一次通知。 */
 let connectPromise: Promise<void> | null = null;
+
+function interruptRunning(cells: Cell[]): Cell[] {
+  return cells.some((c) => c.status === 'running')
+    ? cells.map((c) => (c.status === 'running' ? { ...c, status: 'stale' as const } : c))
+    : cells;
+}
+
+/** 冷重开在途的旧代 notebookId（重复点击只发一次 notebook.open）。 */
+const reopenInFlight = new Set<string>();
+
+/**
+ * 连接状态机 → store：
+ * - reconnecting/down：横幅 + 暂停保存定时器（草稿保留）；在途运行由 rpc 拒绝结算为 stale；
+ * - connected 且换了实例：全部 tab 标记 bridgeLost，等待用户逐个点击冷重开（D1），不自动 open；
+ * - connected 且同一实例：tab 仍有效，补发断线期间累积的草稿。
+ */
+function handleBridgeStatus(event: BridgeStatusEvent): void {
+  const store = useNotebook.getState();
+  if (event.status === 'reconnecting' || event.status === 'down') {
+    const nb = useNotebooks.getState();
+    for (const tab of nb.tabs) {
+      cancelSaveTimer(tab.notebookId);
+      // 断线期间收不到 run.done：所有"运行中"的结果未知，标 stale，不伪装为完成或内核错误。
+      const cache = nb.readCache(tab.notebookId);
+      if (cache && tab.notebookId !== nb.activeId) nb.saveCache(tab.notebookId, { ...cache, cells: interruptRunning(cache.cells) });
+    }
+    useNotebook.setState({ bridgeConnected: false, bridgeStatus: event.status, cells: interruptRunning(store.cells) });
+    return;
+  }
+  if (event.status !== 'connected') return;
+  const nb = useNotebooks.getState();
+  if (event.newInstance) {
+    if (nb.activeId && !store.historyView) nb.saveCache(nb.activeId, captureCache());
+    nb.markBridgeLost();
+    useNotebook.setState({
+      bridgeConnected: true,
+      bridgeStatus: 'connected',
+      kernelState: nb.activeId ? 'dead' : store.kernelState,
+    });
+    void useNotebooks.getState().refreshList();
+    return;
+  }
+  useNotebook.setState({ bridgeConnected: true, bridgeStatus: 'connected' });
+  void useNotebooks.getState().refreshList();
+  for (const tab of useNotebooks.getState().tabs) {
+    if (tab.bridgeLost) continue;
+    const drafts = owningCache(tab.notebookId)?.drafts ?? {};
+    for (const cellId of Object.keys(drafts)) scheduleCellSave(tab.notebookId, cellId);
+  }
+}
 
 /** UI 状态持久化（ui.set）的 debounce 窗口：折叠切换/激活 cell 共用一条通道。 */
 export const UI_PERSIST_DEBOUNCE_MS = 500;
@@ -622,6 +681,27 @@ function activeWriteBlocked(): boolean {
   return tab?.ended === true || tab?.closing === true || tab?.reloading === true || tab?.restarting === true;
 }
 
+/** bridge 断线（重连中或已放弃）：不发任何需要 bridge 的写/运行请求。 */
+function bridgeOffline(): boolean {
+  const status = useNotebook.getState().bridgeStatus;
+  return status === 'reconnecting' || status === 'down';
+}
+
+function tabBridgeLost(notebookId: string | null | undefined): boolean {
+  return !!notebookId && useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId)?.bridgeLost === true;
+}
+
+/** 运行/Diff/REPL 需要活的 bridge 与本代内核；编辑（草稿）不受此限（D3）。 */
+function activeRuntimeBlocked(): boolean {
+  return activeWriteBlocked() || bridgeOffline() || tabBridgeLost(useNotebooks.getState().activeId);
+}
+
+/** 断线打断的运行：结果未知，标 stale 而不是伪装成内核错误。 */
+function runFailureStatus(err: unknown): Cell['status'] {
+  // 按 name 判断：测试替身可能不导出该类。
+  return err instanceof Error && err.name === 'BridgeDisconnectedError' ? 'stale' : 'error';
+}
+
 export const CELL_SAVE_DEBOUNCE_MS = 300;
 const saveTimers = new Map<string, Map<string, ReturnType<typeof setTimeout>>>();
 const saveQueues = new Map<string, Promise<void>>();
@@ -691,6 +771,10 @@ function enqueueSave(notebookId: string, cellId: string, code: string): Promise<
   if (useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId)?.conflict) {
     return Promise.reject(new Error('文件有外部版本，请先保留本地副本并加载磁盘版本'));
   }
+  // 断线或旧代 tab：草稿只留本地，不排队（新实例上的旧 notebookId 已失效，也没有基线）。
+  if (bridgeOffline() || tabBridgeLost(notebookId)) {
+    return Promise.reject(new BridgeDisconnectedError('bridge 未连接：草稿保留在本地，未保存'));
+  }
   const cache = owningCache(notebookId);
   if (!cache || !cache.cells.some((c) => c.id === cellId)) return Promise.resolve();
   const draft = cache.drafts[cellId];
@@ -708,6 +792,8 @@ function enqueueSave(notebookId: string, cellId: string, code: string): Promise<
       throw new Error('文件有外部版本，请先保留本地副本并加载磁盘版本');
     }
     const res = await bridge.rpc<CellSaveResult>('cell.save', { notebookId, cellId, code });
+    // D4：成功落盘即推进该 owner 的基线指纹（与草稿是否仍最新无关）。
+    useNotebooks.getState().setBaseline(notebookId, res?.baselineSha256);
     const current = owningCache(notebookId);
     if (!current) return;
     // A successful old save does not resolve an external conflict or confirm its draft.
@@ -752,6 +838,7 @@ function enqueueSave(notebookId: string, cellId: string, code: string): Promise<
 function scheduleCellSave(notebookId: string, cellId: string): void {
   cancelSaveTimer(notebookId, cellId);
   if (useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId)?.conflict) return;
+  if (bridgeOffline() || tabBridgeLost(notebookId)) return; // 草稿留本地；同实例重连后补发
   const timers = saveTimers.get(notebookId) ?? new Map();
   timers.set(cellId, setTimeout(() => {
     cancelSaveTimer(notebookId, cellId);
@@ -795,6 +882,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   notebookPath: null,
   historyView: false,
   bridgeConnected: false,
+  bridgeStatus: 'idle',
   compileErrors: {},
   uiCollapsed: {},
   diffMarks: {},
@@ -851,6 +939,8 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
             break;
           }
           case 'kernel.status': {
+            // 旧代 tab 的内核已随上一代 bridge 消失；新代的状态通知不属于它。
+            if (tabBridgeLost(useNotebooks.getState().activeId)) break;
             const raw = String(asRecord(params).state ?? '');
             set({ kernelState: mapKernelState(raw) });
             // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
@@ -897,9 +987,104 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           }
         }
       });
-      set({ bridgeConnected: true });
+      bridge.onStatus?.(handleBridgeStatus);
+      set({ bridgeConnected: true, bridgeStatus: 'connected' });
     })();
     return connectPromise;
+  },
+
+  reopenLostTab: async (notebookId) => {
+    const nb = useNotebooks.getState();
+    const tab = nb.tabs.find((t) => t.notebookId === notebookId);
+    if (!tab?.bridgeLost || reopenInFlight.has(notebookId)) return;
+    if (bridgeOffline()) {
+      nb.setError(notebookId, { operation: 'reopen', message: 'bridge 未连接，稍后重试' });
+      return;
+    }
+    // 重开会把焦点切到这个 tab：先保存当前焦点视图。
+    if (nb.activeId && !get().historyView) nb.saveCache(nb.activeId, captureCache());
+    reopenInFlight.add(notebookId);
+    nb.setError(notebookId);
+    try {
+      const res = await bridge.rpc<NotebookStateResult>('notebook.open', { path: tab.path });
+      const newId = typeof res?.notebookId === 'string' ? res.notebookId : null;
+      if (!newId) throw new Error('notebook.open 未返回 notebookId');
+      // owner 校验：等待期间 tab 被关闭/改键/重新编辑都不得被这次响应覆盖。
+      const current = useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId);
+      if (!current?.bridgeLost || current.path !== tab.path) return;
+      const latest = useNotebooks.getState().readCache(notebookId);
+      const dirty = current.dirty || Object.keys(latest?.drafts ?? {}).length > 0;
+      const state = res.state;
+      const freshBaseline = typeof state?.baselineSha256 === 'string' ? state.baselineSha256 : undefined;
+      if (dirty && latest) {
+        // D4：草稿只能叠加在旧代最后确认的那份磁盘上；指纹不同或未知 = 断线期间磁盘可能被改过。
+        const unchanged = !!current.baselineSha256 && current.baselineSha256 === freshBaseline;
+        const local: NotebookCache = {
+          ...latest,
+          cells: latest.cells
+            .filter((c) => c.kind !== 'repl')
+            .map((c) => ({ ...c, execCount: null, output: null, status: 'idle' as const })),
+          dagEdges: state?.dagEdges ?? [],
+          staleSet: [],
+          schemas: [],
+          compileErrors: {},
+          diffs: [],
+          diffMarks: {},
+          lastRunMs: {},
+        };
+        useNotebooks.getState().rekeyTab(notebookId, newId, local, freshBaseline ? { baselineSha256: freshBaseline } : {});
+        useNotebooks.getState().setActive(newId);
+        set({ notebookPath: tab.path, historyView: false, cascadeAsk: null, kernelState: 'live' });
+        hydrateCache(local);
+        await useNotebooks.getState().refreshList();
+        if (unchanged) {
+          for (const cellId of Object.keys(local.drafts)) scheduleCellSave(newId, cellId);
+        } else {
+          pauseForConflict(newId, { notebookPath: tab.path, recoveryPath: null });
+        }
+        return;
+      }
+      // 冷加载：只采用磁盘源码；旧输出/计数/Diff/REPL 随上一代内核一起作废。
+      const cells = applyStaleSet(
+        normalizeCells(state?.cells ?? []).map((c) => ({ ...c, execCount: null })),
+        state?.staleSet ?? [],
+      );
+      const cold: NotebookCache = {
+        ...emptyCache(),
+        cells,
+        dagEdges: state?.dagEdges ?? [],
+        staleSet: state?.staleSet ?? [],
+        schemas: state?.schemas ?? [],
+        uiCollapsed: latest?.uiCollapsed ?? {},
+        activeCellId: cells.some((c) => c.id === latest?.activeCellId) ? latest!.activeCellId : (cells[0]?.id ?? null),
+      };
+      useNotebooks.getState().rekeyTab(notebookId, newId, cold, freshBaseline ? { baselineSha256: freshBaseline } : {});
+      // bridge 侧 notebook.open 已把焦点切到新 id：前端同步聚焦这个 tab。
+      useNotebooks.getState().setActive(newId);
+      set({ notebookPath: tab.path, historyView: false, cascadeAsk: null, kernelState: 'live' });
+      hydrateCache(cold);
+      await useNotebooks.getState().refreshList();
+    } catch (err) {
+      if (useNotebooks.getState().tabs.some((t) => t.notebookId === notebookId)) {
+        useNotebooks.getState().setError(notebookId, {
+          operation: 'reopen',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      reopenInFlight.delete(notebookId);
+    }
+  },
+
+  retryBridge: async () => {
+    if (isTauri()) {
+      try {
+        await invoke('restart_bridge');
+      } catch (err) {
+        console.warn('restart_bridge 失败（继续重连现有 bridge）:', err);
+      }
+    }
+    await bridge.retry();
   },
 
   openNotebook: async (path) => {
@@ -911,6 +1096,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     try {
       const res = await useNotebooks.getState().openRpc(path);
       const id = typeof res?.notebookId === 'string' ? res.notebookId : null;
+      if (id) useNotebooks.getState().setBaseline(id, res?.state?.baselineSha256);
       const cached = id && existingIds.has(id) ? useNotebooks.getState().readCache(id) : undefined;
       const state = res?.state;
       const cells = applyStaleSet(normalizeCells(state?.cells ?? [], state?.execCounts), state?.staleSet ?? []);
@@ -1010,7 +1196,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   /** Immediate save keeps the public API; store-owned autosave uses the same FIFO. */
   saveCell: async (cellId, code) => {
-    if (activeWriteBlocked() || useNotebooks.getState().activeTab()?.conflict) return;
+    if (activeRuntimeBlocked() || useNotebooks.getState().activeTab()?.conflict) return;
     const id = useNotebooks.getState().activeId;
     if (!id) return;
     cancelSaveTimer(id, cellId);
@@ -1047,6 +1233,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
         activeCellId: cells.some((c) => c.id === local.activeCellId) ? local.activeCellId : cells[0]?.id ?? null,
         uiCollapsed: local.uiCollapsed };
       writeCache(notebookId, fresh);
+      nb.setBaseline(notebookId, res.state.baselineSha256);
       nb.setConflict(notebookId);
       nb.setRecoveryPath(notebookId, res.recoveryPath);
       nb.setTabs(useNotebooks.getState().tabs.map((t) => t.notebookId === notebookId
@@ -1069,7 +1256,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 恒 cascade:false（决策没有意义，也不弹窗）。
    */
   runCell: async (cellId) => {
-    if (activeWriteBlocked()) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked()) return; // view-only（ended tab）/ bridge 断线或旧代 tab 护栏
     const s = get();
     const downstream = downstreamCells(cellId, s.dagEdges, s.cells);
     let cascade = false;
@@ -1093,7 +1280,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       await bridge.rpc('cell.run', { cellId, cascade });
     } catch (err) {
       console.error('cell.run 失败:', err);
-      set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: 'error' })) });
+      set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: runFailureStatus(err) })) });
     }
   },
 
@@ -1103,7 +1290,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 该 cell kind='repl' → CellHeader 显示 [repl] 徽章、不参与 DAG/stale。
    */
   runRepl: async (code) => {
-    if (activeWriteBlocked()) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked()) return; // view-only（ended tab）/ bridge 断线或旧代 tab 护栏
     const cellId = REPL_CELL_ID;
     set({
       cells: upsertReplCell(get().cells, cellId, code),
@@ -1133,7 +1320,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       });
     } catch (err) {
       console.error('kernel.repl 失败:', err);
-      set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: 'error' })) });
+      set({ cells: patchCell(get().cells, cellId, (c) => ({ ...c, status: runFailureStatus(err) })) });
     }
   },
 
@@ -1142,6 +1329,8 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     const ownerId = nb.activeId;
     const owner = ownerId ? nb.tabs.find((t) => t.notebookId === ownerId) : undefined;
     if (!ownerId || !owner || get().historyView) return;
+    // 旧代 tab 的 notebookId 在新 bridge 上不存在：只能走冷重开（reopenLostTab）。
+    if (owner.bridgeLost || bridgeOffline()) return;
     if (options?.allowLive && (owner.closing || owner.reloading || owner.conflict || owner.restarting || owner.ended || owner.kernelState === 'dead')) return;
     if (!options?.allowLive && (owner.closing || owner.reloading || owner.conflict || owner.restarting || (!owner.ended && owner.kernelState !== 'dead'))) return;
     const ownerCache = owningCache(ownerId);
@@ -1181,6 +1370,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
         uiCollapsed: latest.uiCollapsed,
       };
       writeCache(ownerId, fresh);
+      useNotebooks.getState().setBaseline(ownerId, loaded.baselineSha256);
       useNotebooks.setState({ tabs: useNotebooks.getState().tabs.map((tab) => tab.notebookId === ownerId
         ? { ...tab, kernelState: 'idle', ended: false, dirty: false, error: undefined, restarting: false, cellCount: cells.length }
         : tab) });
@@ -1213,7 +1403,11 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     const prev = nb.activeId;
     if (prev === notebookId) return;
     if (prev) nb.saveCache(prev, captureCache());
-    const res: NotebookStateResult | null = await nb.switchRpc(notebookId);
+    // 旧代 tab / 断线期间：bridge 不认识（或收不到）这个 id，只在本地切换焦点。
+    let res: NotebookStateResult | null = null;
+    if (tabBridgeLost(notebookId) || bridgeOffline()) nb.setActive(notebookId);
+    else res = await nb.switchRpc(notebookId);
+    if (res?.state) useNotebooks.getState().setBaseline(notebookId, res.state.baselineSha256);
     const tab = useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId);
     if (tab) set({ notebookPath: tab.path, historyView: false });
     // 恢复目标视图：优先本地缓存（含输出缓冲/repl/状态，"切回状态即在"）；
@@ -1246,6 +1440,30 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     if (!tab || tab.closing || tab.reloading || tab.conflict) return;
     const cache = owningCache(notebookId);
     if (cache) nb.saveCache(notebookId, cache);
+    if (tab.bridgeLost) {
+      // 旧代 tab 在新 bridge 上没有 owner：clean 直接本地移除；有草稿则拒绝，绝不静默丢弃。
+      if (tab.dirty || Object.keys(cache?.drafts ?? {}).length > 0) {
+        nb.setError(notebookId, { operation: 'close', message: 'bridge 已重启：草稿未保存，未关闭' });
+        return;
+      }
+      cancelSaveTimer(notebookId);
+      const caches = { ...useNotebooks.getState().caches };
+      delete caches[notebookId];
+      const tabs = useNotebooks.getState().tabs.filter((t) => t.notebookId !== notebookId);
+      const wasActive = useNotebooks.getState().activeId === notebookId;
+      const nextActiveId = wasActive ? (tabs[0]?.notebookId ?? null) : useNotebooks.getState().activeId;
+      useNotebooks.setState({ caches, tabs, activeId: nextActiveId });
+      if (!wasActive) return;
+      const nextTab = tabs.find((t) => t.notebookId === nextActiveId);
+      if (nextTab) {
+        set({ notebookPath: nextTab.path, historyView: false });
+        hydrateCache(useNotebooks.getState().readCache(nextTab.notebookId) ?? emptyCache());
+        set({ kernelState: mapKernelState(nextTab.kernelState) });
+      } else {
+        set({ notebookPath: null, historyView: false, ...emptyCache(), kernelState: 'connecting' });
+      }
+      return;
+    }
     nb.setClosing(notebookId, true);
     nb.setError(notebookId);
     try {
@@ -1296,13 +1514,14 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * rpc 失败 → 回滚乐观态，diff 回到队列可重试。
    */
   acceptDiff: async (diffId) => {
-    if (activeWriteBlocked() || useNotebooks.getState().activeTab()?.conflict) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked() || useNotebooks.getState().activeTab()?.conflict) return; // view-only / 断线护栏
     const notebookId = useNotebooks.getState().activeId;
     const prev = get().diffs.find((d) => d.id === diffId);
     if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
     set({ diffs: revertDiffState(get().diffs, diffId, 'accepted') });
     try {
       const res = await bridge.rpc<DiffAcceptResult>('diff.accept', { diffId });
+      if (notebookId) useNotebooks.getState().setBaseline(notebookId, res?.baselineSha256);
       const s = get();
       const dagEdges = res?.dagEdges ?? s.dagEdges;
       const staleSet = res?.staleSet ?? s.staleSet;
@@ -1382,7 +1601,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   /** Reject（proposed/edited-staged → rejected）：乐观出队 + bridge diff.reject。 */
   rejectDiff: async (diffId) => {
-    if (activeWriteBlocked()) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked()) return; // view-only（ended tab）/ bridge 断线或旧代 tab 护栏
     const prev = get().diffs.find((d) => d.id === diffId);
     if (!prev || (prev.state !== 'proposed' && prev.state !== 'edited-staged')) return;
     set({ diffs: revertDiffState(get().diffs, diffId, 'rejected') });
@@ -1396,7 +1615,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
 
   /** Esc Esc 全拒：整批乐观出队 + 并发 diff.reject（单个失败只回滚由 bridge 通知收敛）。 */
   rejectAllPending: async () => {
-    if (activeWriteBlocked()) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked()) return; // view-only（ended tab）/ bridge 断线或旧代 tab 护栏
     const queue = pendingDiffs(get().diffs);
     if (queue.length === 0) return;
     set({
@@ -1420,7 +1639,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
    * 状态机（spec §9）：edited-staged 重新进入 proposed 队列，标注 user-edited。
    */
   reStageDiff: async (diffId, newCode) => {
-    if (activeWriteBlocked()) return; // view-only（ended tab）护栏
+    if (activeRuntimeBlocked()) return; // view-only（ended tab）/ bridge 断线或旧代 tab 护栏
     const old = get().diffs.find((d) => d.id === diffId);
     if (!old || (old.state !== 'proposed' && old.state !== 'edited-staged')) return;
     if (old.newCode === newCode) return;

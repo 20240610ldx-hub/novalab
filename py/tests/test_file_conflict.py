@@ -1,5 +1,6 @@
 """Content conflicts use synthetic tmp_path notebooks; no user code is executed."""
 
+import hashlib
 import io
 import json
 import os
@@ -18,6 +19,11 @@ CELL_ID = "aaaaaaaa"
 HEADER = ["# /// script", '# requires-python = ">=3.11"', "# dependencies = []", "# ///", "# [novalab] mode=manual"]
 ORIGINAL = serialize.write([{"id": CELL_ID, "code": "x = 1"}], header_lines=HEADER).encode("utf-8")
 CANDIDATE = [{"id": CELL_ID, "code": "x = 2\nprivate_candidate = 'synthetic-only'"}]
+
+
+def saved_ok(target):
+    """D4: a successful save reports the fingerprint of the bytes now on disk (its new baseline)."""
+    return {"ok": True, "baselineSha256": hashlib.sha256(target.read_bytes()).hexdigest()}
 
 
 def setup(tmp_path, raw=ORIGINAL):
@@ -72,7 +78,7 @@ def test_same_length_same_mtime_conflict_preserves_disk_and_runtime(tmp_path):
     assert again.value.data["recoveryPath"] == caught.value.data["recoveryPath"]
     assert target.read_bytes() == external
     target.write_bytes(ORIGINAL)
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
 
 
 def test_deleted_target_is_conflict_without_recreating_target(tmp_path):
@@ -95,7 +101,7 @@ def test_load_reads_raw_bytes_once_and_normalizes_newlines(tmp_path, monkeypatch
     # load_file must parse the very same bytes used as its baseline, not parse_file re-reading.
     monkeypatch.setattr(serialize, "parse_file", lambda path: pytest.fail("second file read"))
     runtime.load_file(str(target))
-    assert runtime.save_file(str(target), [{"id": CELL_ID, "code": "x = 2"}]) == {"ok": True}
+    assert runtime.save_file(str(target), [{"id": CELL_ID, "code": "x = 2"}]) == saved_ok(target)
     assert b"\r" not in target.read_bytes()
 
 
@@ -111,9 +117,9 @@ def test_line_ending_only_change_is_a_content_conflict(tmp_path):
 
 def test_success_advances_baseline_to_actual_saved_bytes(tmp_path):
     runtime, target, notes = setup(tmp_path)
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
     second = [{"id": CELL_ID, "code": "x = 3"}]
-    assert runtime.save_file(str(target), second) == {"ok": True}
+    assert runtime.save_file(str(target), second) == saved_ok(target)
     assert target.read_bytes() == serialize.write(second, header_lines=HEADER).encode("utf-8")
     assert runtime.exec_counts[CELL_ID] == 7
     assert notes == []
@@ -133,7 +139,7 @@ def test_write_failure_keeps_baseline_and_original_runtime(tmp_path, monkeypatch
     assert target.read_bytes() == ORIGINAL
     assert state_identity(runtime) == before
     monkeypatch.setattr(serialize, "write_file", write_file)
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
     assert notes == []
 
 
@@ -151,7 +157,7 @@ def test_directory_write_failure_stays_internal_and_retry_uses_original_bytes(tm
     assert "data" not in response["error"]
     target.rmdir()
     target.write_bytes(ORIGINAL)
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
 
 
 def test_backup_is_pure_and_keeps_baseline(tmp_path):
@@ -162,7 +168,7 @@ def test_backup_is_pure_and_keeps_baseline(tmp_path):
     assert target.read_bytes() == ORIGINAL
     assert state_identity(runtime) == before
     assert notes == []
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
 
 
 def test_backup_failure_has_safe_data_and_keeps_state(tmp_path, monkeypatch):
@@ -263,7 +269,7 @@ def test_explicit_reload_establishes_new_baseline(tmp_path):
     target.write_bytes(external)
     runtime.load_file(str(target))
     assert runtime.cells[CELL_ID].code == "x = 9"
-    assert runtime.save_file(str(target), CANDIDATE) == {"ok": True}
+    assert runtime.save_file(str(target), CANDIDATE) == saved_ok(target)
     assert notes == []
 
 
@@ -295,11 +301,11 @@ def test_loaded_save_to_existing_other_path_is_bounded_rejection(tmp_path):
 def test_loaded_save_to_new_path_and_unloaded_save_remain_compatible(tmp_path):
     runtime, _, _ = setup(tmp_path)
     new = tmp_path / "new.py"
-    assert runtime.save_file(str(new), CANDIDATE) == {"ok": True}
-    assert runtime.save_file(str(new), [{"id": CELL_ID, "code": "x = 4"}]) == {"ok": True}
+    assert runtime.save_file(str(new), CANDIDATE) == saved_ok(new)
+    assert runtime.save_file(str(new), [{"id": CELL_ID, "code": "x = 4"}]) == saved_ok(new)
     standalone = Runtime()
     fresh = tmp_path / "fresh.py"
-    assert standalone.save_file(str(fresh), [{"id": CELL_ID, "code": "x = 5"}]) == {"ok": True}
+    assert standalone.save_file(str(fresh), [{"id": CELL_ID, "code": "x = 5"}]) == saved_ok(fresh)
     assert fresh.read_bytes() == serialize.write([{"id": CELL_ID, "code": "x = 5"}]).encode("utf-8")
     fresh.write_bytes(b"external changed after first save\n")
     with pytest.raises(KernelError) as caught:
@@ -339,3 +345,36 @@ def test_server_backup_contract_and_invalid_params(tmp_path):
         assert caught.value.code == -32602
     assert state_identity(runtime) == before
     assert notes == []
+
+
+def test_load_reports_sha256_of_raw_baseline_bytes(tmp_path):
+    """D4: the fingerprint covers the exact bytes read (CRLF kept), not the normalized text."""
+    raw = ORIGINAL.replace(b"\n", b"\r\n")
+    target = tmp_path / "notebook.py"
+    target.write_bytes(raw)
+    state = Runtime(notify=lambda *_: None).load_file(str(target))
+    assert state["baselineSha256"] == hashlib.sha256(raw).hexdigest()
+
+
+def test_refused_save_reports_no_new_baseline_and_reload_reports_external(tmp_path):
+    """D4: a conflict never advances the fingerprint; an explicit reload reports the external bytes."""
+    runtime, target, _ = setup(tmp_path)
+    external = ORIGINAL + b"# external\n"
+    target.write_bytes(external)
+    with pytest.raises(KernelError):
+        runtime.save_file(str(target), CANDIDATE)
+    assert runtime.load_file(str(target))["baselineSha256"] == hashlib.sha256(external).hexdigest()
+
+
+def test_server_load_and_save_carry_baseline_fingerprint(tmp_path):
+    target = tmp_path / "notebook.py"
+    target.write_bytes(ORIGINAL)
+    lines = [
+        {"id": 1, "method": "load_file", "params": {"path": str(target)}},
+        {"id": 2, "method": "save_file", "params": {"path": str(target), "cells": CANDIDATE}},
+    ]
+    out = io.StringIO()
+    Server(stdin=io.StringIO("".join(json.dumps(line) + "\n" for line in lines)), stdout=out).run()
+    replies = {m["id"]: m for m in map(json.loads, out.getvalue().splitlines()) if "id" in m}
+    assert replies[1]["result"]["baselineSha256"] == hashlib.sha256(ORIGINAL).hexdigest()
+    assert replies[2]["result"] == {"ok": True, "baselineSha256": hashlib.sha256(target.read_bytes()).hexdigest()}

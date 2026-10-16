@@ -96,6 +96,11 @@ export interface NotebookState {
   schemas: VarSchema[];
   staleSet: string[];
   execCounts: Record<string, number>;
+  /**
+   * D4：内核最后确认的磁盘基线字节的 SHA-256（load_file / 成功 save_file 后更新）。
+   * 前端在 bridge 换代后据此核对重开时的磁盘是否仍是旧代基线；缺省 = 未知。
+   */
+  baselineSha256?: string;
 }
 
 // ---------- notebook.* 多 tab 多内核（P3.1，intent S1 / A-2 #18，本任务冻结） ----------
@@ -200,6 +205,8 @@ export interface SaveResult {
   dagEdges: DagEdge[];
   staleSet: string[];
   compileError?: CompileError;
+  /** D4（cell.save / diff.accept 响应）：本次落盘后的基线指纹。 */
+  baselineSha256?: string;
 }
 
 /** 内核 set_cells 的完整结果：额外回传重算后的 cells（defs/refs），供 Bridge 缓存。 */
@@ -422,7 +429,7 @@ export interface ProvidersSetActiveResult {
  * 内核方法集（内核只说"执行语"，不含文件/diff 概念之外的东西）：
  * - ping            → {pong:true}
  * - load_file       {path}                → NotebookState
- * - save_file       {path, cells}         → {ok:true}；基线冲突 → -32002 + FileConflictData
+ * - save_file       {path, cells}         → {ok:true, baselineSha256}；基线冲突 → -32002 + FileConflictData
  * - backup_file     {path, cells}         → {recoveryPath}（纯恢复副本，不set/exec/推进基线）
  * - set_cells       {cells:[{id,code}]}    → SetCellsResult（含重算 cells）
  * - validate_cells  {cells:[{id,code}]}    → {cells, edges, compileError?}（纯静态，不改运行状态）
