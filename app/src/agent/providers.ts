@@ -2,6 +2,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import type { LanguageModel } from 'ai';
 import { bridge } from '../bridge/client';
 import { createOpenAICompat } from './openaiCompat';
+import { llmFetch } from './retryFetch';
 
 /**
  * M6 模型解耦：provider 注册表（P2.1；P4 迁移加密存储 + LLM 代理，ADR-008 落地）。
@@ -133,12 +134,14 @@ export function createLanguageModel(config: ProviderConfig): LanguageModel {
     bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN,
   );
   const proxyHeaders = bridgeReady ? bridge.getLlmProxyHeaders?.() : undefined;
+  // 网络波动防御：代理与直连两条路径共用同一重试层（见 retryFetch.ts）
+  const settings = { baseURL, apiKey, fetch: llmFetch, ...(proxyHeaders ? { headers: proxyHeaders } : {}) };
   switch (config.kind) {
     case 'anthropic-compat':
-      return createAnthropic({ baseURL, apiKey, ...(proxyHeaders ? { headers: proxyHeaders } : {}) })(config.model);
+      return createAnthropic(settings)(config.model);
     case 'openai-compat':
       // deepseek / ollama / vLLM 等走 OpenAI 兼容协议（本地最小 provider，见 openaiCompat.ts）
-      return createOpenAICompat({ baseURL, apiKey, ...(proxyHeaders ? { headers: proxyHeaders } : {}) })(config.model);
+      return createOpenAICompat(settings)(config.model);
   }
 }
 

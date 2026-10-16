@@ -40,6 +40,9 @@ export interface AgentChatTransportOptions {
   maxSteps?: number;
 }
 
+/** SDK 层不重试：网络波动由 provider fetch 层（retryFetch.ts）统一处理。 */
+export const AGENT_SDK_MAX_RETRIES = 0;
+
 export const NO_PROVIDER_ERROR =
   '未配置 LLM provider —— 请打开设置面板添加 provider，或在 app/.env.local 填写 VITE_NOVALAB_LLM_*';
 
@@ -62,6 +65,8 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
       stopWhen: stepCountIs(opts.maxSteps ?? 10),
       messages: await convertToModelMessages(messages),
       abortSignal,
+      // 重试统一在 provider fetch 层（retryFetch.ts，最多 10 次）；SDK 自带的 2 次会与之相乘
+      maxRetries: AGENT_SDK_MAX_RETRIES,
     });
     return toUIMessageStream({
       stream: result.fullStream,
