@@ -125,6 +125,17 @@ describe('providers.set', () => {
     expect((await call('providers.set', { ...base, apiKey: 123 })).error?.code).toBe(-32602);
     expect((await call('providers.set', {})).error?.code).toBe(-32602);
   });
+
+  it('maxOutputTokens：合法整数透传到摘要；null 清除；非法值 -32602', async () => {
+    const { call } = setup();
+    const base = { id: 'p', kind: 'openai-compat', name: 'n', baseURL: 'https://h/v1', model: 'm' };
+    expect((await call('providers.set', { ...base, maxOutputTokens: 32000 })).result).toMatchObject({ maxOutputTokens: 32000 });
+    const cleared = (await call('providers.set', { ...base, maxOutputTokens: null })).result as Record<string, unknown>;
+    expect('maxOutputTokens' in cleared).toBe(false);
+    for (const bad of ['8192', 12, 1.5, 10_000_000]) {
+      expect((await call('providers.set', { ...base, maxOutputTokens: bad })).error?.code).toBe(-32602);
+    }
+  });
 });
 
 describe('providers.delete / providers.setActive', () => {

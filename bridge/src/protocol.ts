@@ -420,7 +420,8 @@ export interface SessionEndedParams {
 //
 //   providers.list     {}                          → ProvidersListResult
 //   providers.set      {id?,kind,name,baseURL,     → ProviderSummary（upsert；apiKey
-//                       model,apiKey?}               明文入→AES-256-GCM 加密落盘
+//                       model,apiKey?,               明文入→AES-256-GCM 加密落盘；
+//                       maxOutputTokens?}            maxOutputTokens 省略/null = 清除）
 //   providers.delete   {id}                        → ProvidersDeleteResult（幂等）
 //   providers.setActive {id: string|null}          → ProvidersSetActiveResult
 //
@@ -442,6 +443,19 @@ export interface ProviderSummary {
   baseURL: string;
   model: string;
   hasKey: boolean;
+  /**
+   * 单次回复的输出 token 上限（用户在设置里调整）；缺省 = 前端按模型自动
+   * （已知 Claude 走 SDK 每模型上限，其余 8192，见 app/src/agent/models.ts）。
+   */
+  maxOutputTokens?: number;
+}
+
+/** maxOutputTokens 合法范围（整数）；前端表单与 bridge 校验共用此区间。 */
+export const MAX_OUTPUT_TOKENS_MIN = 256;
+export const MAX_OUTPUT_TOKENS_MAX = 262_144;
+
+export function isValidMaxOutputTokens(v: unknown): v is number {
+  return Number.isInteger(v) && (v as number) >= MAX_OUTPUT_TOKENS_MIN && (v as number) <= MAX_OUTPUT_TOKENS_MAX;
 }
 
 export interface ProvidersListResult {

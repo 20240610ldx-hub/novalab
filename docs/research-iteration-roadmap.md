@@ -158,6 +158,7 @@ Owner 裁决："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 Agent 安全小包后列出的「第二包」，均为不改产品边界的修复与优化。
 
 - **F7 输出预算**：`@ai-sdk/anthropic` 对未知模型 id（tokenplan 的 qwen/glm/deepseek）把输出上限压到 4096，openai-compat 不传 `max_tokens` 时由服务端默认（DeepSeek 4096），长代码提议会被截断。现在未知模型显式带 8192（`defaultSettingsMiddleware`，调用方显式值仍优先），已知 Claude 模型沿用 SDK 按型号的上限。顺带：dev `.env.local` 兜底模型此前绕过了重试层与预算，现在与用户 provider 走同一构造路径。
+- **输出预算可调（2026-10-17 追加）**：8192 属于"猜服务商上限"的风险默认，改为每个 provider 在设置面板可填「最大输出 tokens」（256–262144 整数，留空 = 自动；占位显示当前自动值）。bridge `providers.set/list` 新增可选 `maxOutputTokens`（store 与 router 双重校验，null = 清除，旧文件/旧 bridge 宽容降级），覆盖值对 Claude 与未知模型都优先。
 - **首屏拆包**：模型构造从 `agent/providers.ts` 拆到 `agent/models.ts`，AI SDK（`ai` / `@ai-sdk/*` / `zod`）只经懒加载的 Agent 面板与设置面板进入。主包 1,399.6 kB（gzip 409.6）→ 206.8 kB（gzip 61.4），另有 `vendor-react` 218.8 kB、`vendor-codemirror` 376.1 kB 两个长缓存块；AI SDK 块 557.3 kB 在首帧后加载。`scripts/app-bundle-boundary.test.mjs` 沿 `main.tsx` 的静态 import 图守住边界（对旧 `App.tsx` 先红）。
 - **测试临时目录**：bridge 单测与验收此前在 %TEMP% 累积了 8,234 个 `novalab-*` 目录。新增 vitest `globalSetup`（`bridge/src/testing/temp-sandbox.ts`）：每次运行把 TEMP/TMP/TMPDIR 指向专属 `novalab-vitest-*` 目录，结束只删这一个，不按前缀扫删别处。整套单测与真实内核验收后新增残留为 0。已有的 8,234 个旧目录未删除（属于用户临时目录，可能有并行会话在用）。
 - **依赖**：`@earendil-works/pi-agent-core` / `pi-ai` 从 bridge `dependencies` 移到 `devDependencies`（只有 ADR-012 spike 与其测试引用；打包的 `bridge.mjs` 中 0 处引用）。
