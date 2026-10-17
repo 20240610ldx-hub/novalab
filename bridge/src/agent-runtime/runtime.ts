@@ -111,7 +111,7 @@ export class AgentRuntime {
       ...(WRITE_OR_EXEC.has(def.name) ? { executionMode: 'sequential' as const } : {}),
       execute: async (_id: string, params: unknown, signal?: AbortSignal) => {
         this.stats.toolCalls++;
-        const result = await abortable(executeAgentTool(host, def.name, params), signal);
+        const result = await abortable(executeAgentTool(host, def.name, params, { signal }), signal);
         if (def.name === 'propose_code_change' && result && typeof result === 'object' && 'diffId' in result) {
           this.gateState.proposalsThisRun++;
         }

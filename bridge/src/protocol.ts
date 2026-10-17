@@ -135,6 +135,23 @@ export interface NotebookState {
 export interface NotebookOpenResult {
   notebookId: string;
   state: NotebookState;
+  /** 第 7 轮：仅新建 context 时附带，notebook 旁 .novalab/drafts 最新一份恢复日志（只提示，不自动应用）。 */
+  draftRecovery?: DraftRecoveryOffer;
+}
+
+/** 第 7 轮草稿恢复提示。baselineMatches=false（含日志无指纹）时客户端只能保存为本地副本或丢弃。 */
+export interface DraftRecoveryOffer {
+  draftId: string;
+  savedAt: string;
+  baselineMatches: boolean;
+  dirtyCellIds: string[];
+  cells: { id: string; code: string }[];
+}
+
+/** draft.write {notebookId, cells:[{id,code}], dirtyCellIds} → 结果；单份超限 → -32602。 */
+export interface DraftWriteResult {
+  draftId: string;
+  bytes: number;
 }
 
 /**
@@ -200,11 +217,17 @@ export interface CompileError {
   cellIds: string[];
 }
 
+/**
+ * 内核 set_cells / validate_cells 实际回传的 compileError：真实内核（dag.py）是换行拼接的纯字符串，
+ * 测试替身可能给对象。cell.save / diff.accept 原样转发（app 两种都认）；agent 路径在 diff.stage 归一为 CompileError。
+ */
+export type KernelCompileError = CompileError | string;
+
 /** cell.save 响应（发给前端的子集）。 */
 export interface SaveResult {
   dagEdges: DagEdge[];
   staleSet: string[];
-  compileError?: CompileError;
+  compileError?: KernelCompileError;
   /** D4（cell.save / diff.accept 响应）：本次落盘后的基线指纹。 */
   baselineSha256?: string;
 }
@@ -291,8 +314,20 @@ export interface StagedDiff {
   action: DiffAction;
   newCode: string;
   rationale?: string;
+  /** 只有叠加这些待审 diff 才编译通过（F2）；diff.accept 要求它们已被采纳。 */
+  dependsOn?: string[];
   status: DiffStatus;
   createdAt: string;
+  /** ADR-013 核验状态（软约束：只标注，不阻止入队/采纳；源码变动后 router 重算为 expired）。 */
+  verification?: DiffVerification;
+}
+
+/** ADR-013 §4.4：V0 只改注释/空行 · V1 任意改动 · V2 数据变换 · V3 声称行为不变（intent refactor）。 */
+export interface DiffVerification {
+  status: 'verified' | 'unverified' | 'failed' | 'expired' | 'not-required';
+  level: 'V0' | 'V1' | 'V2' | 'V3';
+  /** 还缺什么才能 verified（如 shadow_run、contract、equivalent:df）。 */
+  missing: string[];
 }
 
 export interface DiffUpdatedParams {
@@ -385,7 +420,8 @@ export interface SessionEndedParams {
 //
 //   providers.list     {}                          → ProvidersListResult
 //   providers.set      {id?,kind,name,baseURL,     → ProviderSummary（upsert；apiKey
-//                       model,apiKey?}               明文入→AES-256-GCM 加密落盘
+//                       model,apiKey?,               明文入→AES-256-GCM 加密落盘；
+//                       maxOutputTokens?}            maxOutputTokens 省略/null = 清除）
 //   providers.delete   {id}                        → ProvidersDeleteResult（幂等）
 //   providers.setActive {id: string|null}          → ProvidersSetActiveResult
 //
@@ -407,6 +443,19 @@ export interface ProviderSummary {
   baseURL: string;
   model: string;
   hasKey: boolean;
+  /**
+   * 单次回复的输出 token 上限（用户在设置里调整）；缺省 = 前端按模型自动
+   * （已知 Claude 走 SDK 每模型上限，其余 8192，见 app/src/agent/models.ts）。
+   */
+  maxOutputTokens?: number;
+}
+
+/** maxOutputTokens 合法范围（整数）；前端表单与 bridge 校验共用此区间。 */
+export const MAX_OUTPUT_TOKENS_MIN = 256;
+export const MAX_OUTPUT_TOKENS_MAX = 262_144;
+
+export function isValidMaxOutputTokens(v: unknown): v is number {
+  return Number.isInteger(v) && (v as number) >= MAX_OUTPUT_TOKENS_MIN && (v as number) <= MAX_OUTPUT_TOKENS_MAX;
 }
 
 export interface ProvidersListResult {

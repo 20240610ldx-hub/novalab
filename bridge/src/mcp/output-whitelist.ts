@@ -39,6 +39,108 @@ const varSchema = z.object({
 
 const compileError = z.object({ message: z.string(), cellIds: z.array(z.string()) });
 
+// ---------- ADR-013 影子报告（对齐 shadow/report.ts 的类型重建；这里再按白名单剥一次） ----------
+
+const diffVerification = z.object({
+  status: z.enum(['verified', 'unverified', 'failed', 'expired', 'not-required']),
+  level: z.enum(['V0', 'V1', 'V2', 'V3']),
+  missing: z.array(z.string()),
+});
+const shadowBudget = z.object({ runsUsed: z.number(), runsLimit: z.number(), msUsed: z.number(), msLimit: z.number() });
+const shadowCell = z.object({
+  id: z.string(),
+  role: z.enum(['upstream', 'closure']),
+  ok: z.boolean(),
+  skipped: z.enum(['side-effect', 'blocked-upstream']).optional(),
+  durationMs: z.number(),
+  traceback: z.string().optional(),
+});
+const colStats = z.object({
+  count: z.number().optional(),
+  nullCount: z.number().optional(),
+  nUnique: z.number().optional(),
+  sum: z.number().optional(),
+  mean: z.number().optional(),
+  std: z.number().optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  p05: z.number().optional(),
+  p50: z.number().optional(),
+  p95: z.number().optional(),
+  suppressed: z.boolean().optional(),
+});
+const shadowVarSummary = z.object({
+  schema: z.object({
+    type: z.string(),
+    shape: z.array(z.number()).optional(),
+    columns: z.array(z.string()).optional(),
+    dtypes: z.record(z.string(), z.string()).optional(),
+    dtype: z.string().optional(),
+    len: z.number().optional(),
+    columnsTruncated: z.number().optional(),
+  }),
+  stats: z
+    .object({
+      columns: z.record(z.string(), colStats).optional(),
+      values: colStats.optional(),
+      truncatedColumns: z.number().optional(),
+    })
+    .optional(),
+});
+const beforeAfter = <T extends z.ZodType>(t: T) => z.object({ before: t.nullable(), after: t.nullable() });
+const shadowVarDelta = z.object({
+  type: beforeAfter(z.string()).optional(),
+  shape: beforeAfter(z.array(z.number())).optional(),
+  columnsAdded: z.array(z.string()).optional(),
+  columnsRemoved: z.array(z.string()).optional(),
+  dtypeChanges: z.record(z.string(), beforeAfter(z.string())).optional(),
+  stats: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+});
+const contractResult = z.object({
+  id: z.string(),
+  kind: z.string(),
+  phase: z.enum(['before', 'after']).optional(),
+  status: z.enum(['pass', 'fail', 'error']),
+  total: z.number().optional(),
+  violations: z.number().optional(),
+  maxAbsDiff: z.number().optional(),
+  reason: z
+    .enum(['unknown-target', 'unknown-column', 'unsupported-type', 'invalid-params', 'evaluation-failed', 'structure-mismatch'])
+    .optional(),
+});
+const shadowRunReport = z.object({
+  runId: z.string().nullable(),
+  verificationId: z.string().optional(),
+  status: z.enum([
+    'ok', 'failed', 'timeout', 'cancelled', 'crashed', 'unavailable', 'limit-unavailable', 'budget-exceeded', 'compile-error',
+  ]),
+  message: z.string().optional(),
+  before: z.object({ cells: z.array(shadowCell) }).optional(),
+  after: z
+    .object({
+      plan: z.object({ changed: z.array(z.string()), upstream: z.array(z.string()), closure: z.array(z.string()) }),
+      cells: z.array(shadowCell),
+    })
+    .optional(),
+  vars: z
+    .array(z.object({ name: z.string(), before: shadowVarSummary.optional(), after: shadowVarSummary.optional(), delta: shadowVarDelta.optional() }))
+    .optional(),
+  autoChecks: z.array(contractResult).optional(),
+  blocked: z
+    .array(
+      z.object({
+        kind: z.enum(['file-write', 'file-delete', 'file-rename', 'network', 'subprocess', 'registry', 'process-control']),
+        count: z.number(),
+      }),
+    )
+    .optional(),
+  nondeterminism: z.array(z.object({ cellId: z.string(), reason: z.enum(['unseeded-rng', 'wall-clock', 'entropy']) })).optional(),
+  figures: z.number().optional(),
+  durationMs: z.number().optional(),
+  compileError: compileError.optional(),
+  budget: shadowBudget,
+});
+
 /** 每个工具允许出进程的输出形状（对齐 router.ts AgentContext / CellOutputSnapshot / StageResult / RunReport / AgentCellSummary）。 */
 export const TOOL_OUTPUT_WHITELIST = {
   get_notebook_context: z.object({
@@ -52,16 +154,28 @@ export const TOOL_OUTPUT_WHITELIST = {
     mimeKeys: z.array(z.string()),
   }),
   propose_code_change: z.union([
-    z.object({ diffId: z.string() }),
-    z.object({ rejected: z.literal(true), reason: compileError }),
+    z.object({ diffId: z.string(), dependsOn: z.array(z.string()).optional(), verification: diffVerification.optional() }),
+    z.object({
+      rejected: z.literal(true),
+      reason: compileError,
+      hint: z.string().optional(),
+      conflictsWith: z.array(z.string()).optional(),
+    }),
   ]),
-  execute_cell: z.object({
-    cellId: z.string(),
-    ok: z.boolean(),
-    cascaded: z.array(z.string()),
-    durationMs: z.number(),
-    traceback: z.string().optional(),
-  }),
+  execute_cell: z.union([
+    z.object({
+      cellId: z.string(),
+      ok: z.boolean(),
+      cascaded: z.array(z.string()),
+      durationMs: z.number(),
+      traceback: z.string().optional(),
+    }),
+    z.object({
+      denied: z.literal(true),
+      reason: z.enum(['no-confirmer', 'user-declined', 'timeout', 'focus-changed', 'code-changed']),
+      message: z.string(),
+    }),
+  ]),
   list_cells: z.array(
     z.object({
       id: z.string(),
@@ -73,13 +187,31 @@ export const TOOL_OUTPUT_WHITELIST = {
     }),
   ),
   get_cell_code: z.object({ cellId: z.string(), code: z.string() }),
+  shadow_run: z.union([
+    shadowRunReport,
+    z.object({
+      denied: z.literal(true),
+      reason: z.enum(['no-confirmer', 'user-declined', 'timeout', 'focus-changed']),
+      message: z.string(),
+    }),
+  ]),
+  verify: z.object({
+    runId: z.string(),
+    verificationId: z.string().optional(),
+    status: z.enum(['pass', 'fail', 'error', 'not-retained', 'timeout', 'crashed', 'cancelled', 'unavailable']),
+    contracts: z.array(contractResult),
+  }),
 } satisfies Record<AgentToolName, z.ZodType>;
 
-/** 顶层字段的专属上限（Infinity = 不截断）；其余字符串一律 PREVIEW_STRING_LIMIT。 */
-const TOP_LEVEL_LIMITS: Partial<Record<AgentToolName, Record<string, number>>> = {
+/**
+ * 字段的专属上限，按完整路径匹配（数组下标归一为 []；Infinity = 不截断）；其余字符串一律 PREVIEW_STRING_LIMIT。
+ * 只列白名单里有确定类型的路径——任意结构（preview 等）里的同名键不享受豁免。
+ */
+const PATH_LIMITS: Partial<Record<AgentToolName, Record<string, number>>> = {
   get_cell_output: { traceback: TRACEBACK_CHAR_LIMIT },
   execute_cell: { traceback: TRACEBACK_CHAR_LIMIT },
   get_cell_code: { code: Number.POSITIVE_INFINITY },
+  shadow_run: { 'after.cells[].traceback': TRACEBACK_CHAR_LIMIT, 'before.cells[].traceback': TRACEBACK_CHAR_LIMIT },
 };
 
 export interface ToolOutputGateResult {
@@ -103,23 +235,23 @@ function capString(s: string, limit: number): string | null {
 function capDeep(
   value: unknown,
   path: string,
-  limit: number,
+  limits: Record<string, number>,
   truncated: string[],
 ): unknown {
   if (typeof value === 'string') {
-    const capped = capString(value, limit);
+    const capped = capString(value, limits[path.replace(/\[\d+\]/g, '[]')] ?? PREVIEW_STRING_LIMIT);
     if (capped === null) return value;
     truncated.push(path || '(root)');
     return capped;
   }
   if (Array.isArray(value)) {
-    return value.map((v, i) => capDeep(v, `${path}[${i}]`, PREVIEW_STRING_LIMIT, truncated));
+    return value.map((v, i) => capDeep(v, `${path}[${i}]`, limits, truncated));
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([k, v]) => [
         k,
-        capDeep(v, path ? `${path}.${k}` : k, PREVIEW_STRING_LIMIT, truncated),
+        capDeep(v, path ? `${path}.${k}` : k, limits, truncated),
       ]),
     );
   }
@@ -127,16 +259,7 @@ function capDeep(
 }
 
 function capOutput(tool: string, value: unknown, truncated: string[]): unknown {
-  const limits = TOP_LEVEL_LIMITS[tool as AgentToolName];
-  if (!limits || !value || typeof value !== 'object' || Array.isArray(value)) {
-    return capDeep(value, '', PREVIEW_STRING_LIMIT, truncated);
-  }
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([k, v]) => {
-      const limit = limits[k] ?? PREVIEW_STRING_LIMIT;
-      return [k, capDeep(v, k, limit, truncated)];
-    }),
-  );
+  return capDeep(value, '', PATH_LIMITS[tool as AgentToolName] ?? {}, truncated);
 }
 
 /** raw 里有、clean 里没有的键路径（只比对象键；数组按下标展开）。 */

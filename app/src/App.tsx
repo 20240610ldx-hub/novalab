@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { House } from 'lucide-react';
 import { useNotebook } from './store/notebook';
 import { appModeFromSearch, searchWithAppMode, useUi } from './store/ui';
@@ -9,8 +9,7 @@ import { KernelStatusBar } from './components/KernelStatusBar';
 import { InlineREPL } from './components/InlineREPL';
 import { TabBar } from './components/TabBar';
 import { useWorkspaceSync } from './components/sidebar';
-import { AgentPanel } from './components/AgentPanel';
-import { SettingsPanel } from './components/SettingsPanel';
+import { useAgentStore } from './store/agent';
 import { Inspector } from './components/Inspector';
 import { inspectorHandlePointerDown } from './components/Inspector/dragStore';
 import { AppView } from './components/AppView';
@@ -20,6 +19,11 @@ import { SidePanel } from './components/Workbench/SidePanel';
 import { Splitter } from './components/Workbench/Splitter';
 import { StatusBar } from './components/Workbench/StatusBar';
 import { TitleBar } from './components/Workbench/TitleBar';
+
+// AI SDK（ai / @ai-sdk/* / zod，约占主包一半）只经由这两个面板进入前端：按需懒加载，
+// 不进首屏主包。Agent 面板在首帧后加载；设置面板打开时才加载。
+const AgentPanel = lazy(() => import('./components/AgentPanel').then((m) => ({ default: m.AgentPanel })));
+const SettingsPanel = lazy(() => import('./components/SettingsPanel').then((m) => ({ default: m.SettingsPanel })));
 
 /**
  * v0.1.1 工作台布局（Owner 裁决：学 VS Code / JupyterLab）：
@@ -47,6 +51,7 @@ export function App() {
   const agentWidth = useLayout((s) => s.agentWidth);
   const editorView = useLayout((s) => s.editorView);
   const { t } = useI18n();
+  const settingsOpen = useAgentStore((s) => s.settingsOpen);
   const [attempted, setAttempted] = useState(false);
   const bootRef = useRef(false);
 
@@ -234,14 +239,20 @@ export function App() {
               style={{ width: agentWidth }}
               className="flex shrink-0 flex-col bg-[var(--side)]"
             >
-              <AgentPanel />
+              <Suspense fallback={<div data-testid="agent-panel-loading" className="p-3 text-[12px] text-[var(--muted)]">…</div>}>
+                <AgentPanel />
+              </Suspense>
             </aside>
           </>
         )}
       </div>
 
       <StatusBar />
-      <SettingsPanel onOpenWelcome={() => useLayout.getState().showWelcome()} />
+      {settingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsPanel onOpenWelcome={() => useLayout.getState().showWelcome()} />
+        </Suspense>
+      )}
     </div>
   );
 }

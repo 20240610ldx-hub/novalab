@@ -4,6 +4,8 @@
 > 代码基线：`e45a04a82ce2e6cef2d913a4da42de1a3700a4c3` + 本工作树未提交修改
 > 本次 fetch 后 `HEAD...origin/main = 0 0`；提交 SHA 不能单独代表受测代码。
 > 状态：**实现与单测门已通过；真实 stdio router 验收已通过；真实 Chromium UI 验收脚本已就绪但最后一次运行未完成（预览进程已退出）**。未提交、未 push、未打 tag、未改版本。
+>
+> **2026-10-17 更新（本文以下内容保留为 10-16 交接原貌，状态以此条为准）**：本包已关闭。真实 Chromium `KERNEL_RESTART_SMOKE_OK`、pytest、`pnpm test:scripts`、集成与构建目录 packaged smoke 复跑通过，独立证据为 `validation-20261014/manifest-restart-round5.json` / `results-restart-round5.json`；checklist §9、路线图 §10、plan.md 与功能矩阵 restart 行（🟡→✅）已更新。提交 `bce0c2d`，随后与第六轮（`5fb39b9`，bridge 重连 + D4）一起经 PR #2 合入 main。§2.3 与 §4 第 1–4 项均已完成；§4 第 5 项中 bridge 重连已完成（第六轮），跨应用草稿恢复在第七轮另行推进。A15 仍未勾选。
 
 ## 1. 本包目标与已定策略
 

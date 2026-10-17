@@ -18,7 +18,11 @@ export type SessionEventKind =
   /** NovaLab 增补（超出 spec §11 清单）：用户直接保存 cell 的留痕。 */
   | 'save'
   /** NovaLab 增补（P1.8）：外部改动 .py → 热重载（load_file + notebook.state 广播）。 */
-  | 'external_reload';
+  | 'external_reload'
+  /** ADR-013：Agent 影子运行 / 核验 / 每轮首次确认的本地元数据（O8；payloadRef 只含 id 与状态）。 */
+  | 'shadow_run'
+  | 'shadow_verify'
+  | 'shadow_confirm';
 
 export type SessionActor = 'user' | 'agent';
 

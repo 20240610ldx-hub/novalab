@@ -57,6 +57,16 @@ function buildEdges(cells: Pick<CellInfo, 'id' | 'defs' | 'refs'>[]): DagEdge[] 
   return edges;
 }
 
+/** 与真内核 dag.py 同格式的单赋值检查（opt-in：FakeKernel.detectDuplicateDefs）。 */
+function duplicateDefsError(cells: Pick<CellInfo, 'id' | 'defs'>[]): string | undefined {
+  const owners = new Map<string, string[]>();
+  for (const c of cells) for (const name of c.defs) owners.set(name, [...(owners.get(name) ?? []), c.id]);
+  const dupes = [...owners].filter(([, ids]) => ids.length > 1);
+  if (dupes.length === 0) return undefined;
+  // 与 dag.py 一致：纯字符串、换行拼接（不是 {message, cellIds}）
+  return dupes.map(([name, ids]) => `multiple definitions of '${name}' (cells ${ids.join(', ')})`).join('\n');
+}
+
 function downstreamClosure(ids: string[], edges: DagEdge[]): string[] {
   const out = new Set<string>();
   const queue = [...ids];
@@ -92,6 +102,8 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
   notifyWrites?: { cellId: string; paths: string[] };
   /** 脚本化编译错：下一次 set_cells / validate_cells 返回 compileError。 */
   nextCompileError?: { message: string; cellIds: string[] };
+  /** 像真内核一样检查单赋值（同名多处定义 → compileError）；默认关，保持既有单测语义。 */
+  detectDuplicateDefs = false;
   /** 不回 ping（测 supervisor 超时判死）。 */
   ignorePing = false;
   /** 固定 schemas（否则按 defs 生成）。 */
@@ -175,7 +187,7 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
         const analyzed = incoming.map((c) => ({
           id: String(c.id), code: String(c.code), ...analyze(String(c.code)), sideEffect: false,
         }));
-        const compileError = this.nextCompileError;
+        const compileError = this.nextCompileError ?? (this.detectDuplicateDefs ? duplicateDefsError(analyzed) : undefined);
         this.nextCompileError = undefined;
         this.respond(msg.id, {
           cells: analyzed,
@@ -239,7 +251,7 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
     this.cells = next;
     const dagEdges = buildEdges(next);
     this.staleSet = downstreamClosure(changed, dagEdges);
-    const compileError = this.nextCompileError;
+    const compileError = this.nextCompileError ?? (this.detectDuplicateDefs ? duplicateDefsError(next) : undefined);
     this.nextCompileError = undefined;
     return {
       cells: next,

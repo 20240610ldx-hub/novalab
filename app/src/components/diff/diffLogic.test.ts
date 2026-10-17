@@ -247,6 +247,20 @@ describe('store diff 切片（acceptDiff / rejectAllPending，mock bridge）', (
     expect(rpcMock).toHaveBeenCalledTimes(1); // policy→mark-only：不级联补跑
   });
 
+  it('acceptDiff 被 bridge 拒绝（F2 依赖未采纳）：回到待审并在卡片上留原因；重试时清除', async () => {
+    useNotebook.setState({ diffs: [makeDiff({ id: 'diff-2', dependsOn: ['diff-1'] })] });
+    rpcMock.mockRejectedValueOnce(new Error('diff-2 depends on diff-1; accept diff-1 first'));
+    await useNotebook.getState().acceptDiff('diff-2');
+    const failed = useNotebook.getState().diffs[0]!;
+    expect(failed.state).toBe('proposed');
+    expect(failed.acceptError).toBe('diff-2 depends on diff-1; accept diff-1 first');
+
+    rpcMock.mockResolvedValueOnce({ diffId: 'diff-2', dagEdges: [], staleSet: [] });
+    const p = useNotebook.getState().acceptDiff('diff-2');
+    expect(useNotebook.getState().diffs[0]!.acceptError).toBeUndefined();
+    await p;
+  });
+
   it('acceptDiff：auto 档 → 前端按拓扑序补跑 stale 下游', async () => {
     useNotebook.setState({
       diffs: [makeDiff({ id: 'd1', newCode: 'x = 2' })],

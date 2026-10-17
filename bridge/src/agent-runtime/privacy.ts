@@ -15,10 +15,10 @@
  * 这里会丢掉并在审计里留下 droppedKeys —— 见 runtime.test.ts 的故障注入用例。
  */
 
-import { z } from 'zod';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { AGENT_TOOL_NAMES, type AgentToolName } from '../mcp/tools';
 import { PREVIEW_STRING_LIMIT, TRUNCATION_SUFFIX } from '../preview';
+import { TOOL_OUTPUT_WHITELIST as F1_WHITELIST } from '../mcp/output-whitelist';
 /** = router.OUTPUT_CHAR_LIMIT（不 import router，避免把内核监督链拉进本模块；单测钉住相等）。 */
 export const TRACEBACK_CHAR_LIMIT = 8192;
 
@@ -26,52 +26,11 @@ export const TRACEBACK_CHAR_LIMIT = 8192;
 const FIELD_LIMITS: Record<string, number> = { traceback: TRACEBACK_CHAR_LIMIT };
 const UNCAPPED_FIELDS = new Set(['code']);
 
-const varSchema = z.object({
-  name: z.string(),
-  type: z.string(),
-  shape: z.array(z.number()).optional(),
-  columns: z.array(z.string()).optional(),
-  dtypes: z.record(z.string(), z.string()).optional(),
-  len: z.number().optional(),
-  preview: z.unknown().optional(),
-});
-const compileError = z.object({ message: z.string(), cellIds: z.array(z.string()) });
-
-/** 每个工具允许出进程的输出形状（z.object 默认 strip：白名单外的键被丢弃）。 */
-export const TOOL_OUTPUT_WHITELIST = {
-  get_notebook_context: z.object({
-    dagEdges: z.array(z.object({ from: z.string(), to: z.string() })),
-    schemas: z.array(varSchema),
-    focusCellId: z.string().nullable(),
-    staleSet: z.array(z.string()),
-  }),
-  get_cell_output: z.object({
-    traceback: z.string().nullable(),
-    mimeKeys: z.array(z.string()),
-  }),
-  propose_code_change: z.union([
-    z.object({ diffId: z.string() }),
-    z.object({ rejected: z.literal(true), reason: compileError }),
-  ]),
-  execute_cell: z.object({
-    cellId: z.string(),
-    ok: z.boolean(),
-    cascaded: z.array(z.string()),
-    durationMs: z.number(),
-    traceback: z.string().optional(),
-  }),
-  list_cells: z.array(
-    z.object({
-      id: z.string(),
-      execCount: z.number(),
-      status: z.enum(['stale', 'error', 'ok', 'idle']),
-      firstLine: z.string(),
-      defs: z.array(z.string()),
-      refs: z.array(z.string()),
-    }),
-  ),
-  get_cell_code: z.object({ cellId: z.string(), code: z.string() }),
-} satisfies Record<AgentToolName, z.ZodType>;
+/**
+ * 每个工具允许出进程的输出形状：与 F1 第二道闸（mcp/output-whitelist.ts）同一份定义，
+ * 不再维护第二份（ADR-013 新增 shadow_run / verify 后两份极易漂移）。
+ */
+export const TOOL_OUTPUT_WHITELIST = F1_WHITELIST;
 
 export interface PrivacyAuditEntry {
   toolCallId: string;

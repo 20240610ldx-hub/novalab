@@ -1,8 +1,4 @@
-import { createAnthropic } from '@ai-sdk/anthropic';
-import type { LanguageModel } from 'ai';
 import { bridge } from '../bridge/client';
-import { createOpenAICompat } from './openaiCompat';
-import { llmFetch } from './retryFetch';
 
 /**
  * M6 模型解耦：provider 注册表（P2.1；P4 迁移加密存储 + LLM 代理，ADR-008 落地）。
@@ -44,6 +40,28 @@ export interface ProviderConfig {
   model: string;
   /** bridge 掩码：加密存储里已有 key（P4；apiKey 本体永不回前端）。 */
   hasKey?: boolean;
+  /**
+   * 单次回复的输出 token 上限（设置面板可调）；缺省 = 按模型自动
+   * （models.ts outputTokenBudget：已知 Claude 走 SDK 上限，其余 8192）。
+   */
+  maxOutputTokens?: number;
+}
+
+/** 与 bridge protocol.ts MAX_OUTPUT_TOKENS_MIN/MAX 同一区间（bridge 侧再校验一次）。 */
+export const MAX_OUTPUT_TOKENS_MIN = 256;
+export const MAX_OUTPUT_TOKENS_MAX = 262_144;
+
+export type MaxOutputTokensInput =
+  | { ok: true; value: number | undefined }
+  | { ok: false };
+
+/** 设置面板输入框 → 预算值：空 = 自动；允许千分位逗号/空格；非整数或越界 → ok:false。 */
+export function parseMaxOutputTokensInput(text: string): MaxOutputTokensInput {
+  const cleaned = text.replace(/[,_\s]/g, '');
+  if (cleaned === '') return { ok: true, value: undefined };
+  if (!/^\d+$/.test(cleaned)) return { ok: false };
+  const n = Number(cleaned);
+  return n >= MAX_OUTPUT_TOKENS_MIN && n <= MAX_OUTPUT_TOKENS_MAX ? { ok: true, value: n } : { ok: false };
 }
 
 export interface ProviderState {
@@ -93,6 +111,7 @@ interface ProviderSummaryWire {
   baseURL: string;
   model: string;
   hasKey: boolean;
+  maxOutputTokens?: number;
 }
 
 interface ProvidersListWire {
@@ -127,24 +146,6 @@ export function requestTargetFor(
     : { baseURL: config.baseURL, apiKey: config.apiKey };
 }
 
-export function createLanguageModel(config: ProviderConfig): LanguageModel {
-  const { baseURL, apiKey } = requestTargetFor(
-    config,
-    bridgeReady,
-    bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN,
-  );
-  const proxyHeaders = bridgeReady ? bridge.getLlmProxyHeaders?.() : undefined;
-  // 网络波动防御：代理与直连两条路径共用同一重试层（见 retryFetch.ts）
-  const settings = { baseURL, apiKey, fetch: llmFetch, ...(proxyHeaders ? { headers: proxyHeaders } : {}) };
-  switch (config.kind) {
-    case 'anthropic-compat':
-      return createAnthropic(settings)(config.model);
-    case 'openai-compat':
-      // deepseek / ollama / vLLM 等走 OpenAI 兼容协议（本地最小 provider，见 openaiCompat.ts）
-      return createOpenAICompat(settings)(config.model);
-  }
-}
-
 function isProviderSummaryWire(v: unknown): v is ProviderSummaryWire {
   if (!v || typeof v !== 'object') return false;
   const r = v as Record<string, unknown>;
@@ -159,7 +160,18 @@ function isProviderSummaryWire(v: unknown): v is ProviderSummaryWire {
 }
 
 function summaryToConfig(s: ProviderSummaryWire): ProviderConfig {
-  return { id: s.id, kind: s.kind, name: s.name, baseURL: s.baseURL, model: s.model, apiKey: '', hasKey: s.hasKey };
+  const budget = s.maxOutputTokens;
+  return {
+    id: s.id,
+    kind: s.kind,
+    name: s.name,
+    baseURL: s.baseURL,
+    model: s.model,
+    apiKey: '',
+    hasKey: s.hasKey,
+    // 旧 bridge 无此字段；坏值按"自动"处理（宽容降级）
+    ...(typeof budget === 'number' && Number.isInteger(budget) && budget > 0 ? { maxOutputTokens: budget } : {}),
+  };
 }
 
 /** providers.list → 前端状态（过滤 dev-env：它在 UI 上由 hasDevEnvModel() 兜底行呈现）。 */
@@ -201,6 +213,7 @@ export async function saveProviderState(state: ProviderState): Promise<void> {
       baseURL: p.baseURL,
       model: p.model,
       ...(p.apiKey !== '' ? { apiKey: p.apiKey } : {}),
+      maxOutputTokens: p.maxOutputTokens ?? null, // null = 清除（回到按模型自动）
     });
   }
   for (const r of remoteAll) {
@@ -350,50 +363,9 @@ export async function initProviderState(): Promise<ProviderState> {
   }
 }
 
-export function getDevLanguageModel(): LanguageModel | null {
-  const envBaseURL = import.meta.env.VITE_NOVALAB_LLM_BASE_URL as string | undefined;
-  const apiKey = import.meta.env.VITE_NOVALAB_LLM_API_KEY as string | undefined;
-  if (!envBaseURL || !apiKey) return null;
-  const model =
-    (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
-  if (bridgeReady) {
-    // P4 主路径：dev-env 已播种进 bridge 加密存储 → 走 LLM 代理（key 不再驻留浏览器请求）
-    const proxyHeaders = bridge.getLlmProxyHeaders?.();
-    return createAnthropic({
-      baseURL: proxyBaseURL(DEV_ENV_PROVIDER_ID, bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN),
-      apiKey: PROXY_KEY_PLACEHOLDER,
-      ...(proxyHeaders ? { headers: proxyHeaders } : {}),
-    })(model);
-  }
-  // 无 bridge 兜底（降级，原 L-1 主路径）：DEV（vite）走同源代理 /llm/v1 →
-  // vite.config.ts server.proxy 转发 envBaseURL；生产直连（端点缺 CORS 头会失败）。
-  const baseURL = import.meta.env.DEV ? '/llm/v1' : envBaseURL;
-  return createAnthropic({ baseURL, apiKey })(model);
-}
-
 export function hasDevEnvModel(): boolean {
   return Boolean(
     import.meta.env.VITE_NOVALAB_LLM_BASE_URL && import.meta.env.VITE_NOVALAB_LLM_API_KEY,
   );
 }
 
-/** 当前生效模型：用户选中的 provider 优先，否则 dev .env.local 兜底，都没有 → null。 */
-export function resolveActiveModel(state: ProviderState): {
-  model: LanguageModel | null;
-  source: 'user' | 'dev-env' | null;
-  label: string;
-} {
-  const active =
-    state.activeProviderId != null
-      ? state.providers.find((p) => p.id === state.activeProviderId)
-      : undefined;
-  if (active) {
-    return { model: createLanguageModel(active), source: 'user', label: `${active.name} · ${active.model}` };
-  }
-  const dev = getDevLanguageModel();
-  if (dev) {
-    const model = (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
-    return { model: dev, source: 'dev-env', label: `dev .env.local · ${model}` };
-  }
-  return { model: null, source: null, label: '未配置' };
-}

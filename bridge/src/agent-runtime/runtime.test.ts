@@ -48,6 +48,25 @@ describe('tool-schemas: zod 单源 → TypeBox', () => {
     execute_cell: [{ cellId: 'a' }, { cellId: 'a', cascade: true }, { cellId: 'a', cascade: 'yes' }, { cellId: 'a', cascade: 'true' }, {}],
     list_cells: [{}],
     get_cell_code: [{ cellId: 'a' }, { cell: 'a' }],
+    shadow_run: [
+      { changes: [{ targetCellId: 'a', action: 'update', newCode: 'x = 1' }] },
+      { changes: [{ targetCellId: 'a', action: 'insert_below', newCode: 'y = 2' }], seed: 3 },
+      { changes: [] },
+      { changes: [{ targetCellId: 'a', action: 'replace', newCode: 'x = 1' }] },
+      { changes: [{ targetCellId: 'a', action: 'update', newCode: 'x = 1' }], seed: 1.5 },
+      {},
+    ],
+    verify: [
+      { runId: 'r', contracts: [] },
+      { runId: 'r', contracts: [{ kind: 'not_null', target: 'df', columns: ['a'] }] },
+      { runId: 'r', contracts: [{ kind: 'row_count', target: 'df', op: '<=', ref: { target: 'df', phase: 'before' } }] },
+      { runId: 'r', contracts: [{ kind: 'equivalent', targets: ['df'] }] },
+      { runId: 'r', contracts: [{ kind: 'equivalent', targets: [] }] },
+      { runId: 'r', contracts: [{ kind: 'match_rate', left: 'a', right: 'b', on: ['k'], min: 2 }] },
+      { runId: 'r', contracts: [{ kind: 'drop_table' }] },
+      { runId: 'r', contracts: [{ kind: 'range', target: 'df', column: 'a', min: 'zero' }] },
+      { contracts: [] },
+    ],
   };
 
   /** pi 校验：成功返回（可能经类型转换的）参数，失败返回 null。 */

@@ -23,7 +23,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { decryptSecret, encryptSecret, SecretError } from './secret';
-import type { ProviderKind, ProviderSummary } from './protocol';
+import {
+  isValidMaxOutputTokens,
+  MAX_OUTPUT_TOKENS_MAX,
+  MAX_OUTPUT_TOKENS_MIN,
+  type ProviderKind,
+  type ProviderSummary,
+} from './protocol';
 
 /** 落盘条目：apiKeyCipher = encryptSecret(明文 key)；无 key 时缺省。 */
 export interface StoredProvider {
@@ -33,6 +39,7 @@ export interface StoredProvider {
   baseURL: string;
   model: string;
   apiKeyCipher?: string;
+  maxOutputTokens?: number;
 }
 
 export interface ProvidersFileShape {
@@ -48,6 +55,8 @@ export interface ProviderSetInput {
   baseURL: string;
   model: string;
   apiKey?: string;
+  /** 省略/null = 清除（回到前端按模型的默认）。 */
+  maxOutputTokens?: number | null;
 }
 
 /** llm-proxy 消费：解密后的明文 key（只存在于 bridge 进程内）。 */
@@ -105,6 +114,7 @@ function normalizeStored(raw: unknown): StoredProvider | null {
     return null;
   }
   const cipher = raw['apiKeyCipher'];
+  const budget = raw['maxOutputTokens'];
   return {
     id,
     kind: kind as ProviderKind,
@@ -112,6 +122,7 @@ function normalizeStored(raw: unknown): StoredProvider | null {
     baseURL,
     model,
     ...(typeof cipher === 'string' && cipher !== '' ? { apiKeyCipher: cipher } : {}),
+    ...(isValidMaxOutputTokens(budget) ? { maxOutputTokens: budget } : {}),
   };
 }
 
@@ -136,6 +147,7 @@ function toSummary(p: StoredProvider): ProviderSummary {
     baseURL: p.baseURL,
     model: p.model,
     hasKey: p.apiKeyCipher !== undefined,
+    ...(p.maxOutputTokens !== undefined ? { maxOutputTokens: p.maxOutputTokens } : {}),
   };
 }
 
@@ -191,6 +203,12 @@ export class ProvidersStore {
     if (typeof input.id === 'string' && input.id !== '' && /[/\\]/.test(input.id)) {
       throw new ProvidersStoreError(`id 不允许含路径分隔符: ${input.id}`);
     }
+    const budget = input.maxOutputTokens;
+    if (budget !== undefined && budget !== null && !isValidMaxOutputTokens(budget)) {
+      throw new ProvidersStoreError(
+        `maxOutputTokens 必须是 ${MAX_OUTPUT_TOKENS_MIN}..${MAX_OUTPUT_TOKENS_MAX} 的整数，收到: ${String(budget)}`,
+      );
+    }
     const shape = this.readSafe();
     const id = typeof input.id === 'string' && input.id !== '' ? input.id : `p-${randomBytes(4).toString('hex')}`;
     const existing = shape.providers.find((p) => p.id === id);
@@ -200,6 +218,7 @@ export class ProvidersStore {
       name: input.name,
       baseURL: input.baseURL,
       model: input.model,
+      ...(typeof budget === 'number' ? { maxOutputTokens: budget } : {}),
     };
     const apiKey = input.apiKey;
     if (typeof apiKey === 'string' && apiKey !== '') {
