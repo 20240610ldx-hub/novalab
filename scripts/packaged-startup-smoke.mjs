@@ -5,6 +5,7 @@
  * or installer. NOVALAB_SMOKE_PY_DIR may select an already provisioned uv project
  * (Release CI uses the checked-out py/) to avoid first-run dependency downloads.
  */
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,14 +31,44 @@ packaged_answer = 6 * 7
 packaged_answer
 `;
 
-export async function runPackagedStartupSmoke({ fixture = PACKAGED_SMOKE_FIXTURE, ...options } = {}) {
+function packagedPaths() {
   const triple = targetTriple();
   const ext = process.platform === 'win32' ? '.exe' : '';
-  const nodeSidecar = path.join(tauriDir, 'binaries', `node-${triple}${ext}`);
-  const uvSidecar = path.join(tauriDir, 'binaries', `uv-${triple}${ext}`);
-  const bridgeScript = path.join(tauriDir, 'bridge-dist', 'bridge.mjs');
   const sourcePyDir = path.resolve(process.env.NOVALAB_SMOKE_PY_SOURCE_DIR ?? process.env.NOVALAB_SMOKE_PY_DIR ?? path.join(root, 'py'));
-  const runtimePyDir = path.resolve(process.env.NOVALAB_SMOKE_PY_DIR ?? sourcePyDir);
+  return {
+    triple,
+    uvSidecar: path.join(tauriDir, 'binaries', `uv-${triple}${ext}`),
+    sourcePyDir,
+    runtimePyDir: path.resolve(process.env.NOVALAB_SMOKE_PY_DIR ?? sourcePyDir),
+  };
+}
+
+/**
+ * 首启自装预热：runtime py 目录缺 `.venv` 时，用 sidecar uv 执行与产品 ensureKernelVenv 相同的两步
+ * （`uv python install` → `uv sync --all-extras`）。干净机器上这一步要下载解释器与依赖（实测 ~60 s），
+ * 产品允许 300 s；验收用例各自只有 60 s 且考核的是启动/清理生命周期，故在用例前单独预热并留痕。
+ * 已存在 `.venv` → 不做任何事。返回是否执行了预热。
+ */
+export function prewarmPackagedPython({ timeoutMs = 300_000, log = console.error } = {}) {
+  const { uvSidecar, runtimePyDir } = packagedPaths();
+  if (fs.existsSync(path.join(runtimePyDir, '.venv'))) return false;
+  if (!fs.existsSync(path.join(runtimePyDir, 'pyproject.toml'))) {
+    throw new Error(`packaged 预热缺少 pyproject: ${runtimePyDir}`);
+  }
+  const t0 = Date.now();
+  for (const args of [['python', 'install'], ['sync', '--directory', runtimePyDir, '--all-extras']]) {
+    const r = spawnSync(uvSidecar, args, { stdio: ['ignore', 'ignore', 'inherit'], timeout: timeoutMs, windowsHide: true });
+    if (r.status !== 0) throw new Error(`packaged 预热失败: uv ${args.join(' ')} (status=${r.status ?? r.signal ?? r.error?.message})`);
+  }
+  log(`packaged prewarm: bootstrapped ${runtimePyDir} in ${Date.now() - t0}ms`);
+  return true;
+}
+
+export async function runPackagedStartupSmoke({ fixture = PACKAGED_SMOKE_FIXTURE, ...options } = {}) {
+  const { triple, uvSidecar, sourcePyDir, runtimePyDir } = packagedPaths();
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const nodeSidecar = path.join(tauriDir, 'binaries', `node-${triple}${ext}`);
+  const bridgeScript = path.join(tauriDir, 'bridge-dist', 'bridge.mjs');
   for (const required of [nodeSidecar, uvSidecar, bridgeScript, path.join(sourcePyDir, 'pyproject.toml')]) {
     if (!fs.existsSync(required)) throw new Error(`packaged smoke 缺少产物: ${required}`);
   }

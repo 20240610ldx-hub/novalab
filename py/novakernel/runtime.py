@@ -27,7 +27,7 @@
   闭包自动级联重跑（Owner 裁决：绕过 mark-only；发常规 run.* 通知）→ side-effect
   下游仅标 stale 并进 staleSideEffect 返回；未知 controlId → KernelError -32602；
 - 通知形状（冻结）：run.started {cellId}；run.stdout/run.stderr {cellId,text}；
-  run.mime {cellId,mime,data}；run.error {cellId,traceback,frames}；
+  run.mime {cellId,mime,data}；run.error {cellId,traceback,frames,execCount}；
   run.notify {cellId,kind,path}（kind='file-write'：exec 期间写盘的文件绝对路径，
   同路径去重、单次 exec 至多 WRITE_NOTIFY_LIMIT 条）；
   run.done {cellId,execCount,cascaded,durationMs,defs,refs}。
@@ -691,6 +691,18 @@ class Runtime:
         consumers = {cid for cid, r in self.cells.items() if r.refs & ghosts}
         self.stale |= consumers | self.graph.downstream(consumers)
 
+    @staticmethod
+    def _strip_kernel_frames(exc: BaseException) -> BaseException:
+        """去掉 traceback 开头属于内核自身（本模块 _run_cell 的 exec/eval）的帧。
+
+        用户与 Agent 只该看到自己的 cell 与其调用的库；内核调度帧既是噪音又暴露安装路径。
+        全部是内核帧（内核自身出错）时保持原样，便于排查。
+        """
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
+            tb = tb.tb_next
+        return exc.with_traceback(tb) if tb is not None else exc
+
     def _frames(self, exc: BaseException, filename: str) -> list[dict]:
         frames: list[dict] = []
         for frame, lineno in tbmod.walk_tb(exc.__traceback__):
@@ -800,6 +812,7 @@ class Runtime:
             }]
             self._emit("run.error", {
                 "cellId": cell_id, "traceback": tb_text, "frames": frames,
+                "execCount": self.exec_counts.get(cell_id, 0),
             })
             if attribute:
                 self.stale.add(cell_id)
@@ -827,11 +840,13 @@ class Runtime:
                     self.globals.pop(n, None)
                 else:
                     self.globals[n] = v
+            self._strip_kernel_frames(e)
             tb_text = "".join(tbmod.format_exception(e)).rstrip()
             self._emit("run.error", {
                 "cellId": cell_id,
                 "traceback": tb_text,
                 "frames": self._frames(e, filename),
+                "execCount": self.exec_counts.get(cell_id, 0),
             })
             if attribute:
                 self.stale.add(cell_id)

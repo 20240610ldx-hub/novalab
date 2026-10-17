@@ -80,22 +80,25 @@ export function KernelStatusBar({ onHandlePointerDown }: KernelStatusBarProps) {
       : t('kernel.shared');
 
   return (
-    <div className="relative flex items-center justify-between border-t border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)]">
+    <div className="relative flex items-center justify-between gap-2 whitespace-nowrap border-t border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)]">
       {/* fixed 定位的 diff 审阅托盘与级联确认窗（视觉位置在顶栏右侧/视口中央） */}
       <DiffTray />
       <CascadeAskDialog />
       <RunConfirmDialog />
 
-      <span>{leftText}</span>
+      {/* 窄窗口：左侧说明截断（title 给全文），不再逐词折行把状态栏撑高 */}
+      <span className="min-w-0 truncate" title={leftText}>
+        {leftText}
+      </span>
       {/* 拖拽把手：P3.2 拖出变量 inspector（S3）；双击 = 折叠/展开（dragStore 内判定） */}
       <span
-        className="cursor-row-resize tracking-[0.2em] text-[var(--muted)] select-none touch-none"
+        className="shrink-0 cursor-row-resize tracking-[0.2em] text-[var(--muted)] select-none touch-none"
         title={t('kernel.handleTitle')}
         onPointerDown={onHandlePointerDown}
       >
         ⠿⠿
       </span>
-      <span className="flex items-center gap-2">
+      <span className="flex shrink-0 items-center gap-2">
         {/* A-2 #16：footer 右侧 cell 计数（只读视图 = 截断后展示数） */}
         <span>{t('kernel.cells', { count: cellCount })}</span>
         {/* P2.4 级联策略开关：policy = decideStalePolicy 裁决（Owner 默认 mark-only） */}

@@ -269,7 +269,9 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
 
     if (fail) {
       const traceback = this.failCell!.traceback;
-      this.notify('run.error', { cellId, traceback, frames: [] });
+      const cell = isRepl ? undefined : this.cells.find((c) => c.id === cellId);
+      if (cell) cell.execCount++; // 与 runtime.py 一致：失败的运行也计数，随 run.error 下发
+      this.notify('run.error', { cellId, traceback, frames: [], ...(cell ? { execCount: cell.execCount } : {}) });
       return { cellId, ok: false, cascaded: [], durationMs: Date.now() - t0, traceback };
     }
 
