@@ -124,7 +124,8 @@ def _watch_parent() -> None:
     """bridge 死亡 → 立刻退出，即使主线程卡在用户代码的死循环里（不留孤儿）。
 
     NOVALAB_SHADOW_PARENT_PID = bridge pid。Windows：OpenProcess + WaitForSingleObject
-    阻塞等待（ctypes 调用期间释放 GIL）；POSIX：父进程变化即退出。必须在沙箱安装前启动。
+    阻塞等待（ctypes 调用期间释放 GIL）；POSIX：按 pid 等待（Linux pidfd → 无 pidfd 时 /proc fd；
+    macOS kqueue），直接父进程变化只是兜底。必须在沙箱安装前启动（之后 os.kill 探测会被拦截）。
     """
     import threading
     import time
@@ -173,17 +174,35 @@ def _watch_parent() -> None:
                 os._exit(3)
             except OSError:
                 kq = None
+        # 有的 CPython 构建没有 os.pidfd_open（uv 托管的 python-build-standalone 3.14.5）：Linux 上改持
+        # /proc/<pid>/stat 的 fd。fd 绑定的是该进程实例（pid 复用不会误判），进程消失后读取报 ESRCH。
+        proc_fd: int | None = None
+        if pidfd is None and kq is None and sys.platform.startswith("linux"):
+            try:
+                proc_fd = os.open(f"/proc/{ppid}/stat", os.O_RDONLY)
+            except FileNotFoundError:
+                os._exit(3)  # 父进程已不在
+            except OSError:
+                proc_fd = None
+
+        def parent_gone() -> bool:
+            if pidfd is not None:
+                return bool(select.select([pidfd], [], [], 0.5)[0])
+            if kq is not None:
+                return bool(kq.control(None, 1, 0.5))
+            if proc_fd is not None:
+                try:
+                    os.pread(proc_fd, 1, 0)
+                except ProcessLookupError:
+                    return True
+                except OSError:
+                    pass
+            time.sleep(0.5)
+            return False
 
         def wait() -> None:
-            while os.getppid() == start:
-                if pidfd is not None:
-                    if select.select([pidfd], [], [], 0.5)[0]:
-                        break
-                elif kq is not None:
-                    if kq.control(None, 1, 0.5):
-                        break
-                else:
-                    time.sleep(0.5)
+            while os.getppid() == start and not parent_gone():
+                pass
             os._exit(3)
 
     threading.Thread(target=wait, name="novalab-shadow-parent-watch", daemon=True).start()

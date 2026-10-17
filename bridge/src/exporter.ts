@@ -57,7 +57,43 @@ export interface ExportCell {
   /** ≤0 / 缺省 → execution_count: null。 */
   execCount?: number | null;
   output?: ExportCellOutput | null;
+  /** ADR-014：该 cell 的尝试历史 → metadata.novalab.runs（无代码正文、无输出）。 */
+  runs?: ExportRunSummary[];
+  /** ADR-015：该 cell 本会话最近一次读写文件的指纹 → metadata.novalab.provenance。 */
+  provenance?: ExportProvenance;
 }
+
+/** 导出用的单次尝试摘要（RunLogRecord 的子集）。 */
+export interface ExportProvenanceFile {
+  /** notebook 目录内为相对路径；目录外为 `<external>/文件名`。 */
+  path: string;
+  sha256: string | null;
+  bytes: number | null;
+  skipped?: string;
+  inPlace?: true;
+}
+
+export interface ExportProvenance {
+  runId: string;
+  ts: string;
+  codeSha256: string;
+  inputs: ExportProvenanceFile[];
+  outputs: ExportProvenanceFile[];
+}
+
+export interface ExportRunSummary {
+  attempt: number;
+  ts: string;
+  durationMs: number;
+  ok: boolean;
+  error?: { name: string; line?: number };
+  actor: string;
+  trigger: string;
+  codeSha256: string;
+}
+
+/** 每个 cell 导出的最近尝试数上限（ADR-014 O4）。 */
+export const EXPORT_RUNS_PER_CELL = 50;
 
 /** notebook 级元数据（写入 metadata.novalab，供追溯；全部可选）。 */
 export interface ExportMeta {
@@ -167,7 +203,7 @@ export function buildNotebook(cells: readonly ExportCell[], meta?: ExportMeta): 
       cell_type: 'code',
       id: ids[i],
       execution_count: ec,
-      metadata: {},
+      metadata: cellNovalabMetadata(c),
       outputs,
       source: toSourceLines(typeof c.code === 'string' ? c.code : ''),
     };
@@ -219,4 +255,12 @@ export function exportIpynb(
   const nbCells = nb['cells'] as unknown[];
   const nbOutputs = (nb['cells'] as { outputs: unknown[] }[]).reduce((n, c) => n + c.outputs.length, 0);
   return { path: abs, nbCells: nbCells.length, nbOutputs };
+}
+
+/** cell 级 metadata.novalab：运行历史（ADR-014）与溯源指纹（ADR-015）；都没有 → {}。 */
+function cellNovalabMetadata(c: ExportCell): Record<string, unknown> {
+  const novalab: Record<string, unknown> = {};
+  if (c.runs && c.runs.length > 0) novalab['runs'] = c.runs.slice(-EXPORT_RUNS_PER_CELL);
+  if (c.provenance) novalab['provenance'] = c.provenance;
+  return Object.keys(novalab).length > 0 ? { novalab } : {};
 }

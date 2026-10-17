@@ -3,6 +3,7 @@ import type { CellOutput, MimeBundle, TracebackFrame } from '../kernel/types';
 import { ControlRenderer } from './controls/ControlRenderer';
 import { CONTROL_MIME } from './controls/logic';
 import { isRenderableHtml, parseSafeHtml, type SafeHtmlNode } from './htmlSanitize';
+import { ProvenanceLine } from './ProvenanceLine';
 
 /** MIME bundle 中前端认识的键；其余按"未知 mime"降级为灰字 key 列表。 */
 const KNOWN_MIME = new Set(['text/plain', 'text/html', 'image/png', CONTROL_MIME]);
@@ -128,7 +129,8 @@ function HtmlSegment({ html, fallbackText }: { html: string; fallbackText: strin
  * 文件写通知行（P2.9，参考图：输出下 `wrote <绝对路径>`）：
  * muted 等宽、每行一条、容器横向滚动（长路径不折行不撑破面板）。
  */
-export function WriteNotifications({ writes }: { writes: string[] }) {
+/** 「wrote …」列表；每行可展开查看溯源（ADR-015）。notebookPath 缺省 = 当前聚焦 notebook。 */
+export function WriteNotifications({ writes, notebookPath }: { writes: string[]; notebookPath?: string }) {
   if (writes.length === 0) return null;
   return (
     <div
@@ -136,9 +138,7 @@ export function WriteNotifications({ writes }: { writes: string[] }) {
       style={{ fontFamily: 'var(--font-mono)' }}
     >
       {writes.map((p, i) => (
-        <div key={`${p}#${i}`} className="whitespace-pre">
-          wrote {p}
-        </div>
+        <ProvenanceLine key={`${p}#${i}`} path={p} {...(notebookPath ? { notebookPath } : {})} />
       ))}
     </div>
   );

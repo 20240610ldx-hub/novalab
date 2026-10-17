@@ -27,9 +27,10 @@
   闭包自动级联重跑（Owner 裁决：绕过 mark-only；发常规 run.* 通知）→ side-effect
   下游仅标 stale 并进 staleSideEffect 返回；未知 controlId → KernelError -32602；
 - 通知形状（冻结）：run.started {cellId}；run.stdout/run.stderr {cellId,text}；
-  run.mime {cellId,mime,data}；run.error {cellId,traceback,frames}；
+  run.mime {cellId,mime,data}；run.error {cellId,traceback,frames,execCount}；
   run.notify {cellId,kind,path}（kind='file-write'：exec 期间写盘的文件绝对路径，
-  同路径去重、单次 exec 至多 WRITE_NOTIFY_LIMIT 条）；
+  同路径去重、单次 exec 至多 WRITE_NOTIFY_LIMIT 条；kind='file-read'：只读打开的
+  文件（ADR-015 溯源输入，过滤解释器 / 库 / 源码 / 字体），至多 READ_NOTIFY_LIMIT 条）；
   run.done {cellId,execCount,cascaded,durationMs,defs,refs}。
   触发 cell 的 run.done 在级联完成后发出（cascaded 为实际执行成功的下游 id）。
 """
@@ -157,6 +158,41 @@ _WRITE_MODE_CHARS = frozenset("wax+")
 _WRITE_FLAG_MASK = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 # 单次 exec 的 file-write 通知上限（防循环写临时文件造成通知风暴）
 WRITE_NOTIFY_LIMIT = 50
+# 单次 exec 的 file-read 通知上限（ADR-015）
+READ_NOTIFY_LIMIT = 50
+# 只读打开这些扩展名不算输入：import 读源码 / 扩展模块，matplotlib 读字体
+_READ_IGNORED_EXTS = frozenset({
+    ".py", ".pyc", ".pyd", ".so", ".dll", ".pth", ".ttf", ".otf", ".ttc", ".afm",
+})
+_READ_IGNORED_ROOTS: tuple[str, ...] | None = None
+
+
+def _read_ignored_roots() -> tuple[str, ...]:
+    """解释器、库与系统目录（只读打开属于运行环境本身，不是数据输入）。惰性计算一次。"""
+    global _READ_IGNORED_ROOTS
+    if _READ_IGNORED_ROOTS is None:
+        import site
+
+        roots: list[str] = [sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.abspath(__file__))]
+        try:
+            roots.extend(site.getsitepackages())
+        except Exception:  # noqa: BLE001 — 部分嵌入式解释器没有
+            pass
+        try:
+            roots.append(site.getusersitepackages())
+        except Exception:  # noqa: BLE001
+            pass
+        home = os.path.expanduser("~")
+        roots.extend(os.path.join(home, d) for d in (".cache", ".matplotlib", os.path.join(".config", "matplotlib")))
+        if os.environ.get("MPLCONFIGDIR"):
+            roots.append(os.environ["MPLCONFIGDIR"])
+        if os.name == "nt":
+            roots.append(os.environ.get("SystemRoot", r"C:\Windows"))
+        else:
+            roots.extend(["/proc", "/sys", "/dev", "/etc", "/usr/share"])
+        norm = {os.path.normcase(os.path.abspath(r)).rstrip("\\/") for r in roots if r}
+        _READ_IGNORED_ROOTS = tuple(sorted(r + os.sep for r in norm if r))
+    return _READ_IGNORED_ROOTS
 
 _ACTIVE_WATCHER: "_WriteWatcher | None" = None
 _AUDIT_INSTALLED = False
@@ -172,23 +208,25 @@ def _audit_hook(event: str, args: tuple) -> None:
 
 
 class _WriteWatcher:
-    """收集一次 exec 窗口内以写方式打开的文件路径，结束后发 run.notify。
+    """收集一次 exec 窗口内打开的文件路径（写 → file-write，只读 → file-read），结束后发 run.notify。
 
     - 审计事件 open (path, mode, flags)：mode 为 str 时看 w/a/x/+；为 int
       （os.open）时看 flags 写位——只读打开不发；
     - pandas to_csv/to_excel、matplotlib savefig 底层都走 open，自动覆盖；
     - import 触发的字节码缓存写（__pycache__/*.pyc）是解释器噪音，过滤；
     - 同路径去重（normcase+abspath 比较），发出的 path 规整为绝对路径，
-      至多 WRITE_NOTIFY_LIMIT 条。
+      至多 WRITE_NOTIFY_LIMIT 条；exec 结束时已不存在的写入（写完即删的临时文件）不发。
     """
 
-    __slots__ = ("cell_id", "emit", "paths", "_seen", "_prev")
+    __slots__ = ("cell_id", "emit", "paths", "_seen", "reads", "_seen_reads", "_prev")
 
     def __init__(self, cell_id: str, emit) -> None:
         self.cell_id = cell_id
         self.emit = emit
         self.paths: list[str] = []
         self._seen: set[str] = set()
+        self.reads: list[str] = []
+        self._seen_reads: set[str] = set()
         self._prev: _WriteWatcher | None = None
 
     def __enter__(self) -> "_WriteWatcher":
@@ -209,17 +247,18 @@ class _WriteWatcher:
     def on_open(self, args: tuple) -> None:
         mode = args[1] if len(args) > 1 else None
         if isinstance(mode, str):
-            if not _WRITE_MODE_CHARS.intersection(mode):
-                return
+            is_write = bool(_WRITE_MODE_CHARS.intersection(mode))
         else:
             flags = args[2] if len(args) > 2 else 0
             try:
-                if not int(flags) & _WRITE_FLAG_MASK:
-                    return
+                is_write = bool(int(flags) & _WRITE_FLAG_MASK)
             except (TypeError, ValueError):
                 return
         p = _path_to_str(args[0] if args else None)
         if p is None or p.endswith(".pyc") or "__pycache__" in p:
+            return
+        if not is_write:
+            self._on_read(p)
             return
         key = os.path.normcase(os.path.abspath(p))
         if key in self._seen:
@@ -228,12 +267,32 @@ class _WriteWatcher:
         if len(self.paths) < WRITE_NOTIFY_LIMIT:
             self.paths.append(os.path.abspath(p))
 
+    def _on_read(self, p: str) -> None:
+        if os.path.splitext(p)[1].lower() in _READ_IGNORED_EXTS:
+            return
+        absp = os.path.abspath(p)
+        key = os.path.normcase(absp)
+        if key in self._seen_reads or len(self.reads) >= READ_NOTIFY_LIMIT:
+            return
+        if key.startswith(_read_ignored_roots()) or os.path.isdir(absp):
+            return
+        self._seen_reads.add(key)
+        self.reads.append(absp)
+
     def flush(self) -> None:
         for p in self.paths:
+            # 本次 exec 内写完又删掉的临时文件（如 tempfile.gettempdir() 的可写探测）不是结果
+            if not os.path.lexists(p):
+                continue
             self.emit("run.notify", {
                 "cellId": self.cell_id, "kind": "file-write", "path": p,
             })
+        for p in self.reads:
+            self.emit("run.notify", {
+                "cellId": self.cell_id, "kind": "file-read", "path": p,
+            })
         self.paths = []
+        self.reads = []
 
 
 def _path_to_str(path) -> str | None:
@@ -691,6 +750,18 @@ class Runtime:
         consumers = {cid for cid, r in self.cells.items() if r.refs & ghosts}
         self.stale |= consumers | self.graph.downstream(consumers)
 
+    @staticmethod
+    def _strip_kernel_frames(exc: BaseException) -> BaseException:
+        """去掉 traceback 开头属于内核自身（本模块 _run_cell 的 exec/eval）的帧。
+
+        用户与 Agent 只该看到自己的 cell 与其调用的库；内核调度帧既是噪音又暴露安装路径。
+        全部是内核帧（内核自身出错）时保持原样，便于排查。
+        """
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
+            tb = tb.tb_next
+        return exc.with_traceback(tb) if tb is not None else exc
+
     def _frames(self, exc: BaseException, filename: str) -> list[dict]:
         frames: list[dict] = []
         for frame, lineno in tbmod.walk_tb(exc.__traceback__):
@@ -800,6 +871,7 @@ class Runtime:
             }]
             self._emit("run.error", {
                 "cellId": cell_id, "traceback": tb_text, "frames": frames,
+                "execCount": self.exec_counts.get(cell_id, 0),
             })
             if attribute:
                 self.stale.add(cell_id)
@@ -827,11 +899,13 @@ class Runtime:
                     self.globals.pop(n, None)
                 else:
                     self.globals[n] = v
+            self._strip_kernel_frames(e)
             tb_text = "".join(tbmod.format_exception(e)).rstrip()
             self._emit("run.error", {
                 "cellId": cell_id,
                 "traceback": tb_text,
                 "frames": self._frames(e, filename),
+                "execCount": self.exec_counts.get(cell_id, 0),
             })
             if attribute:
                 self.stale.add(cell_id)

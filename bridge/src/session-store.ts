@@ -211,11 +211,11 @@ export class SessionStore {
     return out;
   }
 
-  /** sessions 目录里全部 jsonl 的会话 id（index 损坏时的兜底重建源）。 */
+  /** sessions 目录里全部事件流 jsonl 的会话 id（index 损坏时的兜底重建源；不含 ADR-014 的 `.runs.jsonl`）。 */
   scanIds(notebookDir: string): string[] {
     try {
       return readdirSync(SessionStore.dirFor(notebookDir))
-        .filter((f) => f.endsWith('.jsonl'))
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.runs.jsonl'))
         .map((f) => f.slice(0, -'.jsonl'.length))
         .sort();
     } catch {

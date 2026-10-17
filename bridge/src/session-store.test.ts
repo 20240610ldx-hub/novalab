@@ -245,6 +245,15 @@ describe('SessionStore · 容错', () => {
     expect(store.readEvents(dir, 'missing')).toEqual([]);
   });
 
+  it('scanIds：只认事件流，不把运行日志 <id>.runs.jsonl 当成会话（ADR-014）', () => {
+    const dir = tmpDir();
+    const sessionsDir = SessionStore.dirFor(dir);
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(path.join(sessionsDir, 's-a.jsonl'), '', 'utf8');
+    writeFileSync(path.join(sessionsDir, 's-a.runs.jsonl'), '', 'utf8');
+    expect(new SessionStore().scanIds(dir)).toEqual(['s-a']);
+  });
+
   it('makeSessionId：同一时钟连续生成也不冲突（随机后缀）', () => {
     const t = new Date('2026-10-06T08:00:00Z');
     const ids = new Set(Array.from({ length: 50 }, () => makeSessionId(t)));

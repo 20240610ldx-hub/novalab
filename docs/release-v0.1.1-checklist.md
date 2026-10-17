@@ -494,6 +494,39 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
 | F7 追加 | 设置面板每个 provider 可填「最大输出 tokens」（256–262144，留空 = 自动，占位显示自动值）；`providers.set/list` 可选 `maxOutputTokens`，store/router 双重校验、null 清除、坏值读回丢弃。先红：bridge 3 项、app 3 项 |
 
+### 2026-10-17 界面打磨第一批：会话记录完整性与窄窗口（Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 失败计数 | `run.error` 携带 `execCount`（内核 / fake kernel / bridge 缓存 / 前端 reducer），失败 cell 不再显示 `[0]`、不再从实时会话视图消失。先红：Python 1、bridge 1、app 1 |
+| traceback | 剥掉开头的内核调度帧（`runtime.py _run_cell`），frames 从用户 cell 开始。先红：Python 1 |
+| 视觉 | 会话视图出错行整行红底；英文单复数插值 `{n|cell|cells}`（先红 1）；~800px 窗口编辑区保底 320px、两侧栏按比例收缩、状态栏单行截断 |
+| 边界 | Windows-only；真实 Chromium 人工核对（800 / 1440 宽），未做像素回归 |
+| Linux 首测 | WSL Ubuntu 24.04 干净 clone + 清空 uv 缓存：16 项门全过（含真实内核验收、packaged acceptance 12/12）。修复影子看门狗在无 `os.pidfd_open` 的 CPython 3.14.5 上不退出（先红：no-pidfd 用例在 3.12 / 3.14 均失败）；packaged 验收前预热首启 Python。未测 Linux Chromium smoke / AppImage |
+
+### 2026-10-17 第二波第一包：追加式运行日志（ADR-014，Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 记录 | 每次执行一行 `.runs.jsonl`：尝试序号、触发者 / 方式、级联根、代码 SHA-256（会话内去重）、成败、错误类名 + 行号、输出字节数 / MIME / 写入路径；不存输出正文与 evalue |
+| 预算 | 1 万条 / 200 万代码字符，超出只记哈希 |
+| 读取 / 导出 | rpc `session.runs`；`.ipynb` cell `metadata.novalab.runs` 最近 50 次（无代码） |
+| 界面 | 会话记录 cell 头「N 次运行」→ 尝试列表 + 相邻差异；中英文 |
+| 测试 | run-log 单元 7、router 7、真实内核验收 1（先红：级联根顺序）、app 4 |
+| Agent 读取 | Owner 裁决 O2 = 开放：`get_run_history`（成败 / 错误类名 + 行号 / 触发 / 耗时 / 变化行 ≤2000 字符），过 router + M5 白名单；测试：视图单元 3、router 经工具 + 闸 1（断言 evalue 不出进程）、pi↔zod 参数一致性样例 6 |
+| 边界 | Windows-only；历史快照不存图（Owner 裁决） |
+
+### 2026-10-17 第二波第二包：结果溯源 SHA-256（ADR-015，Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 内核 | `run.notify file-read`（过滤解释器 / 库 / 源码 / 字体 / 系统目录，≤50）；写完即删的临时写入不再报告。先红：Python 5（读 4 + 临时写 1） |
+| 记录 | `.novalab/provenance.jsonl`：每次读写过文件的运行一行，输入 / 输出 SHA-256 + 字节数，>1 GiB 只记大小，先读后写标 inPlace；以 runId 关联运行日志 |
+| 查询 / 界面 | `provenance.lookup` 现场比对文件与输入现状；「wrote …」行展开显示写出者、短哈希、现状与输入 |
+| 导出 | cell `metadata.novalab.provenance`；目录外路径只留文件名 |
+| 测试 | 模块单元 5、router 3、真实内核验收 1（pandas + matplotlib 只记数据文件）、app 2 |
+| 边界 | Windows-only；网络 / 数据库输入不可见；哈希上限暂为常量 |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。

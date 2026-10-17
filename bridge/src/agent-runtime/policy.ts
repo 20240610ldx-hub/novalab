@@ -23,6 +23,7 @@ export const TOOL_ROUTER_METHODS: Record<AgentToolName, string> = {
   get_cell_code: 'agent.cellCode',
   shadow_run: 'shadow.run',
   verify: 'shadow.verify',
+  get_run_history: 'agent.runHistory',
 };
 
 /** 工具转发之外允许的辅助方法：Stop / abortSignal 取消影子运行（只终止影子进程，不碰用户状态）。 */

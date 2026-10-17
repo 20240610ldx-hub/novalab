@@ -29,7 +29,10 @@ import {
 import { useNotebook } from '../../store/notebook';
 import { isOutputEmpty, lastCellFrameLine, type Cell } from '../../kernel/types';
 import { useI18n } from '../../i18n';
+import { bridge } from '../../bridge/client';
 import { CopyButton, tokenizeLines } from '../CellEditor';
+import { RunHistory } from './RunHistory';
+import { historyByCell, normalizeRunsWire, type RunRecordWire } from './runLog';
 import { ErrPanel, OutPanel, OutputRenderer, WriteNotifications } from '../OutputRenderer';
 import {
   errorLineFromTraceback,
@@ -48,7 +51,8 @@ function ReadOnlyCode({ code, errorLine }: { code: string; errorLine: number | n
   const lines = useMemo(() => tokenizeLines(code), [code]);
   return (
     <div className="nl-scroll-thin overflow-x-auto rounded-md bg-[var(--bg)] py-2 text-[12.5px] leading-[1.7]">
-      <table className="border-collapse">
+      {/* min-w-full：出错行红底铺满面板宽度（短行时不只覆盖文字） */}
+      <table className="min-w-full border-collapse">
         <tbody>
           {lines.map((toks, i) => (
             <tr key={i} className={errorLine === i + 1 ? 'nl-err-line' : ''}>
@@ -76,7 +80,10 @@ function CellRow({
   index,
   output,
   writes,
+  history,
 }: {
+  /** ADR-014：该 cell 在本会话的尝试历史（无记录 / 旧 bridge → 不显示）。 */
+  history?: readonly RunRecordWire[];
   badge: string;
   code: string;
   errorLine: number | null;
@@ -87,6 +94,7 @@ function CellRow({
   writes: string[];
 }) {
   const [open, setOpen] = useState(hasError);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const { t } = useI18n();
   return (
     <article className="border-b border-[var(--border)] px-6 py-4" data-testid="session-cell">
@@ -100,6 +108,20 @@ function CellRow({
             {errorLine !== null ? `error (line ${errorLine})` : 'error'}
           </span>
         )}
+        {history && history.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(!historyOpen)}
+            aria-expanded={historyOpen}
+            title={t('sessionModal.runsTitle')}
+            data-testid="run-history-toggle"
+            className={`rounded-md px-2 py-0.5 hover:bg-[var(--panel-2)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent-run)] ${
+              history.length > 1 ? 'bg-[var(--chip-bg)] text-[var(--chip-text)]' : 'text-[var(--muted)]'
+            }`}
+          >
+            {t('sessionModal.runs', { n: history.length })}
+          </button>
+        )}
         <span className="ml-auto text-[var(--muted)]">python</span>
       </div>
 
@@ -109,6 +131,7 @@ function CellRow({
           <CopyButton getText={() => code} label={`copy cell ${index + 1} code`} />
         </div>
       </div>
+      {historyOpen && history && <RunHistory runs={history} />}
 
       {output !== null && (
         <>
@@ -136,7 +159,7 @@ function CellRow({
 }
 
 /** 快照 cell（历史会话：文本形态）。 */
-function SnapshotRow({ cell, index }: { cell: SessionSnapshotCell; index: number }) {
+function SnapshotRow({ cell, index, history }: { cell: SessionSnapshotCell; index: number; history?: readonly RunRecordWire[] }) {
   const { t } = useI18n();
   const o = cell.output;
   const errorLine = o?.traceback ? errorLineFromTraceback(o.traceback) : null;
@@ -173,12 +196,13 @@ function SnapshotRow({ cell, index }: { cell: SessionSnapshotCell; index: number
       index={index}
       output={body}
       writes={o?.writes ?? []}
+      history={history}
     />
   );
 }
 
 /** live cell（当前会话：notebook store 富输出，图像/表格内联）。 */
-function LiveRow({ cell, index }: { cell: Cell; index: number }) {
+function LiveRow({ cell, index, history }: { cell: Cell; index: number; history?: readonly RunRecordWire[] }) {
   const o = cell.output;
   const tb = o?.traceback ?? null;
   const rich = o && !isOutputEmpty({ ...o, writes: [] }) ? <OutputRenderer output={{ ...o, writes: [] }} /> : null;
@@ -191,6 +215,7 @@ function LiveRow({ cell, index }: { cell: Cell; index: number }) {
       index={index}
       output={rich}
       writes={o?.writes ?? []}
+      history={history}
     />
   );
 }
@@ -218,7 +243,11 @@ function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defau
   const loadSnapshot = useSession((s) => s.loadSnapshot);
   const liveCells = useNotebook((s) => s.cells);
   const executed = useMemo(
-    () => liveCells.filter((c) => c.kind === 'code' && c.execCount !== null && c.execCount > 0),
+    // 失败的运行同样属于会话记录（旧内核 run.error 不带 execCount → 以 traceback 兜底）
+    () =>
+      liveCells.filter(
+        (c) => c.kind === 'code' && ((c.execCount !== null && c.execCount > 0) || c.output?.traceback != null),
+      ),
     [liveCells],
   );
 
@@ -226,6 +255,25 @@ function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defau
     // O-2：按会话所属 notebook 查询，而非当前 notebook（列表可能来自另一个文件）
     if (expanded && !isLive) void loadSnapshot(seg.sessionId, seg.notebookPath);
   }, [expanded, isLive, loadSnapshot, seg.sessionId, seg.notebookPath]);
+
+  // ADR-014：展开时拉运行历史；live 会话随执行计数变化刷新（旧 bridge 无 session.runs → 不显示）
+  const [runs, setRuns] = useState<Map<string, RunRecordWire[]>>(() => new Map());
+  const liveSig = isLive ? executed.map((c) => `${c.id}:${c.execCount}`).join(',') : '';
+  useEffect(() => {
+    if (!expanded) return;
+    let cancelled = false;
+    bridge
+      .rpc<unknown>('session.runs', { notebookPath: seg.notebookPath, sessionId: seg.sessionId })
+      .then((res) => {
+        if (!cancelled) setRuns(historyByCell(normalizeRunsWire(res)));
+      })
+      .catch(() => {
+        if (!cancelled) setRuns(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, seg.sessionId, seg.notebookPath, liveSig]);
 
   const banner = !isLive && snapshot ? truncationBanner(total) : null;
   const count = isLive ? executed.length : (snapshot?.length ?? seg.cellCount);
@@ -261,8 +309,8 @@ function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defau
           )}
           {!isLive && loading && <p className="px-6 py-3 text-[12px] text-[var(--muted)]">{t('sessionModal.loadingSnapshot')}</p>}
           {isLive
-            ? executed.map((c, i) => <LiveRow key={c.id} cell={c} index={i} />)
-            : !loading && snapshot?.map((c, i) => <SnapshotRow key={c.id} cell={c} index={i} />)}
+            ? executed.map((c, i) => <LiveRow key={c.id} cell={c} index={i} history={runs.get(c.id)} />)
+            : !loading && snapshot?.map((c, i) => <SnapshotRow key={c.id} cell={c} index={i} history={runs.get(c.id)} />)}
           {((isLive && executed.length === 0) || (!isLive && !loading && snapshot && snapshot.length === 0)) && (
             <p className="border-b border-[var(--border)] px-6 py-3 text-[12px] text-[var(--muted)]">
               {t('sessionModal.noSnapshotCells')}

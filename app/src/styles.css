@@ -31,6 +31,11 @@
   --chrome: #0f0f11;
   --side: #121214;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* 滚动条：半透明前景叠在任意底色上（侧栏 / 编辑区 / 面板都协调），轨道透明 */
+  --scroll-thumb: rgba(255, 255, 255, 0.16);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.28);
+  --scroll-thumb-active: rgba(255, 255, 255, 0.36);
+  color-scheme: dark; /* 原生控件（滚动条兜底、表单、日期选择）跟随暗色 */
 }
 
 /* A-4：浅色主题 token 集（Owner 参考图取色） */
@@ -60,6 +65,10 @@
   --active-line: rgba(0, 0, 0, 0.03);
   --chrome: #ececec;
   --side: #f4f4f4;
+  --scroll-thumb: rgba(0, 0, 0, 0.16);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.28);
+  --scroll-thumb-active: rgba(0, 0, 0, 0.36);
+  color-scheme: light;
 }
 
 html,
@@ -145,24 +154,47 @@ body {
   text-align: left;
 }
 
-/* 细滚动条（#22）：webkit + firefox 双轨 */
-.nl-scroll-thin {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+/* 滚动条（全局）：Chromium 默认 15px 实心浅色条在暗色下很突兀。
+ * 轨道 10px（原生 15px 的 2/3）、透明；滑块圆角，用透明边框内缩到 6px，悬停 / 拖动加深。
+ * 只用 ::-webkit-scrollbar（WebView2 / WebKitGTK / Chromium 都认）：Chromium 121+ 一旦设置了
+ * 标准 scrollbar-width / scrollbar-color 就会忽略 webkit 伪元素，宽度无法精确控制，
+ * 所以标准属性只给不支持 webkit 伪元素的引擎（Firefox）。 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
-.nl-scroll-thin::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-.nl-scroll-thin::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
-.nl-scroll-thin::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
+::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  min-height: 24px;
 }
-.nl-scroll-thin::-webkit-scrollbar-thumb:hover {
-  background: var(--accent-stale);
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scroll-thumb-active);
+}
+
+/* 细滚动条（#22，输出 / 会话记录等内嵌区域）：轨道 6px（原 8px 的约 2/3），滑块内缩到 4px */
+.nl-scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.nl-scroll-thin::-webkit-scrollbar-thumb {
+  border-width: 1px;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
 }
 
 /* SessionModal 只读代码卡的出错行高亮（#24 / A-4 #4，与 CM6 装饰同源变量） */

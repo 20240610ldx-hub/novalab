@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useLayout, type Activity } from '../../store/layout';
+import { panelFlexStyle, SIDE_SHRINK_FLOOR, useLayout, type Activity } from '../../store/layout';
 import { useNotebook } from '../../store/notebook';
 import { sessionName, useSession } from '../../store/session';
 import { useI18n, type I18nKey } from '../../i18n';
@@ -26,8 +26,8 @@ export function SidePanel({ width }: { width: number }) {
     <aside
       data-testid="side-panel"
       aria-label={t(TITLES[activity])}
-      style={{ width }}
-      className="flex shrink-0 flex-col bg-[var(--side)]"
+      style={panelFlexStyle(width, SIDE_SHRINK_FLOOR)}
+      className="flex flex-col bg-[var(--side)]"
     >
       <div className="flex h-8 shrink-0 items-center px-4 text-[11px] tracking-wider text-[var(--muted)] uppercase">
         {t(TITLES[activity])}

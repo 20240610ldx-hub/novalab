@@ -168,7 +168,51 @@ Agent 安全小包后列出的「第二包」，均为不改产品边界的修�
 
 未做：bridge 重连后的「全部重开」按钮——与第七轮（草稿恢复）和冷启动重连修复改同一批前端恢复代码，等它们合入后再做，避免冲突。
 
-## 14. 决策停点
+## 14. 界面打磨第一批：会话记录完整性与窄窗口（Windows-only，2026-10-17）
+
+对照 Owner 放在 `docs/images/` 的 Session notebook 参考图（失败 cell 显示 `[47] error (line 11)`、出错行整行红底），在真实浏览器里逐项核对后修了以下几处。
+
+- **失败的运行也计数**：内核在执行前就累加 `exec_counts`，但只有 `run.done` 携带计数，失败路径的 `run.error` 不带。结果是失败 cell 在编辑区显示 `[0]`，实时会话视图按 `execCount > 0` 过滤直接漏掉失败 cell，bridge 缓存也不更新。现在 `run.error` 带 `execCount`（协议增量字段，旧内核缺省时前端/bridge 保持原值；会话视图另以 traceback 兜底）。这对之后的「Agent 运行复盘」是前置条件：失败本身就是复盘最需要的记录。
+- **traceback 去掉内核调度帧**：此前每条 traceback 开头都带 `novakernel/runtime.py … _run_cell exec(...)`，对用户与 Agent 都是噪音，还暴露安装路径（也占 Agent 上下文）。现在剥掉开头属于内核模块的帧；全是内核帧（内核自身出错）时保持原样以便排查。
+- **出错行红底铺满**：会话视图只读代码面板的出错行此前只覆盖文字宽度，现与参考图一致整行铺满。
+- **英文单复数**：i18n 插值新增 `{var|单数|复数}`，"1 sessions / 1 cells / 0 schemas · 0 traceback" 改为正确单复数（中文词条不受影响）。
+- **窄窗口不再挤没编辑区**：~800px 宽时侧栏 + Agent 栏把编辑区压到 0 宽、内核状态栏逐词折行。现在两侧栏以用户宽度为首选、按比例收缩到地板（160 / 240），编辑区至少 320px；状态栏左侧说明单行截断（悬停看全文）。
+
+边界：仅 Windows、Chromium + Vite dev；未改 CM6 编辑器本体与 AppView。
+
+**Linux 首测（WSL Ubuntu 24.04，与 Windows 同版 Node 24.19 / pnpm 10.33 / uv 0.11.15，干净 clone + 清空 uv 缓存模拟新机器）**：
+
+- **影子看门狗缺陷（已修）**：uv 托管的 CPython 3.14.5（packaged 首启 `uv python install` 装的就是它）没有 `os.pidfd_open`，看门狗退回"直接父进程变化"判断，而 bridge 不一定是直接父进程 → bridge 死后卡在死循环里的影子进程不退出。Linux 无 pidfd 时改持 `/proc/<pid>/stat` fd（绑定进程实例，进程消失后读取报 ESRCH）。新增 no-pidfd 参数化用例，CI 的 3.12 上也能复现（先红）。
+- **packaged 验收首启超时（测试设计，已修）**：干净机器首启要下载解释器与依赖（~60 s），产品预算 300 s，但验收单用例 60 s，超时用例的后台操作再污染下一个用例的成功计数。改为用例前按产品同款命令预热并留痕。
+- 结果：install / uv sync / 双端 tsc / 构建 / bridge 345 / app 399 / Python 302（3.12 与 3.14）/ 脚本 / 真实内核验收 / 集成 smoke + acceptance / build-bridge / sync-py / packaged smoke / packaged acceptance 12/12 全部通过。未测：Linux 下真实 Chromium smoke、Tauri WebView / AppImage。
+
+## 15. 第二波第一包：追加式运行日志（ADR-014，Windows-only，2026-10-17）
+
+Owner 裁决"先做追加式运行日志"。目标是回答复盘时最常见的三个问题：这个 cell 这一会话里跑了几次、每次成没成（错在哪一行）、两次之间代码改了什么——而不保存任何输出内容。
+
+- **记录**：每次执行一行，追加到 `.novalab/sessions/<sessionId>.runs.jsonl`。字段：时间、耗时、cellId、第几次尝试、谁触发（user / agent）、怎么触发（direct / cascade / accept / repl）、级联根、代码 SHA-256、成败、错误类名与 cell 内行号、输出字节数与 MIME 类型、写入文件路径。**不存** stdout / stderr / evalue / 富输出 / 变量值。
+- **代码正文**：会话内按哈希去重，只在首次出现时内联；会话预算 1 万条记录 / 200 万字符，超出后只记哈希（`codeOmitted`）。
+- **真实内核顺序**：novakernel 的级联根 `run.done` 在下游完成之后才发出，因此耗时取 `run.done` 自带值，读取按 runId 序号排序（真实内核验收先红）。
+- **读取**：rpc `session.runs`（校验 sessionId 属于该 notebook）；`.ipynb` 导出在每个 cell 的 `metadata.novalab.runs` 附最近 50 次尝试（无代码正文）。
+- **界面**：会话记录里每个 cell 头部显示「N 次运行」，展开后列出每次尝试（#、ok / 错误类名 + 行号、触发方式、Agent 标记、耗时、时刻），选中一次显示相对上一次的逐行差异；同代码重跑显示"代码与上一次相同"。
+- **Agent 读取**（Owner 裁决 O2 = 开放）：新工具 `get_run_history {cellId, limit?}` 返回当前会话该 cell 最近 ≤20 次尝试的成败、错误类名与行号、触发方式、耗时和相对上一次的变化行（每次 ≤2000 字符）；不含输出、evalue、哈希。过 router 与 M5 白名单两道闸，pi 受限宿主放行该只读方法。
+- **历史快照存图**：Owner 裁决不存。
+
+边界：仅 Windows、Chromium + Vite dev 人工核对（演示 notebook 失败→修改→重跑，中英文各一次）；未测 Linux。
+
+## 16. 第二波第二包：结果溯源 SHA-256（ADR-015，Windows-only，2026-10-17）
+
+Owner 裁决"做来源追溯（SHA-256）"。回答交付时最常被问的三件事：这个文件是哪段代码、哪次运行写出的；用的输入还是现在这份吗；之后有没有被手改过。
+
+- **内核**：审计钩子在写入之外也报告只读打开的数据文件（`run.notify file-read`），过滤解释器 / 库 / 源码 / 字体 / 系统目录；写完即删的临时文件不再报告为写入（修掉了 `tempfile` 可写探测在输出区留下的一行噪音）。
+- **bridge**：每次运行结束，对读写过的文件流式算 SHA-256（>1 GiB 只记大小），追加到 notebook 目录的 `.novalab/provenance.jsonl`，以 `sessionId + runId` 关联运行日志，跨会话保留。同一次运行先读后写的文件记为输出并标 `inPlace`。
+- **查询**：rpc `provenance.lookup {path}` → 最近一次写它的运行，并现场重算文件与各输入现在是否仍与记录一致（未改动 / 写出后被改过 / 已不存在 / 未算指纹）。
+- **界面**：输出区与会话记录里的「wrote …」行可展开：写出者 cell 与时刻、短哈希与大小、现状，以及当时各输入的短哈希与现状。
+- **导出**：`.ipynb` cell `metadata.novalab.provenance` 附本会话最近一次的输入 / 输出指纹；notebook 目录内写相对路径，目录外只写 `<external>/文件名`。
+
+边界：仅 Windows、Chromium + Vite dev 人工核对（gallery-write 演示：写出 → 未改动 → 外部追加一行 → 写出后被改过；临时探测文件不再出现）；网络 / 数据库输入看不到；哈希上限暂为常量（交付附录包里一并做成设置项）。
+
+## 17. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

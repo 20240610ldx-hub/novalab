@@ -100,6 +100,8 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
   failCell?: { cellId: string; traceback: string };
   /** 脚本化写事件（P2.9）：exec 该 cell 时对每个 path 发 run.notify file-write。 */
   notifyWrites?: { cellId: string; paths: string[] };
+  /** 脚本化读事件（ADR-015）：exec 该 cell 时对每个 path 发 run.notify file-read。 */
+  notifyReads?: { cellId: string; paths: string[] };
   /** 脚本化编译错：下一次 set_cells / validate_cells 返回 compileError。 */
   nextCompileError?: { message: string; cellIds: string[] };
   /** 像真内核一样检查单赋值（同名多处定义 → compileError）；默认关，保持既有单测语义。 */
@@ -269,7 +271,9 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
 
     if (fail) {
       const traceback = this.failCell!.traceback;
-      this.notify('run.error', { cellId, traceback, frames: [] });
+      const cell = isRepl ? undefined : this.cells.find((c) => c.id === cellId);
+      if (cell) cell.execCount++; // 与 runtime.py 一致：失败的运行也计数，随 run.error 下发
+      this.notify('run.error', { cellId, traceback, frames: [], ...(cell ? { execCount: cell.execCount } : {}) });
       return { cellId, ok: false, cascaded: [], durationMs: Date.now() - t0, traceback };
     }
 
@@ -285,6 +289,9 @@ export class FakeKernel extends EventEmitter implements KernelTransport {
       cellId,
       text: isRepl ? `repl: ${replCode ?? ''}\n` : `fake output for ${cellId}\n`,
     });
+    if (this.notifyReads && this.notifyReads.cellId === cellId) {
+      for (const p of this.notifyReads.paths) this.notify('run.notify', { cellId, kind: 'file-read', path: p });
+    }
     if (this.notifyWrites && this.notifyWrites.cellId === cellId) {
       for (const p of this.notifyWrites.paths) {
         this.notify('run.notify', { cellId, kind: 'file-write', path: p });
