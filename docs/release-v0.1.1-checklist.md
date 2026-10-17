@@ -502,6 +502,7 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | traceback | 剥掉开头的内核调度帧（`runtime.py _run_cell`），frames 从用户 cell 开始。先红：Python 1 |
 | 视觉 | 会话视图出错行整行红底；英文单复数插值 `{n|cell|cells}`（先红 1）；~800px 窗口编辑区保底 320px、两侧栏按比例收缩、状态栏单行截断 |
 | 边界 | Windows-only；真实 Chromium 人工核对（800 / 1440 宽），未做像素回归 |
+| Linux 首测 | WSL Ubuntu 24.04 干净 clone + 清空 uv 缓存：16 项门全过（含真实内核验收、packaged acceptance 12/12）。修复影子看门狗在无 `os.pidfd_open` 的 CPython 3.14.5 上不退出（先红：no-pidfd 用例在 3.12 / 3.14 均失败）；packaged 验收前预热首启 Python。未测 Linux Chromium smoke / AppImage |
 
 ### 当前放行结论
 

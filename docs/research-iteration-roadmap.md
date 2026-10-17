@@ -180,6 +180,12 @@ Agent 安全小包后列出的「第二包」，均为不改产品边界的修�
 
 边界：仅 Windows、Chromium + Vite dev；未改 CM6 编辑器本体与 AppView。
 
+**Linux 首测（WSL Ubuntu 24.04，与 Windows 同版 Node 24.19 / pnpm 10.33 / uv 0.11.15，干净 clone + 清空 uv 缓存模拟新机器）**：
+
+- **影子看门狗缺陷（已修）**：uv 托管的 CPython 3.14.5（packaged 首启 `uv python install` 装的就是它）没有 `os.pidfd_open`，看门狗退回"直接父进程变化"判断，而 bridge 不一定是直接父进程 → bridge 死后卡在死循环里的影子进程不退出。Linux 无 pidfd 时改持 `/proc/<pid>/stat` fd（绑定进程实例，进程消失后读取报 ESRCH）。新增 no-pidfd 参数化用例，CI 的 3.12 上也能复现（先红）。
+- **packaged 验收首启超时（测试设计，已修）**：干净机器首启要下载解释器与依赖（~60 s），产品预算 300 s，但验收单用例 60 s，超时用例的后台操作再污染下一个用例的成功计数。改为用例前按产品同款命令预热并留痕。
+- 结果：install / uv sync / 双端 tsc / 构建 / bridge 345 / app 399 / Python 302（3.12 与 3.14）/ 脚本 / 真实内核验收 / 集成 smoke + acceptance / build-bridge / sync-py / packaged smoke / packaged acceptance 12/12 全部通过。未测：Linux 下真实 Chromium smoke、Tauri WebView / AppImage。
+
 ## 15. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
