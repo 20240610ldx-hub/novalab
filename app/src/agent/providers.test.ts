@@ -102,9 +102,10 @@ function installMockStorage(): Map<string, string> {
 }
 
 /** bridgeReady 是模块级状态：每个用例重取模块（vi.resetModules + 动态 import）。 */
-async function freshProviders(): Promise<typeof import('./providers')> {
+/** 配置/存储（providers.ts）与模型构造（models.ts，F7 拆分以便懒加载）合并成一个视图。 */
+async function freshProviders(): Promise<typeof import('./providers') & typeof import('./models')> {
   vi.resetModules();
-  return import('./providers');
+  return { ...(await import('./providers')), ...(await import('./models')) };
 }
 
 function makeConfig(over: Partial<ProviderConfig> = {}): ProviderConfig {
@@ -310,7 +311,8 @@ describe('保留行为（P2.1 契约不变）', () => {
     const o = mod.createLanguageModel(
       makeConfig({ id: 'p2', kind: 'openai-compat', baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen3' }),
     ) as unknown as { specificationVersion: string; provider: string; modelId: string };
-    expect(o.specificationVersion).toBe('v3');
+    // F7：外层是 defaultSettingsMiddleware 包装（v4），provider / modelId 透传
+    expect(o.specificationVersion).toBe('v4');
     expect(o.provider).toBe('openai-compat');
     expect(o.modelId).toBe('qwen3');
   });
@@ -331,6 +333,41 @@ describe('保留行为（P2.1 契约不变）', () => {
       expect(res.content[0]?.text).toBe('pong');
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[1]).toEqual(fetchMock.mock.calls[0]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('F7：未知模型显式带输出预算（anthropic-compat 不再回落 4096、openai-compat 不再交给服务端默认）；已知 Claude 模型沿用 SDK 上限', async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response('{}', { status: 500 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prompt = [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }];
+    const call = async (config: ProviderConfig) => {
+      const mod = await freshProviders();
+      const model = mod.createLanguageModel(config) as unknown as { doGenerate: (o: unknown) => Promise<unknown> };
+      // 500 → 重试层重放；这里只看首个请求体，用 abort 截断重试等待
+      const ac = new AbortController();
+      const p = model.doGenerate({ prompt, abortSignal: ac.signal }).catch(() => undefined);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      ac.abort();
+      await p;
+      fetchMock.mockClear();
+      return bodies.at(-1)!;
+    };
+    try {
+      const mod = await freshProviders();
+      expect((await call(makeConfig())).max_tokens).toBe(mod.UNKNOWN_MODEL_MAX_OUTPUT_TOKENS);
+      expect(
+        (await call(makeConfig({ id: 'p2', kind: 'openai-compat', baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen3' }))).max_tokens,
+      ).toBe(mod.UNKNOWN_MODEL_MAX_OUTPUT_TOKENS);
+      const claude = await call(makeConfig({ model: 'claude-sonnet-4-5' }));
+      expect(claude.max_tokens).toBeGreaterThan(mod.UNKNOWN_MODEL_MAX_OUTPUT_TOKENS);
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
