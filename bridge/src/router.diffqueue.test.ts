@@ -6,6 +6,8 @@ import { KernelSupervisor } from './supervisor';
 import { RpcRouter } from './router';
 import { FakeKernel } from './testing/fake-kernel';
 import type { DiffUpdatedParams, RpcResponse } from './protocol';
+/** ADR-013：未经影子运行的改动照常入队，只标注 unverified（软约束）。 */
+const UNVERIFIED = { status: 'unverified', level: 'V1', missing: ['shadow_run'] };
 
 /**
  * F2（ADR-012 G-1 真实复现）：「把定义搬到新 cell」需要两条 diff（update 原 cell 去掉定义 +
@@ -69,15 +71,15 @@ describe('diff 队列 · 叠加待审 diff 预检（F2）', () => {
   it('没有待审 diff 时仍只验证一次（保持既有行为）', async () => {
     await setup();
     const res = await call('diff.stage', { targetCellId: 'b', action: 'update', newCode: 'z = y * 3' });
-    expect(res.result).toEqual({ diffId: 'diff-1' });
+    expect(res.result).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
     expect(fake.countOf('validate_cells')).toBe(1);
   });
 
   it('搬移定义（先 update 原 cell、再 insert 新 cell）：第二条入队并记录 dependsOn', async () => {
     await setup();
-    expect((await call('diff.stage', { targetCellId: 'a', action: 'update', newCode: 'y = helper(1)' })).result).toEqual({ diffId: 'diff-1' });
+    expect((await call('diff.stage', { targetCellId: 'a', action: 'update', newCode: 'y = helper(1)' })).result).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
     const inserted = await call('diff.stage', { targetCellId: 'a', action: 'insert_below', newCode: HELPER });
-    expect(inserted.result).toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'] });
+    expect(inserted.result).toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'], verification: UNVERIFIED });
     expect(lastDiffs().find((d) => d.diffId === 'diff-2')?.dependsOn).toEqual(['diff-1']);
     // 叠加候选里原 cell 已是 diff-1 的新代码，新 cell 带 helper 定义
     const stacked = validateCandidates().at(-1)!;
@@ -130,8 +132,8 @@ describe('diff 队列 · 叠加待审 diff 预检（F2）', () => {
       call('diff.stage', { targetCellId: 'a', action: 'update', newCode: 'y = helper(1)' }),
       call('diff.stage', { targetCellId: 'a', action: 'insert_below', newCode: HELPER }),
     ]);
-    expect(first.result).toEqual({ diffId: 'diff-1' });
-    expect(second.result).toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'] });
+    expect(first.result).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
+    expect(second.result).toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'], verification: UNVERIFIED });
   });
 
   it('单独通过、叠加待审 diff 后冲突 → 拒绝并指出冲突的待审 diff', async () => {

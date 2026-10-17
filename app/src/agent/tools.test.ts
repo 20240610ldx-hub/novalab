@@ -38,9 +38,9 @@ beforeEach(() => {
 });
 
 describe('agentTools（单一来源重建）', () => {
-  it('工具名与 bridge AGENT_TOOL_NAMES 完全一致（spec §7 六工具）', () => {
+  it('工具名与 bridge AGENT_TOOL_NAMES 完全一致（spec §7 六工具 + ADR-013 shadow_run / verify）', () => {
     expect(Object.keys(agentTools).sort()).toEqual([...AGENT_TOOL_NAMES].sort());
-    expect(Object.keys(agentTools)).toHaveLength(6);
+    expect(Object.keys(agentTools)).toHaveLength(8);
   });
 
   it('每个工具带 description 与 inputSchema（来自单一来源 meta/schema）', () => {

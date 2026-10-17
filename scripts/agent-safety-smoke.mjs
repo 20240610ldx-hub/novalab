@@ -13,6 +13,8 @@ import { withSmokeBridge } from './smoke-runtime.mjs';
 const appURL = process.argv[2] ?? 'http://127.0.0.1:5299/';
 const appOrigin = new URL(appURL).origin;
 const HELPER = 'def helper(v):\n    return v + 1';
+/** ADR-013：未经影子运行的改动照常入队，只标注 unverified（软约束）。 */
+const UNVERIFIED = { status: 'unverified', level: 'V1', missing: ['shadow_run'] };
 const fixture = `# %% [cell-id: aaaaaaaa]\n${HELPER}\n\ny = helper(1)\nprint("RAN", y)\n\n# %% [cell-id: bbbbbbbb]\nz = y * 2\n`;
 const browser = await chromium.launch({ headless: true });
 const errors = [];
@@ -69,8 +71,8 @@ try {
     await page.waitForFunction((n) => (window.__safety.nb.getState().cells.find((c) => c.id === 'aaaaaaaa')?.execCount ?? 0) > (n ?? 0), before);
 
     // ---- 2. F2: move helper into its own cell via two queued diffs ----
-    assert.deepEqual(await agent.rpc('diff.stage', { targetCellId: 'aaaaaaaa', action: 'update', newCode: 'y = helper(1)\nprint("RAN", y)' }), { diffId: 'diff-1' });
-    assert.deepEqual(await agent.rpc('diff.stage', { targetCellId: 'aaaaaaaa', action: 'insert_below', newCode: HELPER }), { diffId: 'diff-2', dependsOn: ['diff-1'] });
+    assert.deepEqual(await agent.rpc('diff.stage', { targetCellId: 'aaaaaaaa', action: 'update', newCode: 'y = helper(1)\nprint("RAN", y)' }), { diffId: 'diff-1', verification: UNVERIFIED });
+    assert.deepEqual(await agent.rpc('diff.stage', { targetCellId: 'aaaaaaaa', action: 'insert_below', newCode: HELPER }), { diffId: 'diff-2', dependsOn: ['diff-1'], verification: UNVERIFIED });
     const chip = page.getByTestId('diff-depends-on');
     await chip.waitFor({ state: 'visible' });
     assert.equal((await chip.textContent()).trim(), '依赖 diff-1');

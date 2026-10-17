@@ -186,12 +186,53 @@ describe('applyRunConfirmEvent（Agent 执行确认队列）', () => {
 
   it('request 入队（去重），resolved 出队；未知 kind / 缺 requestId 忽略', () => {
     let list = applyRunConfirmEvent([], 'agent.confirmRequest', req);
-    expect(list).toEqual([{ requestId: 'confirm-1', notebookId: 'nb', cellId: 'a', code: 'x = 1', cascade: true }]);
+    expect(list).toEqual([{ kind: 'execute_cell', requestId: 'confirm-1', notebookId: 'nb', cellId: 'a', code: 'x = 1', cascade: true }]);
     list = applyRunConfirmEvent(list, 'agent.confirmRequest', req);
     expect(list).toHaveLength(1);
     expect(applyRunConfirmEvent(list, 'agent.confirmRequest', { ...req, requestId: 'confirm-2', kind: 'other' })).toHaveLength(1);
     expect(applyRunConfirmEvent(list, 'agent.confirmRequest', { ...req, requestId: undefined })).toHaveLength(1);
     expect(applyRunConfirmEvent(list, 'agent.confirmResolved', { requestId: 'confirm-1', outcome: 'allowed' })).toEqual([]);
+  });
+
+  it('ADR-013 shadow_run：每轮首次确认入队，只取改动摘要与本地限制信息', () => {
+    const shadow = {
+      requestId: 'confirm-7',
+      kind: 'shadow_run',
+      notebookId: 'nb',
+      turnId: 't1',
+      summary: {
+        changes: [
+          { cellId: 'b', action: 'update', firstLine: 'y = x + 2' },
+          { cellId: 'b', action: 'insert_below', firstLine: 'z = y * 2', extra: 'dropped' },
+          { cellId: 3, action: 'update', firstLine: 'bad id' },
+        ],
+        memLimitBytes: 4 * 1024 ** 3,
+        runMs: 60_000,
+        runsLeft: 8,
+        rememberForTurn: true,
+      },
+      timeoutMs: 120_000,
+    };
+    const list = applyRunConfirmEvent([], 'agent.confirmRequest', shadow);
+    expect(list).toEqual([
+      {
+        kind: 'shadow_run',
+        requestId: 'confirm-7',
+        notebookId: 'nb',
+        turnId: 't1',
+        changes: [
+          { cellId: 'b', action: 'update', firstLine: 'y = x + 2' },
+          { cellId: 'b', action: 'insert_below', firstLine: 'z = y * 2' },
+        ],
+        memLimitBytes: 4 * 1024 ** 3,
+        runMs: 60_000,
+        runsLeft: 8,
+        rememberForTurn: true,
+      },
+    ]);
+    // 没有轮次（turnId null）→ 不承诺「本轮不再询问」
+    const noTurn = applyRunConfirmEvent([], 'agent.confirmRequest', { ...shadow, requestId: 'confirm-8', turnId: null, summary: { ...shadow.summary, rememberForTurn: false } });
+    expect(noTurn[0]).toMatchObject({ kind: 'shadow_run', turnId: null, rememberForTurn: false });
   });
 });
 
@@ -208,6 +249,21 @@ describe('normalizeDiffs（diff.updated status→state 映射）', () => {
     expect(diffs.map((d) => d.state)).toEqual(['accepted', 'rejected', 'proposed', 'proposed']);
     expect(diffs[1]!.action).toBe('insert_below');
     expect(diffs[0]!.origin).toBe('agent');
+  });
+
+  it('ADR-013 verification 透传（已知枚举才保留）；缺省不产生字段', () => {
+    const diffs = normalizeDiffs({
+      diffs: [
+        { diffId: 'diff-1', targetCellId: 'a', action: 'update', newCode: 'x', status: 'proposed', verification: { status: 'verified', level: 'V2', missing: [] } },
+        { diffId: 'diff-2', targetCellId: 'a', action: 'update', newCode: 'x', status: 'proposed', verification: { status: 'unverified', level: 'V3', missing: ['equivalent:df', 7] } },
+        { diffId: 'diff-3', targetCellId: 'a', action: 'update', newCode: 'x', status: 'proposed', verification: { status: 'weird', level: 'V2', missing: [] } },
+        { diffId: 'diff-4', targetCellId: 'a', action: 'update', newCode: 'x', status: 'proposed' },
+      ],
+    });
+    expect(diffs[0]!.verification).toEqual({ status: 'verified', level: 'V2', missing: [] });
+    expect(diffs[1]!.verification).toEqual({ status: 'unverified', level: 'V3', missing: ['equivalent:df'] });
+    expect('verification' in diffs[2]!).toBe(false);
+    expect('verification' in diffs[3]!).toBe(false);
   });
 
   it('dependsOn 透传（F2）；空数组/缺省不产生字段', () => {

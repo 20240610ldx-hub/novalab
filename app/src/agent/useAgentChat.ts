@@ -36,8 +36,21 @@ export interface AgentChatTransportOptions {
   /** Reactive Rulebook system prompt。 */
   instructions: string;
   tools: ToolSet;
-  /** 工具循环步数上限（默认 10）。 */
+  /** 工具循环步数上限（默认 DEFAULT_MAX_STEPS）。 */
   maxSteps?: number;
+  /**
+   * ADR-013 O1 = (b)：每次请求开始时通知 bridge 新的一轮（agent.turnBegin）。
+   * 影子运行每轮首次询问用户；失败（旧 bridge）不阻断请求——bridge 侧没有轮次时每次都问。
+   */
+  beginTurn?: (turnId: string) => Promise<unknown>;
+}
+
+/** ADR-013 O9：影子运行 + 核验 + 提议需要更多步（bridge 侧另有每轮运行次数 / 墙钟预算）。 */
+export const DEFAULT_MAX_STEPS = 24;
+
+let turnSeq = 0;
+function nextTurnId(): string {
+  return `turn-${Date.now().toString(36)}-${++turnSeq}`;
 }
 
 /** SDK 层不重试：网络波动由 provider fetch 层（retryFetch.ts）统一处理。 */
@@ -58,11 +71,18 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
     const opts = this.getOptions();
     const model = opts.getModel();
     if (!model) throw new Error(NO_PROVIDER_ERROR);
+    if (opts.beginTurn) {
+      try {
+        await opts.beginTurn(nextTurnId());
+      } catch (err) {
+        console.warn('agent.turnBegin failed; shadow runs will ask every time:', err);
+      }
+    }
     const result = streamText({
       model,
       instructions: opts.instructions,
       tools: opts.tools,
-      stopWhen: stepCountIs(opts.maxSteps ?? 10),
+      stopWhen: stepCountIs(opts.maxSteps ?? DEFAULT_MAX_STEPS),
       messages: await convertToModelMessages(messages),
       abortSignal,
       // 重试统一在 provider fetch 层（retryFetch.ts，最多 10 次）；SDK 自带的 2 次会与之相乘

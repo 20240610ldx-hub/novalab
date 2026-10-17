@@ -8,6 +8,8 @@ import { afterEach, expect, it } from 'vitest';
 import { RpcRouter } from './router';
 import { KernelSupervisor, StdioKernelTransport } from './supervisor';
 import type { RpcResponse } from './protocol';
+/** ADR-013：未经影子运行的改动照常入队，只标注 unverified（软约束）。 */
+const UNVERIFIED = { status: 'unverified', level: 'V1', missing: ['shadow_run'] };
 
 const pyDir = fileURLToPath(new URL('../../py/', import.meta.url));
 const python = path.join(pyDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
@@ -64,9 +66,9 @@ async function openNotebook(): Promise<(method: string, params?: unknown) => Pro
 it('real kernel: update-then-insert move is queued with dependsOn and lands only in order', async () => {
   const call = await openNotebook();
   expect((await call('diff.stage', { targetCellId: 'aaaaaaaa', action: 'update', newCode: 'y = helper(1)' })).result)
-    .toEqual({ diffId: 'diff-1' });
+    .toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
   expect((await call('diff.stage', { targetCellId: 'aaaaaaaa', action: 'insert_below', newCode: HELPER })).result)
-    .toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'] });
+    .toEqual({ diffId: 'diff-2', dependsOn: ['diff-1'], verification: UNVERIFIED });
 
   const early = await call('diff.accept', { diffId: 'diff-2' });
   expect(early.error?.message).toContain('accept diff-1 first');
@@ -97,7 +99,7 @@ it('real kernel: insert-first move is rejected with a hint naming the defining c
 it('real kernel: a diff that conflicts only with a pending diff is rejected with conflictsWith', async () => {
   const call = await openNotebook();
   expect((await call('diff.stage', { targetCellId: 'bbbbbbbb', action: 'update', newCode: 'z = y * 2\nw = 1' })).result)
-    .toEqual({ diffId: 'diff-1' });
+    .toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
   const res = (await call('diff.stage', {
     targetCellId: 'aaaaaaaa',
     action: 'update',

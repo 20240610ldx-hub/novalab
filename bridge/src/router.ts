@@ -52,6 +52,7 @@ import {
   type SessionOpenResult,
   type SessionSnapshotCell,
   type SetCellsResult,
+  type DiffVerification,
   type StagedDiff,
   type VarSchema,
 } from './protocol';
@@ -74,6 +75,18 @@ import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
 import { exportIpynb, IpynbError, type ExportCell } from './exporter';
 import { ImportError, importIpynb } from './importer';
+import type { CellSrc, ShadowRunner } from './shadow/manager';
+import { buildRunReport, CONTRACT_KINDS, contractResults, type ContractResult, type ShadowBudgetView, type ShadowRunReport } from './shadow/report';
+import {
+  applyEdits,
+  classify,
+  evaluate,
+  prefixRevisions,
+  revisionOf,
+  type RunRecord,
+  type ShadowEdit,
+  type VerificationRecord,
+} from './shadow/verification';
 
 /** .ipynb 导出用：单条 mime 数据存储上限（超大图弃数据仅留键，防内存膨胀）。 */
 const MIME_DATA_LIMIT = 2_000_000;
@@ -135,7 +148,7 @@ export interface AgentContext {
  * conflictsWith = 本条单独合法，但与这些待审 diff 同时采纳会编译失败。
  */
 export type StageResult =
-  | { diffId: string; dependsOn?: string[] }
+  | { diffId: string; dependsOn?: string[]; verification?: DiffVerification }
   | { rejected: true; reason: CompileError; hint?: string; conflictsWith?: string[] };
 
 /** diff.stage 静态编译预检用的临时 cell id（不进运行态或缓存）。 */
@@ -175,7 +188,21 @@ interface NotebookContext {
   needsPersist: boolean;
   /** 生命周期重启已入队/在途；阻止重复重启请求。 */
   restartInFlight: boolean;
+  /** ADR-013：影子运行与核验记录（核验绑定用；不出进程）。 */
+  shadow: ShadowLedger;
 }
+
+/** 每个 notebook 的影子运行账本：runId → 运行要点，verificationId → 契约结果，diffId → 核验绑定。 */
+interface ShadowLedger {
+  runs: Map<string, RunRecord>;
+  verifications: Map<string, VerificationRecord>;
+  /** 影子进程里保留着命名空间的那次运行（shadow.verify 只能针对它）。 */
+  latestRunId?: string;
+  diffBindings: Map<string, { level: DiffVerification['level']; verificationId?: string }>;
+}
+
+/** 账本条目上限（按插入序淘汰最旧；被淘汰的绑定退回 unverified）。 */
+const SHADOW_LEDGER_LIMIT = 64;
 
 export interface RouterDeps {
   /**
@@ -216,6 +243,60 @@ export interface RouterDeps {
   confirmers?: () => number;
   /** 等待用户确认的上限（默认 120s；单测缩短）。 */
   confirmTimeoutMs?: number;
+  /** ADR-013 影子执行器（main.ts 注入真实 ShadowManager；不传 = shadow.run 返回 unavailable）。 */
+  shadow?: ShadowRunner;
+  /** ADR-013 §5.3 bridge 预算（默认：每轮 8 次、单次 60s、每轮 5min、核验 30s）。 */
+  shadowBudget?: Partial<ShadowBudget>;
+}
+
+export interface ShadowBudget {
+  runsPerTurn: number;
+  runMs: number;
+  turnMs: number;
+  verifyMs: number;
+}
+
+const DEFAULT_SHADOW_BUDGET: ShadowBudget = { runsPerTurn: 8, runMs: 60_000, turnMs: 300_000, verifyMs: 30_000 };
+
+type ConfirmOutcome = 'allowed' | 'user-declined' | 'timeout';
+
+/** agent.turnBegin 划出的一轮（O1 = b：每轮首次影子运行问一次）。 */
+interface ShadowTurn {
+  /** null = 没有 turnBegin（漏接线）：每次都问，预算仍累计。 */
+  readonly turnId: string | null;
+  runsUsed: number;
+  msUsed: number;
+  /** notebookId → 本轮的确认结论（只记 allowed / declined；超时不记，下次再问）。 */
+  consent: Map<string, 'allowed' | 'declined'>;
+  /** notebookId → 在途确认（同轮并发的 shadow_run 共享同一次询问）。 */
+  pending: Map<string, { requestId: string; outcome: Promise<ConfirmOutcome> }>;
+}
+
+function newTurn(turnId: string | null): ShadowTurn {
+  return { turnId, runsUsed: 0, msUsed: 0, consent: new Map(), pending: new Map() };
+}
+
+/** shadow_run 被拒（每个都意味着「没有运行」）。 */
+export interface ShadowDenied {
+  denied: true;
+  reason: 'no-confirmer' | 'user-declined' | 'timeout' | 'focus-changed';
+  message: string;
+}
+
+const SHADOW_DENY_MESSAGES: Record<ShadowDenied['reason'], string> = {
+  'no-confirmer': 'No NovaLab window is open to approve shadow runs, so nothing was run.',
+  'user-declined':
+    'The user declined shadow runs for this turn, so nothing was run. Do not retry in this turn; propose the change without a shadow run or ask the user.',
+  timeout: 'The user did not answer the shadow-run confirmation in time, so nothing was run.',
+  'focus-changed': 'The user switched notebooks before approving, so nothing was run.',
+};
+
+/** shadow.verify 结果（只出状态与计数）。 */
+export interface ShadowVerifyResult {
+  runId: string;
+  verificationId?: string;
+  status: 'pass' | 'fail' | 'error' | 'not-retained' | 'timeout' | 'crashed' | 'cancelled' | 'unavailable';
+  contracts: ContractResult[];
 }
 
 /** agent.executeCell 被拒的原因（每个都意味着「没有执行」）。 */
@@ -261,8 +342,11 @@ export class RpcRouter {
   private readonly providers: ProvidersStore;
   private readonly watcher?: NotebookWatcher;
   /** 在途的 agent.executeCell 确认（requestId → 结算函数）；先到的回复结算并移除。 */
-  private readonly confirms = new Map<string, (outcome: 'allowed' | 'user-declined' | 'timeout') => void>();
+  private readonly confirms = new Map<string, (outcome: ConfirmOutcome) => void>();
   private confirmSeq = 0;
+  private readonly shadowBudget: ShadowBudget;
+  private shadowTurn: ShadowTurn = newTurn(null);
+  private shadowSeq = 0;
 
   constructor(private readonly deps: RouterDeps) {
     this.clock = deps.clock ?? (() => new Date());
@@ -271,6 +355,7 @@ export class RpcRouter {
     this.sessions = deps.sessionStore ?? new SessionStore(this.clock);
     this.providers = deps.providersStore ?? new ProvidersStore();
     this.multiMode = deps.multi !== undefined;
+    this.shadowBudget = { ...DEFAULT_SHADOW_BUDGET, ...deps.shadowBudget };
     if (deps.multi) {
       this.registry = deps.multi;
     } else if (deps.supervisor) {
@@ -299,6 +384,7 @@ export class RpcRouter {
   /** 进程退场：全部会话快照落盘、停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
   dispose(): void {
     for (const settle of [...this.confirms.values()]) settle('timeout');
+    this.deps.shadow?.dispose();
     for (const ctx of this.contexts.values()) this.endSession(ctx, 'shutdown');
     this.contexts.clear();
     this.byPath.clear();
@@ -371,6 +457,14 @@ export class RpcRouter {
         return this.agentExecuteCell(params);
       case 'agent.confirmResponse':
         return this.agentConfirmResponse(params);
+      case 'agent.turnBegin':
+        return this.agentTurnBegin(params);
+      case 'shadow.run':
+        return this.shadowRun(params);
+      case 'shadow.verify':
+        return this.shadowVerify(params);
+      case 'shadow.cancel':
+        return this.shadowCancel();
       case 'bridge.mcpLaunch':
         return { mcpLaunch: this.deps.mcpLaunch ?? null };
       case 'ui.get':
@@ -466,6 +560,7 @@ export class RpcRouter {
       writeTail: Promise.resolve(),
       needsPersist: false,
       restartInFlight: false,
+      shadow: { runs: new Map(), verifications: new Map(), diffBindings: new Map() },
     };
     this.contexts.set(notebookId, ctx);
     this.byPath.set(path.resolve(p), notebookId);
@@ -531,6 +626,7 @@ export class RpcRouter {
         await this.persistToDisk(ctx);
       }
       this.endSession(ctx, 'shutdown');
+      this.deps.shadow?.release(ctx.notebookId);
       try {
         ctx.supervisor.stop();
       } catch {
@@ -719,34 +815,35 @@ export class RpcRouter {
     const denied = (reason: ExecuteDenyReason): ExecuteDenied => ({ denied: true, reason, message: DENY_MESSAGES[reason] });
     if ((this.deps.confirmers?.() ?? 0) <= 0) return denied('no-confirmer');
 
-    const requestId = `confirm-${++this.confirmSeq}`;
     const code = cell.code;
-    const timeoutMs = this.deps.confirmTimeoutMs ?? CONFIRM_TIMEOUT_MS;
-    const outcome = await new Promise<'allowed' | 'user-declined' | 'timeout'>((resolve) => {
-      const timer = setTimeout(() => settle('timeout'), timeoutMs);
-      const settle = (o: 'allowed' | 'user-declined' | 'timeout'): void => {
-        if (!this.confirms.delete(requestId)) return;
-        clearTimeout(timer);
-        this.deps.broadcast('agent.confirmResolved', { requestId, outcome: o });
-        resolve(o);
-      };
-      this.confirms.set(requestId, settle);
-      this.deps.broadcast('agent.confirmRequest', {
-        requestId,
-        kind: 'execute_cell',
-        notebookId: ctx.notebookId,
-        cellId,
-        code,
-        cascade,
-        timeoutMs,
-      });
-    });
+    const outcome = await this.askConfirm({ kind: 'execute_cell', notebookId: ctx.notebookId, cellId, code, cascade }).outcome;
     if (outcome !== 'allowed') return denied(outcome);
     if (this.focusId !== ctx.notebookId || this.contexts.get(ctx.notebookId) !== ctx || !ctx.cache) {
       return denied('focus-changed');
     }
     if (ctx.cache.cells.find((c) => c.id === cellId)?.code !== code) return denied('code-changed');
     return this.cellRun({ cellId, cascade });
+  }
+
+  /**
+   * 用户确认握手（agent.confirmRequest → agent.confirmResponse / 超时 → agent.confirmResolved）。
+   * execute_cell 与 shadow_run 共用；先到的结算生效，其余忽略。
+   */
+  private askConfirm(payload: Record<string, unknown>): { requestId: string; outcome: Promise<ConfirmOutcome> } {
+    const requestId = `confirm-${++this.confirmSeq}`;
+    const timeoutMs = this.deps.confirmTimeoutMs ?? CONFIRM_TIMEOUT_MS;
+    const outcome = new Promise<ConfirmOutcome>((resolve) => {
+      const timer = setTimeout(() => settle('timeout'), timeoutMs);
+      const settle = (o: ConfirmOutcome): void => {
+        if (!this.confirms.delete(requestId)) return;
+        clearTimeout(timer);
+        this.deps.broadcast('agent.confirmResolved', { requestId, outcome: o });
+        resolve(o);
+      };
+      this.confirms.set(requestId, settle);
+      this.deps.broadcast('agent.confirmRequest', { requestId, ...payload, timeoutMs });
+    });
+    return { requestId, outcome };
   }
 
   private agentConfirmResponse(params: Record<string, unknown>): { requestId: string; outcome: 'allowed' | 'user-declined' } {
@@ -756,6 +853,221 @@ export class RpcRouter {
     const outcome = params['allow'] === true ? 'allowed' : 'user-declined';
     settle(outcome);
     return { requestId, outcome };
+  }
+
+  // ---------- shadow.*（ADR-013 影子执行与核验） ----------
+
+  /**
+   * agent.turnBegin {turnId}：前端每次发起 Agent 请求时调用，划出一轮（O1 = b）。
+   * 上一轮还在等的影子确认按「拒绝」结算（用户已经发了新请求），确认结论与预算清零。
+   */
+  private agentTurnBegin(params: Record<string, unknown>): { turnId: string } {
+    const turnId = strParam(params, 'turnId');
+    const prev = this.shadowTurn;
+    this.shadowTurn = newTurn(turnId);
+    for (const { requestId } of prev.pending.values()) this.confirms.get(requestId)?.('user-declined');
+    return { turnId };
+  }
+
+  /**
+   * shadow.run {changes, seed?, k?}：在独立的影子进程里按源码重放上游闭包，再运行改后闭包。
+   * 用户内核、变量、文件一概不碰；结果过第一道 M5 闸（buildRunReport 按类型重建）后才出 router。
+   */
+  private async shadowRun(params: Record<string, unknown>): Promise<ShadowRunReport | ShadowDenied> {
+    const ctx = this.focusCtx();
+    const edits = parseShadowEdits(params['changes']);
+    tryApplyEdits(shadowCells(ctx), edits);
+    const turn = this.shadowTurn;
+    const runner = this.deps.shadow;
+    if (!runner) {
+      return { runId: null, status: 'unavailable', message: SHADOW_STATUS_MESSAGES.unavailable, budget: this.budgetView(turn) };
+    }
+    if (this.budgetSpent(turn)) return this.budgetExceeded(turn);
+
+    const consent = await this.shadowConsent(ctx, turn, edits, runner);
+    if (consent !== 'allowed') {
+      this.log(ctx, 'shadow_confirm', edits[0]!.targetCellId, consent, 'agent');
+      return { denied: true, reason: consent, message: SHADOW_DENY_MESSAGES[consent] };
+    }
+    if (!this.isFocus(ctx) || this.contexts.get(ctx.notebookId) !== ctx || !ctx.cache) {
+      return { denied: true, reason: 'focus-changed', message: SHADOW_DENY_MESSAGES['focus-changed'] };
+    }
+    if (this.budgetSpent(turn)) return this.budgetExceeded(turn);
+
+    // 等确认期间源码可能变了：base 以运行时刻为准
+    const base = shadowCells(ctx);
+    const candidate = tryApplyEdits(base, edits);
+    const runId = `shadow-${++this.shadowSeq}`;
+    turn.runsUsed++;
+    // 新运行会替换影子进程，上一次运行的命名空间不再可 verify
+    ctx.shadow.latestRunId = undefined;
+    const timeoutMs = Math.max(1, Math.min(this.shadowBudget.runMs, this.shadowBudget.turnMs - turn.msUsed));
+    const seed = typeof params['seed'] === 'number' && Number.isInteger(params['seed']) ? params['seed'] : undefined;
+    const k = typeof params['k'] === 'number' && Number.isInteger(params['k']) && params['k'] >= 2 ? params['k'] : undefined;
+    const t0 = Date.now();
+    let outcome: Awaited<ReturnType<ShadowRunner['run']>>;
+    try {
+      outcome = await runner.run({
+        key: ctx.notebookId,
+        notebookDir: path.dirname(ctx.path),
+        base,
+        candidates: [{ name: 'after', cells: candidate }],
+        ...(seed !== undefined ? { seed } : {}),
+        ...(k !== undefined ? { k } : {}),
+        timeoutMs,
+      });
+    } finally {
+      turn.msUsed += Date.now() - t0;
+    }
+    const budget = this.budgetView(turn);
+    if (outcome.status !== 'ok') {
+      this.log(ctx, 'shadow_run', edits[0]!.targetCellId, `${runId}:${outcome.status}`, 'agent');
+      return { runId, status: outcome.status, message: SHADOW_STATUS_MESSAGES[outcome.status], budget };
+    }
+    const { report, facts } = buildRunReport(runId, outcome.result, budget);
+    const verificationId = `ver-${++this.shadowSeq}`;
+    remember(ctx.shadow.runs, runId, { runId, edits, revisions: prefixRevisions(base, edits), facts });
+    remember(ctx.shadow.verifications, verificationId, { verificationId, runId, contracts: [] });
+    ctx.shadow.latestRunId = runId;
+    report.verificationId = verificationId;
+    this.log(ctx, 'shadow_run', edits[0]!.targetCellId, `${runId}:${report.status}`, 'agent');
+    return report;
+  }
+
+  /** 本轮对该 notebook 的影子运行许可：已有结论直接用；否则问一次（并发调用共享这次询问）。 */
+  private async shadowConsent(
+    ctx: NotebookContext,
+    turn: ShadowTurn,
+    edits: ShadowEdit[],
+    runner: ShadowRunner,
+  ): Promise<'allowed' | ShadowDenied['reason']> {
+    if ((this.deps.confirmers?.() ?? 0) <= 0) return 'no-confirmer';
+    const prior = turn.consent.get(ctx.notebookId);
+    if (prior === 'allowed') return 'allowed';
+    if (prior === 'declined') return 'user-declined';
+    let pending = turn.pending.get(ctx.notebookId);
+    if (!pending) {
+      const ask = this.askConfirm({
+        kind: 'shadow_run',
+        notebookId: ctx.notebookId,
+        turnId: turn.turnId,
+        summary: {
+          changes: edits.map((e) => ({ cellId: e.targetCellId, action: e.action, firstLine: firstLineOf(e.newCode) })),
+          memLimitBytes: runner.memLimitBytes,
+          runMs: this.shadowBudget.runMs,
+          runsLeft: this.shadowBudget.runsPerTurn - turn.runsUsed,
+          rememberForTurn: turn.turnId !== null,
+        },
+      });
+      const outcome = ask.outcome.then((o) => {
+        turn.pending.delete(ctx.notebookId);
+        // 只有划了轮次才记住结论；超时不记（下次再问）
+        if (turn.turnId !== null && o !== 'timeout') turn.consent.set(ctx.notebookId, o === 'allowed' ? 'allowed' : 'declined');
+        this.log(ctx, 'shadow_confirm', undefined, o, 'user');
+        return o;
+      });
+      pending = { requestId: ask.requestId, outcome };
+      turn.pending.set(ctx.notebookId, pending);
+    }
+    return pending.outcome;
+  }
+
+  /**
+   * shadow.verify {runId, contracts}：在最近一次运行保留的影子命名空间上评估声明式契约。
+   * 只出状态与计数；每次 verify 产生新的 verificationId（diff.stage 用它绑定核验）。
+   */
+  private async shadowVerify(params: Record<string, unknown>): Promise<ShadowVerifyResult> {
+    const ctx = this.focusCtx();
+    const runId = strParam(params, 'runId');
+    const contracts = parseContracts(params['contracts']);
+    const runner = this.deps.shadow;
+    if (!runner) return { runId, status: 'unavailable', contracts: [] };
+    if (ctx.shadow.latestRunId !== runId || !ctx.shadow.runs.has(runId)) return { runId, status: 'not-retained', contracts: [] };
+    const out = await runner.verify(ctx.notebookId, 'after', contracts, this.shadowBudget.verifyMs);
+    if (out.status !== 'ok') {
+      if (out.status !== 'timeout') ctx.shadow.latestRunId = undefined;
+      this.log(ctx, 'shadow_verify', undefined, `${runId}:${out.status}`, 'agent');
+      return { runId, status: out.status, contracts: [] };
+    }
+    const results = contractResults(asRecord(out.result)['contracts'], CONTRACT_KINDS);
+    const byId = new Map(contracts.map((c) => [c['id'] as string, c]));
+    const stored = results.map((r) => {
+      const targets = contractTargets(byId.get(r.id));
+      return targets.length > 0 ? { ...r, targets } : r;
+    });
+    const verificationId = `ver-${++this.shadowSeq}`;
+    remember(ctx.shadow.verifications, verificationId, { verificationId, runId, contracts: stored });
+    const status = results.some((r) => r.status === 'fail') ? 'fail' : results.some((r) => r.status === 'error') ? 'error' : 'pass';
+    this.log(ctx, 'shadow_verify', undefined, `${verificationId}:${status}`, 'agent');
+    return { runId, verificationId, status, contracts: results };
+  }
+
+  /** shadow.cancel：Stop 按钮 / harness abortSignal。终止在途影子运行；在等的确认按拒绝结算。 */
+  private shadowCancel(): { cancelled: boolean } {
+    const ctx = this.focusCtxOptional();
+    if (!ctx) return { cancelled: false };
+    const pending = this.shadowTurn.pending.get(ctx.notebookId);
+    if (pending) this.confirms.get(pending.requestId)?.('user-declined');
+    const cancelled = this.deps.shadow?.cancel(ctx.notebookId) ?? false;
+    if (cancelled) ctx.shadow.latestRunId = undefined;
+    return { cancelled: cancelled || pending !== undefined };
+  }
+
+  private budgetView(turn: ShadowTurn): ShadowBudgetView {
+    return {
+      runsUsed: turn.runsUsed,
+      runsLimit: this.shadowBudget.runsPerTurn,
+      msUsed: turn.msUsed,
+      msLimit: this.shadowBudget.turnMs,
+    };
+  }
+
+  private budgetSpent(turn: ShadowTurn): boolean {
+    return turn.runsUsed >= this.shadowBudget.runsPerTurn || turn.msUsed >= this.shadowBudget.turnMs;
+  }
+
+  private budgetExceeded(turn: ShadowTurn): ShadowRunReport {
+    return { runId: null, status: 'budget-exceeded', message: SHADOW_STATUS_MESSAGES['budget-exceeded'], budget: this.budgetView(turn) };
+  }
+
+  /** diff.stage 时确定核验级别并记下绑定（状态由 refreshVerification 统一计算）。 */
+  private bindVerification(
+    ctx: NotebookContext,
+    edit: ShadowEdit,
+    verificationId: string | undefined,
+    intent: string | undefined,
+  ): { level: DiffVerification['level']; verificationId?: string } {
+    const ver = verificationId ? ctx.shadow.verifications.get(verificationId) : undefined;
+    const run = ver ? ctx.shadow.runs.get(ver.runId) : undefined;
+    const oldCode = edit.action === 'update' ? ctx.cache!.cells.find((c) => c.id === edit.targetCellId)?.code : undefined;
+    const level = classify({ edit, oldCode, intent, dataful: (run?.facts.dataVars.length ?? 0) > 0 });
+    return verificationId ? { level, verificationId } : { level };
+  }
+
+  /** 按当前源码修订重算所有待审 diff 的核验状态；有变化返回 true（调用方决定是否广播）。 */
+  private refreshVerification(ctx: NotebookContext): boolean {
+    if (!ctx.cache) return false;
+    const currentRevision = revisionOf(ctx.cache.cells);
+    let changed = false;
+    for (const d of ctx.diffs) {
+      if (d.status !== 'proposed') continue;
+      const binding = ctx.shadow.diffBindings.get(d.diffId);
+      if (!binding) continue;
+      const verification = binding.verificationId ? ctx.shadow.verifications.get(binding.verificationId) : undefined;
+      const run = verification ? ctx.shadow.runs.get(verification.runId) : undefined;
+      const next = evaluate({
+        level: binding.level,
+        edit: { targetCellId: d.targetCellId, action: d.action, newCode: d.newCode },
+        currentRevision,
+        ...(run ? { run } : {}),
+        ...(verification ? { verification } : {}),
+      });
+      if (JSON.stringify(next) !== JSON.stringify(d.verification)) {
+        d.verification = next;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   /** run 完成后：出 staleSet、落 session 事件（run | error）。 */
@@ -780,6 +1092,8 @@ export class RpcRouter {
     if (res.cells) cache.cells = normalizeCells(res.cells);
     cache.dagEdges = res.dagEdges ?? [];
     cache.staleSet = res.staleSet ?? [];
+    // ADR-013：源码修订变了 → 已入队 diff 的核验状态重算（如 verified → expired）
+    if (this.refreshVerification(ctx)) this.emitDiffs(ctx);
     await this.persistToDisk(ctx);
     return res;
   }
@@ -955,6 +1269,9 @@ export class RpcRouter {
     }
 
     const rationale = typeof params['rationale'] === 'string' ? params['rationale'] : undefined;
+    const verificationId = typeof params['verificationId'] === 'string' ? params['verificationId'] : undefined;
+    const intent = typeof params['intent'] === 'string' ? params['intent'] : undefined;
+    const binding = this.bindVerification(ctx, proposal, verificationId, intent);
     const diff: StagedDiff = {
       diffId: `diff-${++ctx.diffSeq}`,
       targetCellId,
@@ -966,9 +1283,12 @@ export class RpcRouter {
       createdAt: this.clock().toISOString(),
     };
     ctx.diffs.push(diff);
+    ctx.shadow.diffBindings.set(diff.diffId, binding);
+    this.refreshVerification(ctx);
     this.emitDiffs(ctx);
     this.log(ctx, 'diff_proposed', targetCellId, diff.diffId);
-    return dependsOn ? { diffId: diff.diffId, dependsOn } : { diffId: diff.diffId };
+    const verification = structuredClone(diff.verification!);
+    return dependsOn ? { diffId: diff.diffId, dependsOn, verification } : { diffId: diff.diffId, verification };
   }
 
   private async diffAccept(
@@ -1264,10 +1584,16 @@ export class RpcRouter {
     return buf;
   }
 
-  private log(ctx: NotebookContext, kind: SessionEventKind, cellId?: string, payloadRef?: string): void {
+  private log(
+    ctx: NotebookContext,
+    kind: SessionEventKind,
+    cellId?: string,
+    payloadRef?: string,
+    actor: 'user' | 'agent' = 'user',
+  ): void {
     ctx.session?.append({
       kind,
-      actor: 'user',
+      actor,
       ...(cellId !== undefined ? { cellId } : {}),
       ...(payloadRef !== undefined ? { payloadRef } : {}),
     });
@@ -1733,4 +2059,79 @@ export function toRpcError(err: unknown): { code: number; message: string; data?
   };
   const message = err instanceof Error ? err.message : String(err);
   return { code: ERR_INTERNAL, message };
+}
+
+// ---------- ADR-013 影子执行辅助 ----------
+
+const SHADOW_STATUS_MESSAGES: Record<'unavailable' | 'budget-exceeded' | 'timeout' | 'cancelled' | 'crashed' | 'limit-unavailable', string> = {
+  unavailable: 'Shadow execution is not available in this NovaLab build, so nothing was run.',
+  'budget-exceeded': 'The shadow-run budget for this turn is used up, so nothing was run. Propose the change with what you have, or ask the user.',
+  timeout: "The shadow run hit its time limit and was stopped. The user's kernel and files were not touched.",
+  cancelled: "The shadow run was cancelled. The user's kernel and files were not touched.",
+  crashed: "The shadow process exited unexpectedly (for example it ran out of memory). The user's kernel and files were not touched.",
+  'limit-unavailable': 'Shadow execution needs an enforceable memory limit, which this system could not apply, so nothing was run.',
+};
+
+const MAX_SHADOW_EDITS = 20;
+const MAX_CONTRACTS = 64;
+const CONTRACT_KIND_SET: ReadonlySet<string> = new Set(CONTRACT_KINDS);
+
+function parseShadowEdits(v: unknown): ShadowEdit[] {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_SHADOW_EDITS) {
+    throw new RpcFault(ERR_INVALID_PARAMS, `shadow.run 需要 changes: 1..${MAX_SHADOW_EDITS} 条改动`);
+  }
+  return v.map((e, i) => {
+    const r = asRecord(e);
+    const { targetCellId, action, newCode } = r;
+    if (typeof targetCellId !== 'string' || typeof newCode !== 'string' || (action !== 'update' && action !== 'insert_below')) {
+      throw new RpcFault(ERR_INVALID_PARAMS, `changes[${i}] 需要 {targetCellId, action: update|insert_below, newCode}`);
+    }
+    return { targetCellId, action, newCode };
+  });
+}
+
+function parseContracts(v: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(v) || v.length > MAX_CONTRACTS) {
+    throw new RpcFault(ERR_INVALID_PARAMS, `shadow.verify 需要 contracts: 0..${MAX_CONTRACTS} 条契约`);
+  }
+  return v.map((c, i) => {
+    const r = asRecord(c);
+    if (typeof r['kind'] !== 'string' || !CONTRACT_KIND_SET.has(r['kind'])) {
+      throw new RpcFault(ERR_INVALID_PARAMS, `contracts[${i}].kind 不在已知契约种类里`);
+    }
+    // id 由 bridge 统一分配（结果按 id 回配 Agent 声明的 targets）
+    return { ...r, id: `c${i + 1}` };
+  });
+}
+
+function contractTargets(c: Record<string, unknown> | undefined): string[] {
+  if (!c) return [];
+  const targets = Array.isArray(c['targets']) ? c['targets'] : typeof c['target'] === 'string' ? [c['target']] : [];
+  return targets.filter((t): t is string => typeof t === 'string');
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function shadowCells(ctx: { cache?: NotebookState }): CellSrc[] {
+  return (ctx.cache?.cells ?? []).map((c) => ({ id: c.id, code: c.code }));
+}
+
+function tryApplyEdits(base: CellSrc[], edits: ShadowEdit[]): CellSrc[] {
+  try {
+    return applyEdits(base, edits);
+  } catch (err) {
+    throw new RpcFault(ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+  }
+}
+
+function firstLineOf(code: string): string {
+  const line = (code.split('\n').find((l) => l.trim() !== '') ?? '').trim();
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+}
+
+function remember<V>(map: Map<string, V>, key: string, value: V): void {
+  map.set(key, value);
+  while (map.size > SHADOW_LEDGER_LIMIT) map.delete(map.keys().next().value as string);
 }

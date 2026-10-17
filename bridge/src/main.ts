@@ -23,6 +23,7 @@ import { isAllowedOrigin, LLM_PROXY_BASE_PORT, startLlmProxy, type LlmProxyHandl
 import { MultiSupervisor, StdioKernelTransport } from './supervisor';
 import { createChokidarEventSource } from './watch';
 import { startMcpServer } from './mcp/server';
+import { ShadowManager } from './shadow/manager';
 
 function configuredPort(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -135,6 +136,8 @@ const router = new RpcRouter({
   providersStore,
   // agent.executeCell 逐次确认：只有已鉴权的 WS 前端能回应（--mcp 分支没有 → 一律拒绝）
   confirmers: () => authenticatedClients.size,
+  // ADR-013 影子执行：独立进程 + 沙箱 + 内存上限（O2）；每轮首次运行仍需上面的确认（--mcp 分支没有确认者 → 一律拒绝）
+  shadow: new ShadowManager({ pyDir }),
   // Welcome「Connect…」：packaged = sidecar node + bundle；dev = pnpm tsx（仓库内）
   mcpLaunch: process.env.NOVALAB_PACKAGED
     ? [process.execPath, process.argv[1] ?? 'bridge.mjs']

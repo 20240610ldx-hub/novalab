@@ -6,6 +6,7 @@ import { agentTools, BRIDGE_UPGRADE_MESSAGE } from '../../agent/tools';
 import { buildChatPayload } from '../../agent/payload';
 import { hasDevEnvModel, resolveActiveModel } from '../../agent/providers';
 import { useAgentStore, watchNotebookErrors } from '../../store/agent';
+import { bridge } from '../../bridge/client';
 import { ContextChip } from './ContextChip';
 import { FixCard } from './FixCard';
 
@@ -25,6 +26,8 @@ export function AgentPanel() {
       resolveActiveModel(useAgentStore.getState()).model,
     instructions: AGENT_SYSTEM_PROMPT,
     tools: agentTools,
+    // ADR-013 O1 = (b)：每次请求 = 新的一轮，影子运行在本轮首次使用时询问用户
+    beginTurn: (turnId) => bridge.rpc('agent.turnBegin', { turnId }),
   });
 
   // run.error 只读订阅（notebook store 不改，转存 agent store.lastError）
