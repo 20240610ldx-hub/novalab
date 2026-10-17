@@ -1842,8 +1842,9 @@ export class RpcRouter {
   }
 
   /**
-   * providers.set {id?,kind,name,baseURL,model,apiKey?} → ProviderSummary（upsert）。
+   * providers.set {id?,kind,name,baseURL,model,apiKey?,maxOutputTokens?} → ProviderSummary（upsert）。
    * apiKey 明文入 → 加密落盘；省略/空串 = 保留既有密文（前端编辑不回传 key）。
+   * maxOutputTokens 省略/null = 清除；非法值由 store 校验 → ERR_INVALID_PARAMS。
    */
   private providersSet(params: Record<string, unknown>): ProviderSummary {
     const kind = params['kind'];
@@ -1886,6 +1887,7 @@ export class RpcRouter {
         baseURL: (baseURL as string).trim(),
         model: (model as string).trim(),
         ...(typeof apiKey === 'string' ? { apiKey } : {}),
+        maxOutputTokens: params['maxOutputTokens'] as number | null | undefined,
       });
     } catch (e) {
       if (e instanceof ProvidersStoreError) throw new RpcFault(ERR_INVALID_PARAMS, e.message);

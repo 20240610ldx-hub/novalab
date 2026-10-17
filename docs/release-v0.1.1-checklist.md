@@ -492,6 +492,7 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 工程门 | bridge `tsc` + vitest 342（27 文件）；app `tsc -b` + vitest 395（30 文件）+ 生产构建；Python 296 + 5 跳过；`pnpm test:scripts` 27；真实内核验收 24（8 文件）；集成 smoke 13；sidecar / py-resources 重建；构建目录 packaged smoke + acceptance 12/12；真实 Chromium 六个 smoke（kernel-restart / bridge-reconnect / file-conflict / save-lifecycle / html-output / agent-safety）全部通过 |
 | 证据 | 本工作树 gitignored `validation-20261014/`：`manifest-maintenance.json` / `results-maintenance.json` 与 `stage-maint-*.log` |
 | 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
+| F7 追加 | 设置面板每个 provider 可填「最大输出 tokens」（256–262144，留空 = 自动，占位显示自动值）；`providers.set/list` 可选 `maxOutputTokens`，store/router 双重校验、null 清除、坏值读回丢弃。先红：bridge 3 项、app 3 项 |
 
 ### 当前放行结论
 

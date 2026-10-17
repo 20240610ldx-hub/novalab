@@ -26,8 +26,11 @@ import { llmFetch } from './retryFetch';
  */
 export const UNKNOWN_MODEL_MAX_OUTPUT_TOKENS = 8192;
 
-/** 已知 Claude 模型交给 SDK 按型号取上限；其余显式设预算。 */
-export function outputTokenBudget(config: Pick<ProviderConfig, 'kind' | 'model'>): number | undefined {
+/** 设置里的覆盖值优先；否则已知 Claude 模型交给 SDK 按型号取上限，其余显式设预算。 */
+export function outputTokenBudget(
+  config: Pick<ProviderConfig, 'kind' | 'model' | 'maxOutputTokens'>,
+): number | undefined {
+  if (config.maxOutputTokens !== undefined) return config.maxOutputTokens;
   if (config.kind === 'anthropic-compat' && /^claude-/.test(config.model)) return undefined;
   return UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
 }

@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { generateText } from 'ai';
 import { useAgentStore } from '../../store/agent';
-import { createLanguageModel } from '../../agent/models';
+import { createLanguageModel, outputTokenBudget } from '../../agent/models';
 import {
   hasDevEnvModel,
   isProviderStorageRemote,
+  MAX_OUTPUT_TOKENS_MAX,
+  MAX_OUTPUT_TOKENS_MIN,
   modelSuggestionsFor,
+  parseMaxOutputTokensInput,
   type ProviderConfig,
   type ProviderId,
 } from '../../agent/providers';
@@ -56,24 +59,35 @@ export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [test, setTest] = useState<TestState>({ state: 'idle', msg: '' });
+  // 输出预算输入框原文（空 = 自动）；解析结果在保存/测试时并入草稿
+  const [budgetText, setBudgetText] = useState('');
 
   if (!open) return null;
 
   const suggestions = draft ? modelSuggestionsFor(draft) : [];
+  const budget = parseMaxOutputTokensInput(budgetText);
+  const autoBudget = draft ? outputTokenBudget({ kind: draft.kind, model: draft.model.trim() }) : undefined;
+  /** 草稿 + 预算 → 落库形状（预算为空时去掉字段 = 自动）。 */
+  const withBudget = (d: Draft): Draft => {
+    const { maxOutputTokens: _drop, ...rest } = d;
+    return budget.ok && budget.value !== undefined ? { ...rest, maxOutputTokens: budget.value } : rest;
+  };
+  const formValid = draft != null && budget.ok && draft.baseURL.trim() !== '' && draft.model.trim() !== '';
   const remote = isProviderStorageRemote();
 
   const startEdit = (config: ProviderConfig | null) => {
     // bridge 掩码纪律：已存 key 的 provider 编辑时 key 置空（留空 = 保留既有密文）
     setDraft(config ? { ...config, apiKey: config.hasKey ? '' : config.apiKey } : newDraft());
+    setBudgetText(config?.maxOutputTokens !== undefined ? String(config.maxOutputTokens) : '');
     setTest({ state: 'idle', msg: '' });
   };
 
   const save = () => {
     if (!draft) return;
-    if (!draft.name.trim() || !draft.baseURL.trim() || !draft.model.trim()) return;
+    if (!formValid || !draft.name.trim()) return;
     void (async () => {
       // 顺序 await：两次 persist 都是全量同步，串行避免 setActive 竞态
-      await upsertProvider({ ...draft, name: draft.name.trim(), baseURL: draft.baseURL.trim(), model: draft.model.trim() });
+      await upsertProvider({ ...withBudget(draft), name: draft.name.trim(), baseURL: draft.baseURL.trim(), model: draft.model.trim() });
       // 首个 provider 自动设为当前生效；dev 兜底让位
       if (activeProviderId == null) await setActiveProvider(draft.id);
       setDraft(null);
@@ -81,11 +95,11 @@ export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
   };
 
   const testConnection = async () => {
-    if (!draft || !draft.baseURL.trim() || !draft.model.trim()) return;
+    if (!draft || !formValid) return;
     setTest({ state: 'testing', msg: '' });
     try {
       const cleaned: ProviderConfig = {
-        ...draft,
+        ...withBudget(draft),
         name: draft.name.trim() || t('settings.unnamed'),
         baseURL: draft.baseURL.trim(),
         model: draft.model.trim(),
@@ -159,7 +173,12 @@ export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
                 <span className="truncate text-[var(--muted)]" title={p.baseURL}>
                   {p.baseURL}
                 </span>
-                <span className="ml-auto shrink-0 text-[var(--muted)]">{p.model}</span>
+                <span className="ml-auto shrink-0 text-[var(--muted)]">
+                  {p.model}
+                  {p.maxOutputTokens !== undefined && (
+                    <span className="ml-1.5 opacity-80">· {t('settings.maxOutputTokensBadge', { value: p.maxOutputTokens })}</span>
+                  )}
+                </span>
                 <span className="flex shrink-0 gap-1">
                   {!isActive && (
                     <button type="button" onClick={() => void setActiveProvider(p.id)} className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[var(--muted)] hover:border-[var(--accent-ok)] hover:text-[var(--accent-ok)]">
@@ -267,12 +286,38 @@ export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
                 ))}
               </datalist>
             </label>
+            <label className="block text-[11px] text-[var(--muted)]">
+              {t('settings.maxOutputTokens')}
+              <input
+                value={budgetText}
+                onChange={(e) => setBudgetText(e.target.value)}
+                inputMode="numeric"
+                placeholder={
+                  autoBudget === undefined
+                    ? t('settings.maxOutputTokensAutoModel')
+                    : t('settings.maxOutputTokensAuto', { value: autoBudget })
+                }
+                spellCheck={false}
+                aria-invalid={!budget.ok}
+                aria-describedby="novalab-max-output-help"
+                data-testid="settings-max-output-tokens"
+                className={`mt-0.5 ${inputCls} ${budget.ok ? '' : 'border-[var(--accent-err)]'}`}
+              />
+              <span
+                id="novalab-max-output-help"
+                className={`mt-0.5 block text-[10.5px] leading-snug ${budget.ok ? 'text-[var(--muted)]' : 'text-[var(--accent-err)]'}`}
+              >
+                {budget.ok
+                  ? t('settings.maxOutputTokensHelp')
+                  : t('settings.maxOutputTokensInvalid', { min: MAX_OUTPUT_TOKENS_MIN, max: MAX_OUTPUT_TOKENS_MAX })}
+              </span>
+            </label>
 
             <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
                 onClick={save}
-                disabled={!draft.name.trim() || !draft.baseURL.trim() || !draft.model.trim()}
+                disabled={!formValid || !draft.name.trim()}
                 className="rounded border border-[var(--accent-ok)] px-2 py-1 text-[12px] text-[var(--accent-ok)] hover:bg-[var(--accent-ok)] hover:text-[var(--bg)] disabled:opacity-40"
               >
                 {t('settings.save')}
@@ -280,7 +325,7 @@ export function SettingsPanel({ onOpenWelcome }: SettingsPanelProps) {
               <button
                 type="button"
                 onClick={() => void testConnection()}
-                disabled={test.state === 'testing' || !draft.baseURL.trim() || !draft.model.trim()}
+                disabled={test.state === 'testing' || !formValid}
                 title={t('settings.testTitle')}
                 className="rounded border border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--accent-run)] hover:text-[var(--accent-run)] disabled:opacity-40"
               >

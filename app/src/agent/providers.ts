@@ -40,6 +40,28 @@ export interface ProviderConfig {
   model: string;
   /** bridge 掩码：加密存储里已有 key（P4；apiKey 本体永不回前端）。 */
   hasKey?: boolean;
+  /**
+   * 单次回复的输出 token 上限（设置面板可调）；缺省 = 按模型自动
+   * （models.ts outputTokenBudget：已知 Claude 走 SDK 上限，其余 8192）。
+   */
+  maxOutputTokens?: number;
+}
+
+/** 与 bridge protocol.ts MAX_OUTPUT_TOKENS_MIN/MAX 同一区间（bridge 侧再校验一次）。 */
+export const MAX_OUTPUT_TOKENS_MIN = 256;
+export const MAX_OUTPUT_TOKENS_MAX = 262_144;
+
+export type MaxOutputTokensInput =
+  | { ok: true; value: number | undefined }
+  | { ok: false };
+
+/** 设置面板输入框 → 预算值：空 = 自动；允许千分位逗号/空格；非整数或越界 → ok:false。 */
+export function parseMaxOutputTokensInput(text: string): MaxOutputTokensInput {
+  const cleaned = text.replace(/[,_\s]/g, '');
+  if (cleaned === '') return { ok: true, value: undefined };
+  if (!/^\d+$/.test(cleaned)) return { ok: false };
+  const n = Number(cleaned);
+  return n >= MAX_OUTPUT_TOKENS_MIN && n <= MAX_OUTPUT_TOKENS_MAX ? { ok: true, value: n } : { ok: false };
 }
 
 export interface ProviderState {
@@ -89,6 +111,7 @@ interface ProviderSummaryWire {
   baseURL: string;
   model: string;
   hasKey: boolean;
+  maxOutputTokens?: number;
 }
 
 interface ProvidersListWire {
@@ -137,7 +160,18 @@ function isProviderSummaryWire(v: unknown): v is ProviderSummaryWire {
 }
 
 function summaryToConfig(s: ProviderSummaryWire): ProviderConfig {
-  return { id: s.id, kind: s.kind, name: s.name, baseURL: s.baseURL, model: s.model, apiKey: '', hasKey: s.hasKey };
+  const budget = s.maxOutputTokens;
+  return {
+    id: s.id,
+    kind: s.kind,
+    name: s.name,
+    baseURL: s.baseURL,
+    model: s.model,
+    apiKey: '',
+    hasKey: s.hasKey,
+    // 旧 bridge 无此字段；坏值按"自动"处理（宽容降级）
+    ...(typeof budget === 'number' && Number.isInteger(budget) && budget > 0 ? { maxOutputTokens: budget } : {}),
+  };
 }
 
 /** providers.list → 前端状态（过滤 dev-env：它在 UI 上由 hasDevEnvModel() 兜底行呈现）。 */
@@ -179,6 +213,7 @@ export async function saveProviderState(state: ProviderState): Promise<void> {
       baseURL: p.baseURL,
       model: p.model,
       ...(p.apiKey !== '' ? { apiKey: p.apiKey } : {}),
+      maxOutputTokens: p.maxOutputTokens ?? null, // null = 清除（回到按模型自动）
     });
   }
   for (const r of remoteAll) {
