@@ -31,6 +31,8 @@ import {
   type FsEntry,
   type FsRootResult,
   type NotebookCloseResult,
+  type DraftRecoveryOffer,
+  type DraftWriteResult,
   type NotebookOpenResult,
   type NotebookReloadResult,
   type NotebookRestartResult,
@@ -75,6 +77,7 @@ import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
 import { exportIpynb, IpynbError, type ExportCell } from './exporter';
 import { ImportError, importIpynb } from './importer';
+import { DraftTooLargeError, clearDrafts, readDraft, readLatestDraft, writeDraft } from './drafts';
 import type { CellSrc, ShadowRunner } from './shadow/manager';
 import { buildRunReport, CONTRACT_KINDS, contractResults, type ContractResult, type ShadowBudgetView, type ShadowRunReport } from './shadow/report';
 import {
@@ -429,6 +432,12 @@ export class RpcRouter {
         return this.notebookReload(params);
       case 'cell.save':
         return this.cellSave(params);
+      case 'draft.write':
+        return this.draftWrite(params);
+      case 'draft.clear':
+        return this.draftClear(params);
+      case 'draft.preserve':
+        return this.draftPreserve(params);
       case 'cell.run':
         return this.cellRun(params);
       case 'control.set':
@@ -542,7 +551,91 @@ export class RpcRouter {
     this.setFocus(ctx.notebookId);
     this.beginSession(ctx);
     if (this.multiMode) this.deps.broadcast('focus.changed', { notebookId: ctx.notebookId });
-    return { notebookId: ctx.notebookId, state: this.snapshot(ctx) };
+    const draftRecovery = this.draftOffer(ctx);
+    return { notebookId: ctx.notebookId, state: this.snapshot(ctx), ...(draftRecovery ? { draftRecovery } : {}) };
+  }
+
+  // ---------- 草稿恢复日志（第 7 轮） ----------
+
+  /** 新建 context 时读最新恢复日志：内容与磁盘一致则静默删除；否则按指纹给出提示。 */
+  private draftOffer(ctx: NotebookContext): DraftRecoveryOffer | undefined {
+    try {
+      const draft = readLatestDraft(ctx.path);
+      const cache = ctx.cache;
+      if (!draft || !cache) return undefined;
+      const disk = new Map(cache.cells.map((cell) => [cell.id, cell.code]));
+      const journal = new Map(draft.cells.map((cell) => [cell.id, cell.code]));
+      if (draft.dirtyCellIds.every((id) => journal.get(id) === disk.get(id))) {
+        clearDrafts(ctx.path);
+        return undefined;
+      }
+      return {
+        draftId: draft.draftId,
+        savedAt: draft.savedAt,
+        baselineMatches: !!draft.baselineSha256 && draft.baselineSha256 === cache.baselineSha256,
+        dirtyCellIds: draft.dirtyCellIds,
+        cells: draft.cells,
+      };
+    } catch (err) {
+      console.error('[bridge] 读取草稿恢复日志失败:', err instanceof Error ? err.message : err);
+      return undefined;
+    }
+  }
+
+  private draftContext(params: Record<string, unknown>): NotebookContext {
+    const id = strParam(params, 'notebookId');
+    const ctx = this.contexts.get(id);
+    if (!ctx?.cache) throw new RpcFault(ERR_INVALID_PARAMS, `unknown notebookId: ${id}`);
+    return ctx;
+  }
+
+  /** draft.write：日志的基线指纹取 bridge 记录（内核死后仍在），不接受客户端传入。 */
+  private draftWrite(params: Record<string, unknown>): Promise<DraftWriteResult> {
+    const ctx = this.draftContext(params);
+    const cells = params['cells'];
+    const dirty = params['dirtyCellIds'];
+    if (!Array.isArray(cells) || cells.some((cell) =>
+      !cell || typeof cell !== 'object' || typeof cell.id !== 'string' || typeof cell.code !== 'string')) {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'draft.write cells must be [{id:string, code:string}]');
+    }
+    if (!Array.isArray(dirty) || dirty.some((id) => typeof id !== 'string')) {
+      throw new RpcFault(ERR_INVALID_PARAMS, 'draft.write dirtyCellIds must be string[]');
+    }
+    const input = {
+      baselineSha256: ctx.cache?.baselineSha256 ?? null,
+      cells: cells.map((cell) => ({ id: cell.id as string, code: cell.code as string })),
+      dirtyCellIds: dirty as string[],
+    };
+    // 与保存/清理同一写队列：保证"写日志 → 保存成功 → 清日志"的先后。
+    return this.serializeNotebook(ctx, async () => {
+      try {
+        return writeDraft(ctx.path, input);
+      } catch (err) {
+        if (err instanceof DraftTooLargeError) throw new RpcFault(ERR_INVALID_PARAMS, err.message);
+        throw new RpcFault(ERR_KERNEL, `draft.write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+  }
+
+  private draftClear(params: Record<string, unknown>): Promise<{ removed: number }> {
+    const ctx = this.draftContext(params);
+    return this.serializeNotebook(ctx, async () => ({ removed: clearDrafts(ctx.path) }));
+  }
+
+  /** draft.preserve：日志 cells 经内核 backup_file 写成第 4 轮同目录本地副本，成功后清日志；notebook 不变。 */
+  private draftPreserve(params: Record<string, unknown>): Promise<{ recoveryPath: string }> {
+    const ctx = this.draftContext(params);
+    const draftId = strParam(params, 'draftId');
+    return this.serializeNotebook(ctx, async () => {
+      const draft = readDraft(ctx.path, draftId);
+      if (!draft) throw new RpcFault(ERR_INVALID_PARAMS, `unknown draftId: ${draftId}`);
+      const backup = (await ctx.supervisor.request('backup_file', { path: ctx.path, cells: draft.cells })) as { recoveryPath?: unknown };
+      if (typeof backup?.recoveryPath !== 'string' || !backup.recoveryPath) {
+        throw new RpcFault(ERR_KERNEL, 'draft.preserve: backup did not return a recoveryPath');
+      }
+      clearDrafts(ctx.path);
+      return { recoveryPath: backup.recoveryPath };
+    });
   }
 
   /** 建 context + 从 registry 取/建 supervisor + start（load_file）。失败回滚登记。 */

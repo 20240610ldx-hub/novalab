@@ -135,6 +135,23 @@ export interface NotebookState {
 export interface NotebookOpenResult {
   notebookId: string;
   state: NotebookState;
+  /** 第 7 轮：仅新建 context 时附带，notebook 旁 .novalab/drafts 最新一份恢复日志（只提示，不自动应用）。 */
+  draftRecovery?: DraftRecoveryOffer;
+}
+
+/** 第 7 轮草稿恢复提示。baselineMatches=false（含日志无指纹）时客户端只能保存为本地副本或丢弃。 */
+export interface DraftRecoveryOffer {
+  draftId: string;
+  savedAt: string;
+  baselineMatches: boolean;
+  dirtyCellIds: string[];
+  cells: { id: string; code: string }[];
+}
+
+/** draft.write {notebookId, cells:[{id,code}], dirtyCellIds} → 结果；单份超限 → -32602。 */
+export interface DraftWriteResult {
+  draftId: string;
+  bytes: number;
 }
 
 /**

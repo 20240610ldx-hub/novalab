@@ -76,7 +76,7 @@ A01–A05 的已执行结果见 §9；A07/A08 已补专项子项，尚未完整�
 ### 3.4 桌面、恢复与边界场景
 
 - [ ] **A14 四种最终产物**：Windows NSIS/MSI、Linux AppImage/deb 安装/解包与真实窗口启动；从实际安装目录打开 notebook、运行、保存、导出。检查只读资源复制到可写运行目录；首次依赖安装错误有可理解提示/恢复路径；初始化后断网可跑本地链路。开发目录或 CI 已准备环境不算“全新机器首启”。
-- [ ] **A15 崩溃/重启与外部修改**：已验 clean dead/ended notebook 的 owner-addressed 冷重启、同 notebook FIFO、重复请求拒绝、失败保留 dead/session、旧 outputs/Diff/REPL 清理与 A→B owner 隔离；dirty dead 草稿保留并阻止重启。bridge 死亡→桌面重连已验（2026-10-16 第六轮，Windows-only）：断线结算 pending、允许编辑、新一代 tab 保留为 bridge-lost、clean 点击冷重开、dirty 保留草稿；D4 补充（同日 Owner 批准）：dirty tab 重开时以跨代 `baselineSha256` 核对磁盘，未变则续存草稿、已变或未知则进入冲突流程不覆盖；跨应用草稿恢复仍待独立包；外部编辑文件的冲突提示不丢未保存内容。副作用重放须在临时文件夹/合成任务中验证，不对真实研究目录杀进程试验。
+- [ ] **A15 崩溃/重启与外部修改**：已验 clean dead/ended notebook 的 owner-addressed 冷重启、同 notebook FIFO、重复请求拒绝、失败保留 dead/session、旧 outputs/Diff/REPL 清理与 A→B owner 隔离；dirty dead 草稿保留并阻止重启。bridge 死亡→桌面重连已验（2026-10-16 第六轮，Windows-only）：断线结算 pending、允许编辑、新一代 tab 保留为 bridge-lost、clean 点击冷重开、dirty 保留草稿；D4 补充（同日 Owner 批准）：dirty tab 重开时以跨代 `baselineSha256` 核对磁盘，未变则续存草稿、已变或未知则进入冲突流程不覆盖；跨应用草稿有界恢复已验（2026-10-17 第七轮，Windows-only 浏览器证据）：去抖后仍未保存的草稿由 bridge 原子写入 notebook 旁 `.novalab/drafts`（5 份 / 7 天 / 2 MiB，无输出/REPL），重开只提示，指纹一致可恢复为本地草稿、不一致保存为本地副本；断线期间草稿落盘已验（同日 7b，Windows-only，真实 Tauri/WebView2 窗口）：bridge 不在或 tab 为 bridge-lost 时由 Tauri 命令 `write_draft_journal` 以同一格式写入、基线取前端最后确认的指纹；Linux CI 仍待；外部编辑文件的冲突提示不丢未保存内容。副作用重放须在临时文件夹/合成任务中验证，不对真实研究目录杀进程试验。
 - [ ] **A16 多 tab、历史与 >500 cells**：前后台切换状态不串；后台刷新行为按 K1；历史 ended 只读；构造 501+ cell 会话，显示前 500 与截断说明，导出包含完整会话而非截断投影。
 - [ ] **A17 长输出、控件与布局**：>420px 输出内部滚动不撑坏编辑区，宽表横滚，折叠/复制/焦点样式有效；布局缩放、Ctrl+B/Ctrl+Alt+B、重开持久化、Welcome 状态和两主题正常。slider 交互按 spec §15 自动级联，但副作用下游只标 stale；重开控件值回默认需提示/文档一致。
 - [ ] **A18 性能与体积**：按 §6 记录真实数字、环境与统计口径；安装版窗口计时和首次运行时准备分开，不以 dev/headless 数替代全部桌面指标。
@@ -493,6 +493,43 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 证据 | 本工作树 gitignored `validation-20261014/`：`manifest-maintenance.json` / `results-maintenance.json` 与 `stage-maint-*.log` |
 | 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
 | F7 追加 | 设置面板每个 provider 可填「最大输出 tokens」（256–262144，留空 = 自动，占位显示自动值）；`providers.set/list` 可选 `maxOutputTokens`，store/router 双重校验、null 清除、坏值读回丢弃。先红：bridge 3 项、app 3 项 |
+
+### 2026-10-17 第七轮：跨应用 dirty 草稿有界恢复（Windows-only 浏览器证据）
+
+Owner 裁决（2026-10-17）："Next to the notebook, 7 days (Recommended)"；总体指示"先按照你建议的路径推进"。基线 `56fd8b1`（`claude/novalab-reliability-stack`：第 6 轮 + D4、F1、LLM 重试）加未提交修改，分支 `claude/novalab-draft-recovery`；设计见 `docs/proposal-draft-recovery.md`，协议见 `docs/spec.md`。
+
+| 项 | 结果 |
+|---|---|
+| 设计 | 写入方为 bridge（Node）：草稿长期未保存的场景（保存失败/冲突暂停）里只有 bridge 一定在；内核协议不变。第 4 轮写法移植：同目录排它临时文件（wx/0600）→ fsync → rename。日志 `<目录>/.novalab/drafts/<basename>.<ms>-<rand>.draft.json` 只含 version、notebook、bridge 记录的 `baselineSha256`、savedAt、持久 cell 的 id/code、dirtyCellIds。每 notebook ≤ 5 份、7 天删除、单份 ≤ 2 MiB；保存成功且无剩余草稿即删除。新 RPC `draft.write` / `draft.clear` / `draft.preserve`，`notebook.open` 新建 context 时附 `draftRecovery` |
+| 重开 | 只提示、不自动应用：内容与磁盘相同静默删除；指纹一致 → 「恢复草稿」放回本地草稿，不发 `cell.save`、不写盘；不一致或未知 → 只有「保存为本地副本」（内核 `backup_file`，第 4 轮同目录副本）或「丢弃」；等待期间该 tab 保存成功则降级为不一致 |
+| 先红 | bridge `drafts.test.ts` + `router.drafts.test.ts` 对占位实现 20 失败；app `draftRecovery.test.ts` 8 失败 / 2 通过（两项为"不得写入"守卫，空实现即满足） |
+| 工程门 | bridge `tsc --noEmit` + vitest 319（25 文件，新增 20）；app vitest 393（30 文件，新增 10）+ 生产构建（含 `tsc -b`，主 JS 1389.16 kB）；Python 261 通过 + 5 跳过（本轮无 Python 改动）；`pnpm test:scripts` 24；Rust `cargo test --lib` 5 + `cargo build`；sidecar/py-resources 重建后集成 smoke 与构建目录 packaged smoke 通过 |
+| 真实 Chromium | `node scripts/draft-recovery-smoke.mjs` 一跑通过 `DRAFT_RECOVERY_SMOKE_OK`：gen-1 自有 bridge，a.py 有真实输出与 REPL 变量；a.py/b.py 置只读 → 自动保存失败、草稿滞留 → 去抖后日志落盘，指纹 = 磁盘字节 SHA-256、无输出/REPL 文本、a.py 未变；只杀 gen-1 bridge PID 并关闭页面；应用关闭期间 b.py 被外部改写；gen-2 + 新页面打开 a.py → 指纹一致提示，2 s 内编辑器仍是磁盘版本、无 `cell.save`；点击「恢复草稿」→ 草稿回到编辑器（store + DOM）、tab dirty、无 `cell.save`、a.py 字节不变、日志保留；继续编辑 → 正常保存落盘 → 日志删除；打开 b.py → 无恢复按钮，编辑器为外部版本，点击「保存为本地副本」→ 同目录副本含草稿、b.py 保持外部字节、日志删除；页面错误 0；自有 PID 23 个全部退出，临时目录删除 |
+| 归属 / 清理 | 启动 Vite 前确认 5299 无监听；Vite 根 cmd 36404（→ pnpm 57064 → cmd 40380 → node 48852）由 preview_stop 结束，`taskkill /T` 复核四个 PID 均已退出、HTTP 拒绝。只杀本 smoke 自有 gen-1 bridge PID |
+| 证据 | 本工作树 gitignored `validation-20261014/`：`seal-drafts-round7.mjs`、`manifest-drafts-round7.json` / `results-drafts-round7.json` 与 15 份 `stage7-*.log`（脱敏）。304 个源码、sidecar、dist、Python resources 的 SHA256；第六轮与 D4 补充的 6 份封存及其日志、前五轮 12 份封存均只读核对未变 |
+| 边界 | Windows-only 浏览器/进程证据；Chromium + Vite dev，非 Tauri WebView/安装器；bridge 断线期间的草稿不写日志（需 Tauri 侧写盘通道，另包）；去抖 1.5 s 内的最新输入可能丢失；只读文件是"保存持续失败"的测试替身（内核 dead 时编辑被阻止，不产生日志）；新增单测含 POSIX 0600 断言，Linux CI 未在本轮运行（未 push） |
+
+默认值（待 Owner 确认）：去抖 1.5 s；单份 2 MiB（超限不写、tab 提示、草稿留在内存）；恢复后不自动写盘；指纹未知按不一致处理；只提示最新一份可读日志。
+
+本轮关闭 A15 的「跨应用 dirty 草稿有界恢复」子项的 Windows 证据；A15 是否勾选取决于 Linux CI（ubuntu + windows）通过，另有断线期间草稿落盘与生产环境旧内核清理未做，**A15 保持未勾选**。
+
+### 2026-10-17 第七轮后续（7b）：断线期间草稿落盘（Windows-only，真实 Tauri 窗口）
+
+Owner 裁决（2026-10-17）："Approved as recommended: O1 Rust command, O2 any existing absolute .py file writing only its sibling .novalab/drafts, O3 use the frontend's last confirmed baselineSha256, O4 no browser-dev fallback, O5 start with unit tests + build regression and add the WebView2 real-window smoke, O6 bridge stays the online writer. Red tests first, then green." 设计与结果见 `docs/proposal-offline-draft-journal.md` §8；基线同第七轮（`56fd8b1` + 未提交修改，分支 `claude/novalab-draft-recovery`）。
+
+| 项 | 结果 |
+|---|---|
+| 设计 | 在线仍由 bridge `draft.write` 写；断线（`reconnecting` / `down`）或 bridge-lost 且在 Tauri 内 → Rust 命令 `write_draft_journal`，格式、文件名、原子写法与 5 份 / 7 天 / 2 MiB 界限与第七轮相同；只接受已存在的绝对 `.py` 普通文件，只写其同级 `.novalab/drafts`；基线为前端最后确认的 `baselineSha256`（未知 → null）；浏览器 dev 断线不写。读取、提示、恢复、副本、清除仍只由 bridge 负责。新增共享夹具 `bridge/test-fixtures/draft-journal/`，Node 与 Rust 测试共用 |
+| 先红 | Rust `drafts.rs` 对占位实现 8 失败（另 5 项为既有监督测试）；app `draftOffline.test.ts` 5 失败 / 2 通过（两项为"不得写入"守卫：浏览器 dev 断线、在线走 RPC） |
+| 工程门 | bridge `tsc --noEmit` + vitest 330（26 文件，新增夹具 11）；app vitest 400（31 文件，新增 7）+ 生产构建（含 `tsc -b`，主 JS 1389.42 kB）；Python 261 + 5 跳过（无 Python 改动）；`pnpm test:scripts` 24；Rust `cargo test --lib` 13（新增 8，另有 1 项仅 POSIX 编译的 0600 测试）+ `cargo build`；sidecar 重建后集成 smoke 与构建目录 packaged smoke 通过 |
+| 真实 Tauri 窗口 | `node scripts/tauri-window-draft-smoke.mjs`（第 9 跑）`TAURI_WINDOW_DRAFT_SMOKE_OK`：以 WebView2 远程调试端口驱动 `target/debug/novalab.exe`（WebView2 155.0.4283.60，隔离数据目录与 WebView2 用户目录，启动前 7788–7798 与 CDP 端口无监听）；打开 a.py，tab 指纹 = 磁盘 SHA；只杀清单中的 bridge PID → Rust 监督重启（新 PID 为本应用后代），tab 保持 bridge-lost；编辑 → 去抖后日志落盘，IPC 观察到 1 次 `ipc.localhost/write_draft_journal`、`draft.write` 0 次，键集合、指纹、dirty 列表正确，a.py 字节不变；`taskkill /T` 整个应用树；重启应用打开 a.py → 指纹一致提示 → 点击「恢复草稿」→ 草稿回到编辑器、tab dirty、无 `cell.save`、磁盘不变；页面错误 0，自有 PID 36 个全部退出，临时目录删除。这也首次在真实窗口中覆盖第六轮 Rust 监督重启与第七轮恢复流程 |
+| 新发现 | 桌面冷启动时 WebView 先于 bridge 监听加载，首次 `connect()` 只尝试一次且 store 只在首次成功后订阅状态，窗口停在"bridge 未连接 … 刷新"横幅，`retryBridge` 在 idle 状态无法恢复界面，只能刷新（既有行为，本包未修，建议另立小包）。smoke 在自有 bridge 就绪后按横幅提示刷新一次并记录 `initialConnectIdleThenReload: true` |
+| 调试过程 | 前 8 跑失败日志全部保留：沙箱内 `localhost` 解析到 ::1 被拒（Vite 改绑 127.0.0.1）；第 2 跑应用未及时登记致 bridge 孤儿（按临时清单 PID 确认归属后结束，剩余 0；smoke 改为立即登记并清扫全部自有 PID）；冷启动 idle（见上）；`waitForFunction` 把异步谓词的 Promise 当真值；`__TAURI_INTERNALS__.invoke` 不可写/不可配置，改由 CDP 网络事件观察 IPC |
+| 归属 / 清理 | Vite 根 cmd 24876（→ pnpm 58028 → cmd 41456 → node 32384，绑 127.0.0.1:5199）由 preview_stop 结束，`taskkill /T` 复核四个 PID 均已退出、5199 拒绝连接 |
+| 证据 | gitignored `validation-20261014/`：`seal-drafts-offline-round7b.mjs`、`manifest-drafts-offline-round7b.json` / `results-drafts-offline-round7b.json` 与 23 份 `stage7b-*.log`（脱敏）。312 个源码、debug exe、sidecar、dist、Python resources 的 SHA256；第六轮、D4、第七轮 9 份封存及其日志与前五轮 12 份封存只读核对未变 |
+| 边界 | Windows-only；debug exe + Vite dev，非打包 sidecar 或安装器；去抖 1.5 s 内输入、以及整个 Tauri 进程被杀时去抖窗口内的内容仍会丢失；POSIX 0600 测试未在 Linux CI 运行（未 push） |
+
+本轮关闭 A15「断线期间草稿落盘」子项的 Windows 证据；A15 仍取决于 Linux CI，另有生产环境旧内核清理与冷启动首次连接重试（新发现）未做，**A15 保持未勾选**。
 
 ### 当前放行结论
 
