@@ -193,7 +193,7 @@ it('用户状态不变：execCounts / 变量 / stale / 文件树；工作区写�
   expect(existsSync(path.join(h.dir, 'sneaky.csv'))).toBe(false);
   const sessionsDir = path.join(h.dir, '.novalab', 'sessions');
   const events = readdirSync(sessionsDir)
-    .filter((f) => f.endsWith('.jsonl'))
+    .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.runs.jsonl')) // 运行日志（ADR-014）另有形状
     .flatMap((f) => readFileSync(path.join(sessionsDir, f), 'utf8').trim().split('\n'))
     .map((l) => JSON.parse(l) as { kind: string; actor: string; payloadRef?: string });
   const shadowEvents = events.filter((e) => e.kind.startsWith('shadow_'));

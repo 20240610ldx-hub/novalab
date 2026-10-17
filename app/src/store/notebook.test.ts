@@ -97,6 +97,7 @@ describe('applyRunEvent（run.* 通知 reducer）', () => {
       frames: [{ file: 'demo.py', line: 12, fn: '<module>', srcLine: "df['foo']" }],
     });
     expect(cells[0]!.status).toBe('error');
+    expect(cells[0]!.execCount).toBeNull(); // 旧内核不带 execCount → 保持原值
     expect(cells[0]!.output?.traceback?.text).toBe('KeyError: foo');
     expect(cells[0]!.output?.traceback?.frames[0]).toEqual({
       file: 'demo.py',
@@ -104,6 +105,16 @@ describe('applyRunEvent（run.* 通知 reducer）', () => {
       fn: '<module>',
       srcLine: "df['foo']",
     });
+  });
+
+  it('run.error 携带 execCount → 更新执行计数（失败的运行也计数）', () => {
+    const cells = applyRunEvent([makeCell({ status: 'running', execCount: 2 })], 'run.error', {
+      cellId: 'c1',
+      traceback: 'KeyError: foo',
+      frames: [],
+      execCount: 3,
+    });
+    expect(cells[0]!.execCount).toBe(3);
   });
 
   it('未知 cellId / 未知方法不改动列表', () => {

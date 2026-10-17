@@ -73,7 +73,18 @@ import { SessionStore, notebookPathsMatch, type ActiveSession } from './session-
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
-import { exportIpynb, IpynbError, type ExportCell } from './exporter';
+import { exportIpynb, IpynbError, parseTracebackTail, type ExportCell, type ExportRunSummary } from './exporter';
+import {
+  RUN_HISTORY_DEFAULT_LIMIT,
+  RunLog,
+  agentRunHistory,
+  readRunLog,
+  runLogFileFor,
+  type AgentRunHistory,
+  type RunActor,
+  type RunLogRecord,
+  type RunTrigger,
+} from './run-log';
 import { ImportError, importIpynb } from './importer';
 import type { CellSrc, ShadowRunner } from './shadow/manager';
 import { buildRunReport, CONTRACT_KINDS, contractResults, type ContractResult, type ShadowBudgetView, type ShadowRunReport } from './shadow/report';
@@ -190,6 +201,17 @@ interface NotebookContext {
   restartInFlight: boolean;
   /** ADR-013：影子运行与核验记录（核验绑定用；不出进程）。 */
   shadow: ShadowLedger;
+  /** ADR-014：当前会话的追加式运行日志（会话开始时创建、结束时释放）。 */
+  runLog?: RunLog;
+  /** ADR-014：正在进行的执行请求（谁触发、根 cell），供 run.started 归因。 */
+  runIntent?: RunIntent;
+}
+
+interface RunIntent {
+  rootCellId: string;
+  actor: RunActor;
+  trigger: RunTrigger;
+  replCode?: string;
 }
 
 /** 每个 notebook 的影子运行账本：runId → 运行要点，verificationId → 契约结果，diffId → 核验绑定。 */
@@ -451,6 +473,8 @@ export class RpcRouter {
         return this.agentListCells();
       case 'agent.cellCode':
         return this.agentCellCode(params);
+      case 'agent.runHistory':
+        return this.agentRunHistory(params);
       case 'agent.cellOutput':
         return this.agentCellOutput(params);
       case 'agent.executeCell':
@@ -489,6 +513,8 @@ export class RpcRouter {
         return this.sessionList(params);
       case 'session.open':
         return this.sessionOpen(params);
+      case 'session.runs':
+        return this.sessionRuns(params);
       case 'export.ipynb':
         return this.exportIpynb(params);
       case 'import.ipynb':
@@ -785,7 +811,7 @@ export class RpcRouter {
     });
   }
 
-  private async cellRun(params: Record<string, unknown>): Promise<RunReport> {
+  private async cellRun(params: Record<string, unknown>, actor: RunActor = 'user'): Promise<RunReport> {
     const ctx = this.focusCtx();
     const cache = ctx.cache!;
     const cellId = strParam(params, 'cellId');
@@ -793,12 +819,24 @@ export class RpcRouter {
     if (!cache.cells.some((c) => c.id === cellId)) {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
     }
-    const report = (await ctx.supervisor.request('exec_cell', {
-      cellId,
-      cascade,
-    })) as RunReport;
+    const report = await this.execTracked(ctx, 'exec_cell', { cellId, cascade }, { rootCellId: cellId, actor, trigger: 'direct' });
     this.settleRun(ctx, report);
     return report;
+  }
+
+  /** 发起一次内核执行并登记归因（ADR-014）；请求结束即清除，迟到的通知按无归因处理。 */
+  private async execTracked(
+    ctx: NotebookContext,
+    method: 'exec_cell' | 'exec_repl',
+    params: Record<string, unknown>,
+    intent: RunIntent,
+  ): Promise<RunReport> {
+    ctx.runIntent = intent;
+    try {
+      return (await ctx.supervisor.request(method, params)) as RunReport;
+    } finally {
+      if (ctx.runIntent === intent) ctx.runIntent = undefined;
+    }
   }
 
   /**
@@ -822,7 +860,7 @@ export class RpcRouter {
       return denied('focus-changed');
     }
     if (ctx.cache.cells.find((c) => c.id === cellId)?.code !== code) return denied('code-changed');
-    return this.cellRun({ cellId, cascade });
+    return this.cellRun({ cellId, cascade }, 'agent');
   }
 
   /**
@@ -1149,7 +1187,7 @@ export class RpcRouter {
   private async kernelRepl(params: Record<string, unknown>): Promise<RunReport> {
     const ctx = this.focusCtx();
     const code = strParam(params, 'code');
-    const report = (await ctx.supervisor.request('exec_repl', { code })) as RunReport;
+    const report = await this.execTracked(ctx, 'exec_repl', { code }, { rootCellId: 'repl', actor: 'user', trigger: 'repl', replCode: code });
     this.log(ctx, 'repl', 'repl', `ok:${report.ok}`);
     return report;
   }
@@ -1346,10 +1384,11 @@ export class RpcRouter {
         return out; // 编译错不进运行队列（spec §12）
       }
       // accept = cell.save + cell.run cascade=false（Owner 裁决 mark-only）
-      const report = (await ctx.supervisor.request('exec_cell', {
-        cellId: runCellId,
-        cascade: false,
-      })) as RunReport;
+      const report = await this.execTracked(ctx, 'exec_cell', { cellId: runCellId, cascade: false }, {
+        rootCellId: runCellId,
+        actor: 'user',
+        trigger: 'accept',
+      });
       this.settleRun(ctx, report);
       out.run = report;
       return out;
@@ -1431,6 +1470,16 @@ export class RpcRouter {
     return { cellId, code: cell.code };
   }
 
+  /** get_run_history（ADR-014 O2）：当前会话该 cell 的最近尝试；无运行日志（未开会话）→ 空历史。 */
+  private agentRunHistory(params: Record<string, unknown>): AgentRunHistory {
+    const ctx = this.focusCtx();
+    const cellId = strParam(params, 'cellId');
+    if (!ctx.cache!.cells.some((c) => c.id === cellId)) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
+    const limit = typeof params['limit'] === 'number' ? params['limit'] : RUN_HISTORY_DEFAULT_LIMIT;
+    const records = ctx.runLog ? readRunLog(ctx.runLog.file).records : [];
+    return agentRunHistory(records, cellId, limit);
+  }
+
   /**
    * get_cell_output：仅返回隐私白名单字段。
    * stdout/stderr 和写入路径保留给本地 UI/session，不穿过 agent/MCP 出口。
@@ -1488,6 +1537,16 @@ export class RpcRouter {
     const ctx = this.ctxByPath(p);
     if (!ctx) return;
     this.accumulateOutput(ctx, method, params);
+    this.recordRun(ctx, method, params);
+    if (ctx.cache && method === 'run.error') {
+      // 失败的运行也计数（novakernel ≥ 本版随 run.error 下发 execCount；旧内核缺省 → 不动）
+      const rp = params as { cellId?: unknown; execCount?: unknown };
+      if (typeof rp.cellId === 'string' && typeof rp.execCount === 'number') {
+        ctx.cache.execCounts[rp.cellId] = rp.execCount;
+        const cell = ctx.cache.cells.find((c) => c.id === rp.cellId);
+        if (cell) cell.execCount = rp.execCount;
+      }
+    }
     if (ctx.cache && method === 'run.done') {
       const rp = params as RunDoneParams;
       ctx.cache.execCounts[rp.cellId] = rp.execCount;
@@ -1575,6 +1634,49 @@ export class RpcRouter {
     }
   }
 
+  /** ADR-014：run.started 登记、run.done / run.error 落一行（在 accumulateOutput 之后调用，输出摘要已就绪）。 */
+  private recordRun(ctx: NotebookContext, method: string, params: unknown): void {
+    const log = ctx.runLog;
+    if (!log) return;
+    const p = params as Record<string, unknown>;
+    const cellId = typeof p['cellId'] === 'string' ? p['cellId'] : undefined;
+    if (!cellId) return;
+    const intent = ctx.runIntent;
+    if (method === 'run.started') {
+      const isRoot = intent?.rootCellId === cellId;
+      const code = cellId === 'repl' ? (intent?.replCode ?? '') : (ctx.cache?.cells.find((c) => c.id === cellId)?.code ?? '');
+      log.started(cellId, {
+        code,
+        actor: intent?.actor ?? 'user',
+        trigger: intent ? (isRoot ? intent.trigger : 'cascade') : 'direct',
+        ...(intent && !isRoot ? { rootCellId: intent.rootCellId } : {}),
+      });
+      return;
+    }
+    if (method !== 'run.done' && method !== 'run.error') return;
+    const buf = ctx.outputs.get(cellId);
+    const execCount = typeof p['execCount'] === 'number' ? p['execCount'] : (ctx.cache?.execCounts[cellId] ?? 0);
+    let error: { name: string; line?: number } | undefined;
+    if (method === 'run.error') {
+      const tb = typeof p['traceback'] === 'string' ? p['traceback'] : '';
+      const frames = Array.isArray(p['frames']) ? (p['frames'] as { file?: unknown; line?: unknown }[]) : [];
+      const own = frames.filter((f) => f?.file === `<cell ${cellId}>` && typeof f.line === 'number').at(-1);
+      error = { name: parseTracebackTail(tb).ename, ...(own ? { line: own.line as number } : {}) };
+    }
+    log.finished(cellId, {
+      ok: method === 'run.done',
+      attempt: execCount,
+      ...(typeof p['durationMs'] === 'number' ? { durationMs: p['durationMs'] } : {}),
+      ...(error ? { error } : {}),
+      out: {
+        stdoutBytes: Buffer.byteLength(buf?.stdout ?? '', 'utf8'),
+        stderrBytes: Buffer.byteLength(buf?.stderr ?? '', 'utf8'),
+        mime: buf ? [...buf.mimeKeys] : [],
+        writes: buf ? [...buf.writes] : [],
+      },
+    });
+  }
+
   private ensureOutputBuffer(ctx: NotebookContext, cellId: string): OutputBuffer {
     let buf = ctx.outputs.get(cellId);
     if (!buf) {
@@ -1609,6 +1711,7 @@ export class RpcRouter {
       cellCount: ctx.cache?.cells.length ?? 0,
     });
     ctx.session = session;
+    ctx.runLog = new RunLog(runLogFileFor(session.jsonlFile), { clock: this.clock });
     this.deps.broadcast('session.started', {
       sessionId: session.id,
       startedAt: session.startedAt,
@@ -1624,6 +1727,7 @@ export class RpcRouter {
     const session = ctx.session;
     if (!session) return;
     ctx.session = undefined;
+    ctx.runLog = undefined;
     try {
       const meta = this.sessions.end(session, this.snapshotCells(ctx), reason);
       this.deps.broadcast('session.ended', {
@@ -1710,6 +1814,30 @@ export class RpcRouter {
       if (live) live.cellCount = ctx.cache.cells.length;
     }
     return metas;
+  }
+
+  /**
+   * session.runs {notebookPath?, sessionId?, cellId?} → 运行日志（ADR-014）。缺省 = 当前 notebook 的
+   * 当前会话。sessionId 必须是该 notebook 会话索引里的 id（不拼接任意路径）。只供本机前端，不进 Agent 工具。
+   */
+  private sessionRuns(params: Record<string, unknown>): { sessionId: string | null; records: RunLogRecord[]; truncated: boolean } {
+    const nb =
+      typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
+        ? params['notebookPath']
+        : this.focusCtxOptional()?.path;
+    if (!nb) throw new RpcFault(ERR_INVALID_PARAMS, 'session.runs 需要 {notebookPath}（当前无已打开 notebook）');
+    const cellId = typeof params['cellId'] === 'string' ? params['cellId'] : undefined;
+    const ctx = this.ctxByPath(nb);
+    const requested = typeof params['sessionId'] === 'string' && params['sessionId'] !== '' ? params['sessionId'] : undefined;
+    if (!requested || requested === ctx?.session?.id) {
+      if (!ctx?.runLog || !ctx.session) return { sessionId: null, records: [], truncated: false };
+      return { sessionId: ctx.session.id, ...readRunLog(ctx.runLog.file, { cellId }) };
+    }
+    if (!this.sessions.list(path.dirname(nb), nb).some((m) => m.id === requested)) {
+      throw new RpcFault(ERR_INVALID_PARAMS, `unknown sessionId: ${requested}`);
+    }
+    const file = runLogFileFor(path.join(SessionStore.dirFor(path.dirname(nb)), `${requested}.jsonl`));
+    return { sessionId: requested, ...readRunLog(file, { cellId }) };
   }
 
   /** session.open：按所属 notebook 查询；live 用该内核缓存投影，历史读磁盘快照。 */
@@ -1806,6 +1934,25 @@ export class RpcRouter {
       }));
     } else {
       throw new RpcFault(ERR_INVALID_PARAMS, 'export.ipynb：无法定位会话（无 live notebook 且未传 sessionId）');
+    }
+    const runsFile =
+      ctx?.runLog && (!sessionId || sessionId === ctx.session?.id)
+        ? ctx.runLog.file
+        : sessionId
+          ? runLogFileFor(path.join(SessionStore.dirFor(path.dirname(nb)), `${sessionId}.jsonl`))
+          : undefined;
+    if (runsFile) {
+      const byCell = new Map<string, ExportRunSummary[]>();
+      for (const r of readRunLog(runsFile).records) {
+        const list = byCell.get(r.cellId) ?? [];
+        list.push({
+          attempt: r.attempt, ts: r.ts, durationMs: r.durationMs, ok: r.ok,
+          ...(r.error ? { error: r.error } : {}),
+          actor: r.actor, trigger: r.trigger, codeSha256: r.codeSha256,
+        });
+        byCell.set(r.cellId, list);
+      }
+      cells = cells.map((c) => (c.id && byCell.has(c.id) ? { ...c, runs: byCell.get(c.id)! } : c));
     }
     const target =
       typeof params['target'] === 'string' && params['target'] !== ''

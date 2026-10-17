@@ -67,6 +67,7 @@ describe('tool-schemas: zod 单源 → TypeBox', () => {
       { runId: 'r', contracts: [{ kind: 'range', target: 'df', column: 'a', min: 'zero' }] },
       { contracts: [] },
     ],
+    get_run_history: [{ cellId: 'a' }, { cellId: 'a', limit: 5 }, { cellId: 'a', limit: 0 }, { cellId: 'a', limit: 2.5 }, { cellId: 'a', limit: '5' }, {}],
   };
 
   /** pi 校验：成功返回（可能经类型转换的）参数，失败返回 null。 */
@@ -95,8 +96,8 @@ describe('tool-schemas: zod 单源 → TypeBox', () => {
         }
       }
     }
-    // 已知差异（写进 ADR 风险）：pi 的 TypeBox Value 转换把 1 → "1"、"true" → true（"yes" 仍拒绝）
-    expect(divergent).toEqual(['get_cell_output:{"cellId":1}', 'propose_code_change:{"targetCellId":"a","action":"update","newCode":1}', 'execute_cell:{"cellId":"a","cascade":"true"}']);
+    // 已知差异（写进 ADR 风险）：pi 的 TypeBox Value 转换把 1 → "1"、"true" → true、"5" → 5（"yes" 仍拒绝）
+    expect(divergent).toEqual(['get_cell_output:{"cellId":1}', 'propose_code_change:{"targetCellId":"a","action":"update","newCode":1}', 'execute_cell:{"cellId":"a","cascade":"true"}', 'get_run_history:{"cellId":"a","limit":"5"}']);
   });
 });
 

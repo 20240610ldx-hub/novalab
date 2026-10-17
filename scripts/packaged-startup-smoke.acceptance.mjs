@@ -9,7 +9,7 @@ import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { runPackagedStartupSmoke } from './packaged-startup-smoke.mjs';
+import { prewarmPackagedPython, runPackagedStartupSmoke } from './packaged-startup-smoke.mjs';
 
 const runFile = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -139,6 +139,11 @@ async function runCase(t, options = {}, expectedError) {
 }
 
 // Each test gets its own Bridge/kernel tree; tests intentionally run serially.
+// 干净机器首启要下载解释器与依赖（>60 s），会把第一个用例拖超时，超时用例的后台操作再污染后续用例的
+// 成功计数。先按产品同款命令预热（产品自身首启预算 300 s），用例只考核启动/清理生命周期。
+before(() => {
+  prewarmPackagedPython();
+}, { timeout: 330_000 });
 before(async () => {
   originalDemos = await demoHashes();
   await new Promise((resolve, reject) => {

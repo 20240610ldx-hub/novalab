@@ -206,8 +206,21 @@ def test_memory_limit_turns_huge_allocation_into_memoryerror(tmp_path):
         sp.close()
 
 
-def test_shadow_exits_when_parent_dies(tmp_path):
-    """bridge 死亡后影子进程不成为孤儿：即使正卡在死循环里。"""
+# 有的 CPython 构建没有 os.pidfd_open（uv 托管的 python-build-standalone 3.14.5 即如此），
+# 看门狗必须走不依赖它的路径；在当前解释器上删掉该函数模拟这种构建。
+_NO_PIDFD = ("import os, runpy\n"
+             "if hasattr(os, 'pidfd_open'):\n"
+             "    del os.pidfd_open\n"
+             "runpy.run_module('novakernel.shadow_server', run_name='__main__')\n")
+
+
+@pytest.mark.parametrize("launcher", [
+    pytest.param(["-m", "novakernel.shadow_server"], id="native"),
+    pytest.param(["-c", _NO_PIDFD], id="no-pidfd",
+                 marks=pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc 路径")),
+])
+def test_shadow_exits_when_parent_dies(tmp_path, launcher):
+    """bridge 死亡后影子进程不成为孤儿：即使正卡在死循环里，且 bridge 不是直接父进程。"""
     import time
 
     parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
@@ -217,7 +230,7 @@ def test_shadow_exits_when_parent_dies(tmp_path):
     ws.mkdir()
     env = minimal_env(scratch)
     env["NOVALAB_SHADOW_PARENT_PID"] = str(parent.pid)
-    p = subprocess.Popen([sys.executable, "-m", "novakernel.shadow_server"], stdin=subprocess.PIPE,
+    p = subprocess.Popen([sys.executable, *launcher], stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(ws), env=env,
                          text=True, encoding="utf-8")
     try:

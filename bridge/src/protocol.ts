@@ -471,7 +471,7 @@ export interface ProvidersSetActiveResult {
  * - shutdown        → {ok:true} 后进程退出
  *
  * 内核通知（stdout 无 id 行）：run.stdout/run.stderr {cellId,text}、
- * run.mime {cellId,mime,data}、run.error {cellId,traceback,frames}、
+ * run.mime {cellId,mime,data}、run.error {cellId,traceback,frames,execCount?}、
  * run.notify {cellId,kind,path}（kind='file-write'，P2.9 写事件）、
  * run.done {cellId,execCount,cascaded,durationMs}、run.started {cellId}（可选）。
  */

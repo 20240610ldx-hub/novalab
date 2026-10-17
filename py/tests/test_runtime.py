@@ -154,6 +154,13 @@ def test_failed_cell_defs_not_committed():
     assert "x" not in rt.globals
     errs = col.of("run.error", "a")
     assert len(errs) == 1
+    # 失败的运行同样计数，且随 run.error 下发（否则前端停留在 [0]、会话视图漏掉失败 cell）
+    assert errs[0]["execCount"] == 1
+    # 内核自身的调度帧（runtime.py _run_cell）不进 traceback 文本与 frames：用户只看到自己的 cell
+    assert "runtime.py" not in rep["traceback"]
+    assert errs[0]["frames"][0]["file"] == "<cell a>"
+    rt.exec_cell("a")
+    assert col.of("run.error", "a")[-1]["execCount"] == 2
     frame = errs[0]["frames"][-1]
     assert frame["file"] == "<cell a>"
     assert frame["srcLine"] == "raise ValueError('boom')"
