@@ -113,17 +113,19 @@ export class RunLog {
     this.lastRunId.set(cellId, runId);
   }
 
-  finished(cellId: string, fin: RunFinishInfo): void {
+  /** 返回本次运行的 runId 与代码哈希（ADR-015 溯源关联；日志达上限不落盘时照样返回）；无 started → undefined。 */
+  finished(cellId: string, fin: RunFinishInfo): { runId: string; codeSha256: string } | undefined {
     const p = this.pending.get(cellId);
-    if (!p) return;
+    if (!p) return undefined;
     this.pending.delete(cellId);
-    if (this.truncated) return;
+    const sha = sha256Hex(p.info.code);
+    const ref = { runId: p.runId, codeSha256: sha };
+    if (this.truncated) return ref;
     if (this.written >= this.maxRecords) {
       this.truncated = true;
       appendFileSync(this.file, JSON.stringify({ v: 1, truncated: true }) + '\n', 'utf8');
-      return;
+      return ref;
     }
-    const sha = sha256Hex(p.info.code);
     const rec: RunLogRecord = {
       v: 1,
       runId: p.runId,
@@ -150,6 +152,7 @@ export class RunLog {
     if (fin.error) rec.error = fin.error;
     appendFileSync(this.file, JSON.stringify(rec) + '\n', 'utf8');
     this.written++;
+    return ref;
   }
 }
 

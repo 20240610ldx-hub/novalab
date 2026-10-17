@@ -73,7 +73,7 @@ import { SessionStore, notebookPathsMatch, type ActiveSession } from './session-
 import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
-import { exportIpynb, IpynbError, parseTracebackTail, type ExportCell, type ExportRunSummary } from './exporter';
+import { exportIpynb, IpynbError, parseTracebackTail, type ExportCell, type ExportProvenance, type ExportRunSummary } from './exporter';
 import {
   RUN_HISTORY_DEFAULT_LIMIT,
   RunLog,
@@ -85,6 +85,15 @@ import {
   type RunLogRecord,
   type RunTrigger,
 } from './run-log';
+import {
+  ProvenanceLog,
+  exportPath,
+  lookupProvenance,
+  provenanceFileFor,
+  readProvenance,
+  type ProvenanceFile,
+  type ProvenanceLookup,
+} from './provenance';
 import { ImportError, importIpynb } from './importer';
 import type { CellSrc, ShadowRunner } from './shadow/manager';
 import { buildRunReport, CONTRACT_KINDS, contractResults, type ContractResult, type ShadowBudgetView, type ShadowRunReport } from './shadow/report';
@@ -127,6 +136,8 @@ interface OutputBuffer {
   mime: Record<string, string | string[]>;
   /** run.notify kind='file-write' 的路径（写入顺序，去重，≤WRITES_PATH_LIMIT）。 */
   writes: string[];
+  /** ADR-015：run.notify kind='file-read' 的路径（溯源输入；不进 Agent 出口、不进快照）。 */
+  reads: string[];
 }
 
 /** agent.cellOutput / get_cell_output 的出进程安全结果（spec §8）。 */
@@ -203,6 +214,8 @@ interface NotebookContext {
   shadow: ShadowLedger;
   /** ADR-014：当前会话的追加式运行日志（会话开始时创建、结束时释放）。 */
   runLog?: RunLog;
+  /** ADR-015：结果溯源（notebook 目录的 .novalab/provenance.jsonl；跨会话）。 */
+  provenance?: ProvenanceLog;
   /** ADR-014：正在进行的执行请求（谁触发、根 cell），供 run.started 归因。 */
   runIntent?: RunIntent;
 }
@@ -515,6 +528,8 @@ export class RpcRouter {
         return this.sessionOpen(params);
       case 'session.runs':
         return this.sessionRuns(params);
+      case 'provenance.lookup':
+        return this.provenanceLookup(params);
       case 'export.ipynb':
         return this.exportIpynb(params);
       case 'import.ipynb':
@@ -1583,6 +1598,7 @@ export class RpcRouter {
           mimeKeys: [],
           mime: {},
           writes: [],
+          reads: [],
         });
         return;
       case 'run.stdout':
@@ -1621,12 +1637,15 @@ export class RpcRouter {
       case 'run.notify': {
         // P2.9 写事件：kind='file-write' 的 path 进缓存（agent.cellOutput.writes）。
         // 透传前端由 onKernelEvent 的焦点广播统一完成，这里只做累积。
-        if (p['kind'] !== 'file-write') return;
+        // ADR-015：kind='file-read' 进 reads（只供溯源）。
+        const kind = p['kind'];
+        if (kind !== 'file-write' && kind !== 'file-read') return;
         const wpath = p['path'];
         if (typeof wpath !== 'string' || wpath === '') return;
         const buf = this.ensureOutputBuffer(ctx, cellId);
-        if (buf.writes.length >= WRITES_PATH_LIMIT || buf.writes.includes(wpath)) return;
-        buf.writes.push(wpath);
+        const list = kind === 'file-write' ? buf.writes : buf.reads;
+        if (list.length >= WRITES_PATH_LIMIT || list.includes(wpath)) return;
+        list.push(wpath);
         return;
       }
       default:
@@ -1663,7 +1682,7 @@ export class RpcRouter {
       const own = frames.filter((f) => f?.file === `<cell ${cellId}>` && typeof f.line === 'number').at(-1);
       error = { name: parseTracebackTail(tb).ename, ...(own ? { line: own.line as number } : {}) };
     }
-    log.finished(cellId, {
+    const ref = log.finished(cellId, {
       ok: method === 'run.done',
       attempt: execCount,
       ...(typeof p['durationMs'] === 'number' ? { durationMs: p['durationMs'] } : {}),
@@ -1675,12 +1694,23 @@ export class RpcRouter {
         writes: buf ? [...buf.writes] : [],
       },
     });
+    if (ref && ctx.session && buf) {
+      ctx.provenance?.record({
+        notebook: path.basename(ctx.path),
+        sessionId: ctx.session.id,
+        runId: ref.runId,
+        cellId,
+        codeSha256: ref.codeSha256,
+        reads: [...buf.reads],
+        writes: [...buf.writes],
+      });
+    }
   }
 
   private ensureOutputBuffer(ctx: NotebookContext, cellId: string): OutputBuffer {
     let buf = ctx.outputs.get(cellId);
     if (!buf) {
-      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], mime: {}, writes: [] };
+      buf = { stdout: '', stderr: '', stdoutTrunc: false, stderrTrunc: false, mimeKeys: [], mime: {}, writes: [], reads: [] };
       ctx.outputs.set(cellId, buf);
     }
     return buf;
@@ -1712,6 +1742,7 @@ export class RpcRouter {
     });
     ctx.session = session;
     ctx.runLog = new RunLog(runLogFileFor(session.jsonlFile), { clock: this.clock });
+    ctx.provenance ??= new ProvenanceLog(provenanceFileFor(path.dirname(ctx.path)), { clock: this.clock });
     this.deps.broadcast('session.started', {
       sessionId: session.id,
       startedAt: session.startedAt,
@@ -1891,7 +1922,20 @@ export class RpcRouter {
    * live 会话（缺省 sessionId 或等于焦点当前会话）走富缓存（含 mime 数据）；
    * 历史会话走 snapshot（文本形态输出，mime 仅键名故不含图像数据）。
    */
-  private exportIpynb(params: Record<string, unknown>): { path: string; nbCells: number; nbOutputs: number } {
+  /** ADR-015：某文件最近一次由哪次运行产生，以及它和各输入现在是否仍与记录一致。 */
+  private async provenanceLookup(params: Record<string, unknown>): Promise<ProvenanceLookup> {
+    const nb =
+      typeof params['notebookPath'] === 'string' && params['notebookPath'] !== ''
+        ? params['notebookPath']
+        : this.focusCtxOptional()?.path;
+    if (!nb) throw new RpcFault(ERR_INVALID_PARAMS, 'provenance.lookup 需要 {notebookPath}（当前无已打开 notebook）');
+    const target = strParam(params, 'path');
+    const ctx = this.ctxByPath(nb);
+    await ctx?.provenance?.whenIdle();
+    return lookupProvenance(provenanceFileFor(path.dirname(nb)), target);
+  }
+
+  private async exportIpynb(params: Record<string, unknown>): Promise<{ path: string; nbCells: number; nbOutputs: number }> {
     const nb =
       typeof params['path'] === 'string' && params['path'] !== ''
         ? params['path']
@@ -1953,6 +1997,20 @@ export class RpcRouter {
         byCell.set(r.cellId, list);
       }
       cells = cells.map((c) => (c.id && byCell.has(c.id) ? { ...c, runs: byCell.get(c.id)! } : c));
+    }
+    if (sessionId) {
+      await ctx?.provenance?.whenIdle();
+      const dir = path.dirname(nb);
+      const latest = new Map<string, ExportProvenance>();
+      const fp = (f: ProvenanceFile) => ({
+        path: exportPath(f.path, dir), sha256: f.sha256, bytes: f.bytes,
+        ...(f.skipped ? { skipped: f.skipped } : {}), ...(f.inPlace ? { inPlace: f.inPlace } : {}),
+      });
+      for (const r of readProvenance(provenanceFileFor(dir))) {
+        if (r.sessionId !== sessionId || r.notebook !== path.basename(nb)) continue;
+        latest.set(r.cellId, { runId: r.runId, ts: r.ts, codeSha256: r.codeSha256, inputs: r.inputs.map(fp), outputs: r.outputs.map(fp) });
+      }
+      cells = cells.map((c) => (c.id && latest.has(c.id) ? { ...c, provenance: latest.get(c.id)! } : c));
     }
     const target =
       typeof params['target'] === 'string' && params['target'] !== ''

@@ -261,11 +261,12 @@ export interface RunDoneParams {
 }
 
 /**
- * run.notify：内核结构化副作用通知（P2.9）。目前唯一 kind 是 'file-write'——
- * exec 窗口内以写方式打开的文件（绝对路径，内核已去重、单次 exec ≤50 条）；
- * kind 保持开放字符串以便后续扩展（如 network-request）。
+ * run.notify：内核结构化副作用通知（P2.9）。kind：
+ * - 'file-write'：exec 窗口内以写方式打开、结束时仍存在的文件（绝对路径，内核已去重、单次 exec ≤50 条）；
+ * - 'file-read'（ADR-015）：只读打开的数据文件（过滤解释器 / 库 / 源码 / 字体，≤50 条），只供溯源。
+ * kind 保持开放字符串以便后续扩展（如 network-request）；旧前端忽略未知 kind。
  */
-export type RunNotifyKind = 'file-write';
+export type RunNotifyKind = 'file-write' | 'file-read';
 
 export interface RunNotifyParams {
   cellId: string;

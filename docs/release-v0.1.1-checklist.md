@@ -516,6 +516,17 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | Agent 读取 | Owner 裁决 O2 = 开放：`get_run_history`（成败 / 错误类名 + 行号 / 触发 / 耗时 / 变化行 ≤2000 字符），过 router + M5 白名单；测试：视图单元 3、router 经工具 + 闸 1（断言 evalue 不出进程）、pi↔zod 参数一致性样例 6 |
 | 边界 | Windows-only；历史快照不存图（Owner 裁决） |
 
+### 2026-10-17 第二波第二包：结果溯源 SHA-256（ADR-015，Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 内核 | `run.notify file-read`（过滤解释器 / 库 / 源码 / 字体 / 系统目录，≤50）；写完即删的临时写入不再报告。先红：Python 5（读 4 + 临时写 1） |
+| 记录 | `.novalab/provenance.jsonl`：每次读写过文件的运行一行，输入 / 输出 SHA-256 + 字节数，>1 GiB 只记大小，先读后写标 inPlace；以 runId 关联运行日志 |
+| 查询 / 界面 | `provenance.lookup` 现场比对文件与输入现状；「wrote …」行展开显示写出者、短哈希、现状与输入 |
+| 导出 | cell `metadata.novalab.provenance`；目录外路径只留文件名 |
+| 测试 | 模块单元 5、router 3、真实内核验收 1（pandas + matplotlib 只记数据文件）、app 2 |
+| 边界 | Windows-only；网络 / 数据库输入不可见；哈希上限暂为常量 |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。
