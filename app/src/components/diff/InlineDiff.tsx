@@ -119,6 +119,22 @@ function StateBadges({ diff }: { diff: StagedDiff }) {
           user-edited
         </span>
       )}
+      {/* F2：搬移定义的第二条依赖第一条，须按序采纳 */}
+      {diff.dependsOn?.map((dep) => (
+        <span
+          key={dep}
+          data-testid="diff-depends-on"
+          title={`先采纳 ${dep}，再采纳本条`}
+          className="rounded border border-[var(--accent-stale)] px-1.5 py-0.5 text-[var(--muted)]"
+        >
+          依赖 {dep}
+        </span>
+      ))}
+      {diff.acceptError && (
+        <span role="alert" data-testid="diff-accept-error" className="px-1.5 py-0.5 text-[var(--accent-err)]">
+          {diff.acceptError}
+        </span>
+      )}
     </>
   );
 }

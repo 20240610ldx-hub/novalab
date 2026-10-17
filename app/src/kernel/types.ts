@@ -132,8 +132,12 @@ export interface StagedDiff {
   action: 'update' | 'insert_below';
   newCode: string;
   rationale?: string;
+  /** 须先采纳的待审 diff（F2：搬移定义的第二条依赖第一条）。 */
+  dependsOn?: string[];
   origin: 'agent' | 'user';
   state: 'proposed' | 'edited-staged' | 'accepted' | 'rejected';
+  /** 纯前端：最近一次 Accept 被 bridge 拒绝的原因（下一次 diff.updated 或重试即清除）。 */
+  acceptError?: string;
 }
 
 /* ---- bridge 协议载荷（spec §6.1 的前端投影；字段名与 bridge 工作线约定一致） ---- */

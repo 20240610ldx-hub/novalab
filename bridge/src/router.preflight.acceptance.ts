@@ -103,9 +103,8 @@ it('real kernel: stage validates once and preserves controls, values, source, DA
   expect(inserted.result).toEqual({ diffId: 'diff-2' });
 
   // This assertion fails against the old probe/rollback implementation.
-  expect(requests.slice(requestStart).map((r) => r.method)).toEqual([
-    'validate_cells', 'validate_cells', 'validate_cells', 'validate_cells',
-  ]);
+  // First stage validates once; with diff-1 pending, each later stage validates alone + stacked (F2).
+  expect(requests.slice(requestStart).map((r) => r.method)).toEqual(Array(7).fill('validate_cells'));
   expect(notes.slice(noteStart).filter((n) => n.method.startsWith('run.'))).toEqual([]);
   expect((await call('agent.context')).result).toEqual(contextBefore);
   expect((await call('agent.listCells')).result).toEqual(cellsBefore);

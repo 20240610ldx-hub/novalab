@@ -84,12 +84,16 @@ export const agentToolMeta = {
     title: '提议代码变更',
     description:
       '提议代码变更 → staged diff，交前端行内审阅（Tab 采纳 / Esc 拒绝）；禁止直接覆盖 cell。' +
-      '入队前有编译预检：多重定义 / DAG 环等会被拒绝并返回 reason，请据其自纠后重试',
+      '入队前有编译预检（相对当前 notebook，并叠加全部待审 diff）：多重定义 / DAG 环等会被拒绝并返回 reason（可能附 hint），请据其自纠后重试。' +
+      '把定义搬到别的 cell 要两条提议：先 update 原 cell 去掉定义，再提交新位置；第二条返回 dependsOn，需按序采纳。' +
+      '返回 conflictsWith 表示与这些待审 diff 不能同时采纳',
   },
   execute_cell: {
     title: '执行 cell',
     description:
-      '执行指定 cell；cascade=true 时按 DAG 级联下游。返回 run 报告 {cellId, ok, cascaded, durationMs, traceback?}',
+      '在用户的 kernel 上执行指定 cell；cascade=true 时按 DAG 级联下游。每次执行都需要用户在 NovaLab 界面点「允许」。' +
+      '返回 run 报告 {cellId, ok, cascaded, durationMs, traceback?}；未获批准时返回 {denied, reason, message}——' +
+      '此时什么都没执行，不要自动重试，向用户说明原因并询问下一步。',
   },
   list_cells: {
     title: '列出 cells',
@@ -148,7 +152,8 @@ export async function executeAgentTool(
     }
     case 'execute_cell': {
       const a = agentToolSchemas.execute_cell.parse(args);
-      return host.invoke('cell.run', { cellId: a.cellId, cascade: a.cascade ?? false });
+      // 过渡闸：每次执行都要用户在 NovaLab 界面确认（router agent.executeCell）
+      return host.invoke('agent.executeCell', { cellId: a.cellId, cascade: a.cascade ?? false });
     }
     case 'list_cells': {
       agentToolSchemas.list_cells.parse(args);

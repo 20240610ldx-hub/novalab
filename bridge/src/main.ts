@@ -133,6 +133,8 @@ const router = new RpcRouter({
   multi: supervisor,
   broadcast,
   providersStore,
+  // agent.executeCell 逐次确认：只有已鉴权的 WS 前端能回应（--mcp 分支没有 → 一律拒绝）
+  confirmers: () => authenticatedClients.size,
   // Welcome「Connect…」：packaged = sidecar node + bundle；dev = pnpm tsx（仓库内）
   mcpLaunch: process.env.NOVALAB_PACKAGED
     ? [process.execPath, process.argv[1] ?? 'bridge.mjs']
