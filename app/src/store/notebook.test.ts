@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  applyRunConfirmEvent,
   applyRunEvent,
   applyStaleSet,
   mapKernelState,
@@ -180,6 +181,20 @@ describe('upsertReplCell（持久 [repl] cell）', () => {
   });
 });
 
+describe('applyRunConfirmEvent（Agent 执行确认队列）', () => {
+  const req = { requestId: 'confirm-1', kind: 'execute_cell', notebookId: 'nb', cellId: 'a', code: 'x = 1', cascade: true };
+
+  it('request 入队（去重），resolved 出队；未知 kind / 缺 requestId 忽略', () => {
+    let list = applyRunConfirmEvent([], 'agent.confirmRequest', req);
+    expect(list).toEqual([{ requestId: 'confirm-1', notebookId: 'nb', cellId: 'a', code: 'x = 1', cascade: true }]);
+    list = applyRunConfirmEvent(list, 'agent.confirmRequest', req);
+    expect(list).toHaveLength(1);
+    expect(applyRunConfirmEvent(list, 'agent.confirmRequest', { ...req, requestId: 'confirm-2', kind: 'other' })).toHaveLength(1);
+    expect(applyRunConfirmEvent(list, 'agent.confirmRequest', { ...req, requestId: undefined })).toHaveLength(1);
+    expect(applyRunConfirmEvent(list, 'agent.confirmResolved', { requestId: 'confirm-1', outcome: 'allowed' })).toEqual([]);
+  });
+});
+
 describe('normalizeDiffs（diff.updated status→state 映射）', () => {
   it('bridge 的 status 字段映射到前端 state，未知值兜底 proposed', () => {
     const diffs = normalizeDiffs({
@@ -193,6 +208,17 @@ describe('normalizeDiffs（diff.updated status→state 映射）', () => {
     expect(diffs.map((d) => d.state)).toEqual(['accepted', 'rejected', 'proposed', 'proposed']);
     expect(diffs[1]!.action).toBe('insert_below');
     expect(diffs[0]!.origin).toBe('agent');
+  });
+
+  it('dependsOn 透传（F2）；空数组/缺省不产生字段', () => {
+    const diffs = normalizeDiffs({
+      diffs: [
+        { diffId: 'diff-2', targetCellId: 'a', action: 'insert_below', newCode: 'x', status: 'proposed', dependsOn: ['diff-1'] },
+        { diffId: 'diff-3', targetCellId: 'a', action: 'update', newCode: 'y', status: 'proposed', dependsOn: [] },
+      ],
+    });
+    expect(diffs[0]!.dependsOn).toEqual(['diff-1']);
+    expect('dependsOn' in diffs[1]!).toBe(false);
   });
 
   it('非数组/缺省 diffs 返回空数组', () => {

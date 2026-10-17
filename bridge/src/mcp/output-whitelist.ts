@@ -52,16 +52,28 @@ export const TOOL_OUTPUT_WHITELIST = {
     mimeKeys: z.array(z.string()),
   }),
   propose_code_change: z.union([
-    z.object({ diffId: z.string() }),
-    z.object({ rejected: z.literal(true), reason: compileError }),
+    z.object({ diffId: z.string(), dependsOn: z.array(z.string()).optional() }),
+    z.object({
+      rejected: z.literal(true),
+      reason: compileError,
+      hint: z.string().optional(),
+      conflictsWith: z.array(z.string()).optional(),
+    }),
   ]),
-  execute_cell: z.object({
-    cellId: z.string(),
-    ok: z.boolean(),
-    cascaded: z.array(z.string()),
-    durationMs: z.number(),
-    traceback: z.string().optional(),
-  }),
+  execute_cell: z.union([
+    z.object({
+      cellId: z.string(),
+      ok: z.boolean(),
+      cascaded: z.array(z.string()),
+      durationMs: z.number(),
+      traceback: z.string().optional(),
+    }),
+    z.object({
+      denied: z.literal(true),
+      reason: z.enum(['no-confirmer', 'user-declined', 'timeout', 'focus-changed', 'code-changed']),
+      message: z.string(),
+    }),
+  ]),
   list_cells: z.array(
     z.object({
       id: z.string(),

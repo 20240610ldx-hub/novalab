@@ -25,6 +25,7 @@ import {
   ERR_METHOD_NOT_FOUND,
   ERR_NO_NOTEBOOK,
   type CompileError,
+  type KernelCompileError,
   type DagEdge,
   type DiffAction,
   type FsEntry,
@@ -128,8 +129,14 @@ export interface AgentContext {
   staleSet: string[];
 }
 
-/** diff.stage 结果：正常入队 {diffId}，或编译预检拒绝 {rejected, reason}。 */
-export type StageResult = { diffId: string } | { rejected: true; reason: CompileError };
+/**
+ * diff.stage 结果：正常入队 {diffId, dependsOn?}，或编译预检拒绝 {rejected, reason, hint?, conflictsWith?}。
+ * dependsOn = 本条只有叠加这些待审 diff 才合法（须先采纳它们）；
+ * conflictsWith = 本条单独合法，但与这些待审 diff 同时采纳会编译失败。
+ */
+export type StageResult =
+  | { diffId: string; dependsOn?: string[] }
+  | { rejected: true; reason: CompileError; hint?: string; conflictsWith?: string[] };
 
 /** diff.stage 静态编译预检用的临时 cell id（不进运行态或缓存）。 */
 const PRECHECK_CELL_ID = '__diff_precheck__';
@@ -202,7 +209,33 @@ export interface RouterDeps {
   providersStore?: ProvidersStore;
   /** bridge.mcpLaunch：外部 Agent 以 MCP 模式启动本 bridge 的命令行（Welcome 页"Connect…"展示）。 */
   mcpLaunch?: string[];
+  /**
+   * 能回应 agent.confirmRequest 的前端数（main.ts = 已鉴权 WS 客户端数）。
+   * 不传 / 0 = 没人能确认（MCP 模式）→ agent.executeCell 一律拒绝。
+   */
+  confirmers?: () => number;
+  /** 等待用户确认的上限（默认 120s；单测缩短）。 */
+  confirmTimeoutMs?: number;
 }
+
+/** agent.executeCell 被拒的原因（每个都意味着「没有执行」）。 */
+export type ExecuteDenyReason = 'no-confirmer' | 'user-declined' | 'timeout' | 'focus-changed' | 'code-changed';
+
+export interface ExecuteDenied {
+  denied: true;
+  reason: ExecuteDenyReason;
+  message: string;
+}
+
+const CONFIRM_TIMEOUT_MS = 120_000;
+
+const DENY_MESSAGES: Record<ExecuteDenyReason, string> = {
+  'no-confirmer': 'No NovaLab window is open to approve running code, so nothing was executed.',
+  'user-declined': 'The user declined to run this cell, so nothing was executed.',
+  timeout: 'The user did not answer the run confirmation in time, so nothing was executed.',
+  'focus-changed': 'The user switched notebooks before approving, so nothing was executed.',
+  'code-changed': 'The cell changed after the run was requested, so the approval no longer applies and nothing was executed.',
+};
 
 const DIFF_ACTIONS = new Set<DiffAction>(['update', 'insert_below']);
 
@@ -227,6 +260,9 @@ export class RpcRouter {
   private readonly sessions: SessionStore;
   private readonly providers: ProvidersStore;
   private readonly watcher?: NotebookWatcher;
+  /** 在途的 agent.executeCell 确认（requestId → 结算函数）；先到的回复结算并移除。 */
+  private readonly confirms = new Map<string, (outcome: 'allowed' | 'user-declined' | 'timeout') => void>();
+  private confirmSeq = 0;
 
   constructor(private readonly deps: RouterDeps) {
     this.clock = deps.clock ?? (() => new Date());
@@ -262,6 +298,7 @@ export class RpcRouter {
 
   /** 进程退场：全部会话快照落盘、停 watcher、ui.json 落盘（main.ts SIGINT/SIGTERM 调）。 */
   dispose(): void {
+    for (const settle of [...this.confirms.values()]) settle('timeout');
     for (const ctx of this.contexts.values()) this.endSession(ctx, 'shutdown');
     this.contexts.clear();
     this.byPath.clear();
@@ -330,6 +367,10 @@ export class RpcRouter {
         return this.agentCellCode(params);
       case 'agent.cellOutput':
         return this.agentCellOutput(params);
+      case 'agent.executeCell':
+        return this.agentExecuteCell(params);
+      case 'agent.confirmResponse':
+        return this.agentConfirmResponse(params);
       case 'bridge.mcpLaunch':
         return { mcpLaunch: this.deps.mcpLaunch ?? null };
       case 'ui.get':
@@ -664,6 +705,59 @@ export class RpcRouter {
     return report;
   }
 
+  /**
+   * Agent 的 execute_cell（ADR-013 影子执行落地前的过渡闸）：每次都在用户 kernel 上执行，
+   * 所以每次都要用户在界面上点「允许」。批准绑定在「请求时的 notebook + cell 源码」上：
+   * 等待期间切 tab 或源码被改，批准作废。拒绝返回 {denied}（不是 RPC 错误），让模型停下来问用户。
+   */
+  private async agentExecuteCell(params: Record<string, unknown>): Promise<RunReport | ExecuteDenied> {
+    const ctx = this.focusCtx();
+    const cellId = strParam(params, 'cellId');
+    const cascade = params['cascade'] === true;
+    const cell = ctx.cache!.cells.find((c) => c.id === cellId);
+    if (!cell) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
+    const denied = (reason: ExecuteDenyReason): ExecuteDenied => ({ denied: true, reason, message: DENY_MESSAGES[reason] });
+    if ((this.deps.confirmers?.() ?? 0) <= 0) return denied('no-confirmer');
+
+    const requestId = `confirm-${++this.confirmSeq}`;
+    const code = cell.code;
+    const timeoutMs = this.deps.confirmTimeoutMs ?? CONFIRM_TIMEOUT_MS;
+    const outcome = await new Promise<'allowed' | 'user-declined' | 'timeout'>((resolve) => {
+      const timer = setTimeout(() => settle('timeout'), timeoutMs);
+      const settle = (o: 'allowed' | 'user-declined' | 'timeout'): void => {
+        if (!this.confirms.delete(requestId)) return;
+        clearTimeout(timer);
+        this.deps.broadcast('agent.confirmResolved', { requestId, outcome: o });
+        resolve(o);
+      };
+      this.confirms.set(requestId, settle);
+      this.deps.broadcast('agent.confirmRequest', {
+        requestId,
+        kind: 'execute_cell',
+        notebookId: ctx.notebookId,
+        cellId,
+        code,
+        cascade,
+        timeoutMs,
+      });
+    });
+    if (outcome !== 'allowed') return denied(outcome);
+    if (this.focusId !== ctx.notebookId || this.contexts.get(ctx.notebookId) !== ctx || !ctx.cache) {
+      return denied('focus-changed');
+    }
+    if (ctx.cache.cells.find((c) => c.id === cellId)?.code !== code) return denied('code-changed');
+    return this.cellRun({ cellId, cascade });
+  }
+
+  private agentConfirmResponse(params: Record<string, unknown>): { requestId: string; outcome: 'allowed' | 'user-declined' } {
+    const requestId = strParam(params, 'requestId');
+    const settle = this.confirms.get(requestId);
+    if (!settle) throw new RpcFault(ERR_INVALID_PARAMS, `unknown or already-resolved confirm request: ${requestId}`);
+    const outcome = params['allow'] === true ? 'allowed' : 'user-declined';
+    settle(outcome);
+    return { requestId, outcome };
+  }
+
   /** run 完成后：出 staleSet、落 session 事件（run | error）。 */
   private settleRun(ctx: NotebookContext, report: RunReport): void {
     const cache = ctx.cache!;
@@ -800,10 +894,16 @@ export class RpcRouter {
    * compileError → 不入队，返回 {rejected:true, reason}，让模型自纠。
    * 验证不触碰运行态 / cache、不落盘、不执行；接受 diff 才提交变更。
    */
-  private async diffStage(params: Record<string, unknown>): Promise<StageResult> {
+  private diffStage(params: Record<string, unknown>): Promise<StageResult> {
     const ctx = this.focusCtx();
-    const cache = ctx.cache!;
     if (ctx.restartInFlight) throw new RpcFault(ERR_KERNEL, 'diff.stage unavailable while kernel.restart is in progress');
+    // F3：AI SDK 会并发执行同一条消息里的多个工具调用；stage 读「待审队列 + cells」，
+    // 必须与其它 stage / accept / save 串行，后到的一条才能叠加先到的一条。
+    return this.serializeNotebook(ctx, () => this.stageQueued(ctx, params));
+  }
+
+  private async stageQueued(ctx: NotebookContext, params: Record<string, unknown>): Promise<StageResult> {
+    const cache = ctx.cache!;
     const targetCellId = strParam(params, 'targetCellId');
     const action = params['action'];
     const newCode = strParam(params, 'newCode');
@@ -814,12 +914,44 @@ export class RpcRouter {
       throw new RpcFault(ERR_INVALID_PARAMS, `unknown targetCellId: ${targetCellId}`);
     }
 
-    const candidate = buildCandidateCells(cache.cells, targetCellId, action as DiffAction, newCode);
-    const validation = (await ctx.supervisor.request('validate_cells', {
-      cells: candidate,
-    })) as { compileError?: CompileError };
-    if (validation.compileError) {
-      return { rejected: true, reason: validation.compileError };
+    const proposal: DiffEdit = { targetCellId, action: action as DiffAction, newCode };
+    const validate = async (stack: StagedDiff[]): Promise<CompileError | undefined> => {
+      const res = (await ctx.supervisor.request('validate_cells', {
+        cells: buildCandidateCells(cache.cells, stack, proposal),
+      })) as { compileError?: unknown };
+      return asCompileError(res.compileError);
+    };
+
+    // F2：单独验证（相对当前 notebook）+ 叠加全部待审 diff 验证（相对「全部采纳后」）
+    const pending = ctx.diffs.filter((d) => d.status === 'proposed');
+    const solo = await validate([]);
+    let dependsOn: string[] | undefined;
+    if (pending.length > 0) {
+      const stacked = await validate(pending);
+      if (stacked) {
+        if (solo) return { rejected: true, reason: stacked, ...stageHint(stacked, proposal, pending) };
+        // 单独合法、只与待审 diff 冲突：不是「先 update 谁」的问题，而是两条不能同时采纳
+        const ids = implicatedDiffs(stacked, pending);
+        const conflictsWith = ids.length > 0 ? ids : pending.map((d) => d.diffId);
+        return {
+          rejected: true,
+          reason: stacked,
+          hint:
+            `This change is valid against the current notebook but conflicts with pending ${conflictsWith.join(', ')}; ` +
+            'they cannot both be accepted. Ask the user to accept or reject those first, or propose a version that does not clash.',
+          conflictsWith,
+        };
+      }
+      if (solo) {
+        // 只依赖真正相关的待审 diff；收窄后的集合须单独复核，否则退回依赖全部待审
+        const narrowed = pending.filter((d) => implicatedDiffs(solo, [d]).length > 0);
+        dependsOn = (narrowed.length > 0 && narrowed.length < pending.length && !(await validate(narrowed))
+          ? narrowed
+          : pending
+        ).map((d) => d.diffId);
+      }
+    } else if (solo) {
+      return { rejected: true, reason: solo, ...stageHint(solo, proposal, []) };
     }
 
     const rationale = typeof params['rationale'] === 'string' ? params['rationale'] : undefined;
@@ -829,23 +961,35 @@ export class RpcRouter {
       action: action as DiffAction,
       newCode,
       ...(rationale !== undefined ? { rationale } : {}),
+      ...(dependsOn ? { dependsOn } : {}),
       status: 'proposed',
       createdAt: this.clock().toISOString(),
     };
     ctx.diffs.push(diff);
     this.emitDiffs(ctx);
     this.log(ctx, 'diff_proposed', targetCellId, diff.diffId);
-    return { diffId: diff.diffId };
+    return dependsOn ? { diffId: diff.diffId, dependsOn } : { diffId: diff.diffId };
   }
 
   private async diffAccept(
     params: Record<string, unknown>,
-  ): Promise<{ diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport }> {
+  ): Promise<{ diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: KernelCompileError; run?: RunReport }> {
     const ctx = this.focusCtx();
     if (ctx.restartInFlight) throw new RpcFault(ERR_KERNEL, 'diff.accept unavailable while kernel.restart is in progress');
     return this.serializeNotebook(ctx, async () => {
       const cache = ctx.cache!;
       const diff = this.requireDiff(ctx, strParam(params, 'diffId'));
+      // F2：依赖须先采纳；在改动 cache 之前拒绝，notebook 保持原样
+      for (const depId of diff.dependsOn ?? []) {
+        const dep = ctx.diffs.find((d) => d.diffId === depId);
+        if (dep?.status === 'accepted') continue;
+        throw new RpcFault(
+          ERR_INVALID_PARAMS,
+          dep?.status === 'proposed'
+            ? `${diff.diffId} depends on ${depId}; accept ${depId} first`
+            : `${diff.diffId} depends on ${depId}, which was rejected; reject ${diff.diffId} and re-propose it against the current notebook`,
+        );
+      }
       let runCellId = diff.targetCellId;
       if (diff.action === 'insert_below') {
         const idx = cache.cells.findIndex((c) => c.id === diff.targetCellId);
@@ -871,7 +1015,7 @@ export class RpcRouter {
       this.emitDiffs(ctx);
       this.log(ctx, 'diff_accepted', runCellId, diff.diffId);
 
-      const out: { diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: CompileError; run?: RunReport; baselineSha256?: string } = {
+      const out: { diffId: string; dagEdges: NotebookState['dagEdges']; staleSet: string[]; compileError?: KernelCompileError; run?: RunReport; baselineSha256?: string } = {
         diffId: diff.diffId,
         dagEdges: saved.dagEdges,
         staleSet: saved.staleSet,
@@ -1459,25 +1603,87 @@ function appendCapped(current: string, text: string): { value: string; truncated
   return { value: next, truncated: false };
 }
 
-/** diff.stage 编译预检：构造"应用该 diff 后的全量 cells"（insert_below 用临时 id）。 */
+type DiffEdit = Pick<StagedDiff, 'targetCellId' | 'action' | 'newCode'>;
+
+/** 待审 insert_below 在叠加预检里的临时 cell id（采纳时才分配真实 id）。 */
+const STAGED_CELL_PREFIX = 'staged-';
+
+/**
+ * diff.stage 编译预检：构造「按序应用 stack 里的待审 diff、再应用本条」后的全量 cells。
+ * 与 diff.accept 的落地顺序一致：insert_below 插在目标 cell 正下方（后插入者更靠近目标）。
+ */
 function buildCandidateCells(
   cells: NotebookState['cells'],
-  targetCellId: string,
-  action: DiffAction,
-  newCode: string,
+  stack: StagedDiff[],
+  proposal: DiffEdit,
 ): { id: string; code: string }[] {
-  const out: { id: string; code: string }[] = [];
-  for (const c of cells) {
-    if (action === 'update' && c.id === targetCellId) {
-      out.push({ id: c.id, code: newCode });
-    } else {
-      out.push({ id: c.id, code: c.code });
-    }
-    if (action === 'insert_below' && c.id === targetCellId) {
-      out.push({ id: PRECHECK_CELL_ID, code: newCode });
-    }
-  }
+  const out = cells.map((c) => ({ id: c.id, code: c.code }));
+  const apply = (edit: DiffEdit, insertId: string): void => {
+    const idx = out.findIndex((c) => c.id === edit.targetCellId);
+    if (idx < 0) return; // 目标在暂存后被删：真实采纳时会报 unknown targetCellId
+    if (edit.action === 'update') out[idx] = { id: out[idx]!.id, code: edit.newCode };
+    else out.splice(idx + 1, 0, { id: insertId, code: edit.newCode });
+  };
+  for (const d of stack) apply(d, STAGED_CELL_PREFIX + d.diffId);
+  apply(proposal, PRECHECK_CELL_ID);
   return out;
+}
+
+/** 编译错误涉及的待审 diff：其插入的临时 cell 或其 update 的目标 cell 出现在 cellIds 里。 */
+function implicatedDiffs(err: CompileError, pending: StagedDiff[]): string[] {
+  const ids = new Set(err.cellIds);
+  return pending
+    .filter((d) => ids.has(d.action === 'insert_below' ? STAGED_CELL_PREFIX + d.diffId : d.targetCellId))
+    .map((d) => d.diffId);
+}
+
+const DUPLICATE_DEF_RE = /multiple definitions of '([^']+)' \(cells ([^)]+)\)/g;
+const CYCLE_RE = /circular dependency: (.+)/g;
+
+/**
+ * 真实内核（dag.py）的 compileError 是换行拼接的纯字符串；agent 侧契约（StageResult、
+ * M5 输出白名单）要求 {message, cellIds}。在 diff.stage 边界归一，cellIds 从消息里解析。
+ */
+function asCompileError(raw: unknown): CompileError | undefined {
+  if (raw == null || raw === '') return undefined;
+  if (typeof raw === 'object' && typeof (raw as CompileError).message === 'string') {
+    const cellIds = (raw as CompileError).cellIds;
+    return { message: (raw as CompileError).message, cellIds: Array.isArray(cellIds) ? cellIds.map(String) : [] };
+  }
+  const message = String(raw);
+  const ids = new Set<string>();
+  for (const [, , list] of message.matchAll(DUPLICATE_DEF_RE)) for (const id of list!.split(', ')) ids.add(id);
+  for (const [, chain] of message.matchAll(CYCLE_RE)) for (const id of chain!.split(' -> ')) ids.add(id.trim());
+  return { message, cellIds: [...ids] };
+}
+
+/**
+ * 单赋值冲突的自纠提示：名字已被别的 cell 定义时，告诉模型「先 update 那个 cell 去掉定义，
+ * 再提交本条」——第二条会带 dependsOn 入队（F2：搬移定义需要两条 diff）。
+ */
+function stageHint(err: CompileError, proposal: DiffEdit, pending: StagedDiff[]): { hint?: string } {
+  const self = proposal.action === 'insert_below' ? PRECHECK_CELL_ID : proposal.targetCellId;
+  const lines: string[] = [];
+  for (const [, name, list] of err.message.matchAll(DUPLICATE_DEF_RE)) {
+    const owners = list!.split(', ');
+    if (!owners.includes(self)) continue;
+    const others = owners
+      .filter((id) => id !== self)
+      .map((id) =>
+        id.startsWith(STAGED_CELL_PREFIX)
+          ? `the cell inserted by pending ${id.slice(STAGED_CELL_PREFIX.length)}`
+          : `cell '${id}'`,
+      );
+    if (others.length === 0) continue;
+    lines.push(
+      `'${name}' is already defined in ${others.join(' and ')}. Each name may be defined in only one cell: ` +
+        `to move it, first propose an update to ${others.join(' / ')} that removes the definition, ` +
+        `then propose this change again (it will be queued with dependsOn).`,
+    );
+  }
+  if (lines.length === 0) return {};
+  if (pending.length > 0) lines.push(`Pending diffs considered: ${pending.map((d) => d.diffId).join(', ')}.`);
+  return { hint: lines.join('\n') };
 }
 
 function strParam(params: Record<string, unknown>, key: string): string {

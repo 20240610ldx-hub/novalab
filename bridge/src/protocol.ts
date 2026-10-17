@@ -200,11 +200,17 @@ export interface CompileError {
   cellIds: string[];
 }
 
+/**
+ * 内核 set_cells / validate_cells 实际回传的 compileError：真实内核（dag.py）是换行拼接的纯字符串，
+ * 测试替身可能给对象。cell.save / diff.accept 原样转发（app 两种都认）；agent 路径在 diff.stage 归一为 CompileError。
+ */
+export type KernelCompileError = CompileError | string;
+
 /** cell.save 响应（发给前端的子集）。 */
 export interface SaveResult {
   dagEdges: DagEdge[];
   staleSet: string[];
-  compileError?: CompileError;
+  compileError?: KernelCompileError;
   /** D4（cell.save / diff.accept 响应）：本次落盘后的基线指纹。 */
   baselineSha256?: string;
 }
@@ -291,6 +297,8 @@ export interface StagedDiff {
   action: DiffAction;
   newCode: string;
   rationale?: string;
+  /** 只有叠加这些待审 diff 才编译通过（F2）；diff.accept 要求它们已被采纳。 */
+  dependsOn?: string[];
   status: DiffStatus;
   createdAt: string;
 }

@@ -140,7 +140,20 @@ Watcher 改为仅通知；前端暂停所属 tab 自动保存，继续保留本�
 
 **D4 补充（同日，Owner 批准）**：内核 `load_file`/`save_file` 报告基线原始字节的 `baselineSha256`，bridge 在 notebook 状态、`cell.save`、`diff.accept` 中透传；前端按 tab 记录，bridge 换代后 dirty tab 也可点击重开——指纹与旧代一致才恢复自动保存，不一致或未知走第四轮冲突流程，不盲写。先红（Python 13、bridge 4、app 4 失败）后绿；app 339、bridge 278、Python 261+5 跳过、Rust 5、脚本 24、构建与集成/packaged smoke 通过；同一真实 Chromium smoke 扩为三 tab，覆盖"磁盘已变 → 冲突 → 保留副本加载磁盘"与"磁盘未变 → 草稿落盘、指纹推进"，页面错误 0、31 个自有 PID 全部退出。证据为新增 `manifest-reconnect-round6-d4.json` / `results-reconnect-round6-d4.json` 与 `stage6d4-*.log`，第六轮封存只读核对未变。A15 仍开放：跨应用草稿恢复、生产环境旧内核清理（Job Object 跟进项）、跨平台复测。
 
-## 12. 决策停点
+## 12. Agent 安全小包：F2 多格 diff 队列 + execute_cell 过渡确认（Windows-only，2026-10-17）
+
+Owner 裁决："F2 和 execute_cell 过渡确认，先作为一个小包修掉，再进入 ADR-013 实现。"对应阶段 3「完善多格 Diff 队列」与共享 Agent 可信性。
+
+- **F2**：`diff.stage` 在有待审 diff 时验证两次：相对当前 notebook，以及叠加全部待审 diff 之后。单独不过、叠加通过 → 入队并带 `dependsOn`（搬移定义 = 先 update 原 cell 去掉定义、再提交新位置）；单独通过、叠加不过 → 拒绝并带 `conflictsWith`；单赋值冲突附 `hint`，指出先 update 哪个 cell。`diff.accept` 要求依赖已采纳，否则在改动 notebook 前拒绝。前端 diff 卡片显示「依赖 diff-N」和 Accept 被拒的原因。
+- **F3（ADR-012 顺带发现）**：AI SDK 会并发执行同一消息里的工具调用，`diff.stage` 现在与 accept / save 一样排在 notebook 写队列上，后到的一条能叠加先到的一条。
+- **顺带修复**：真实内核的 `compileError` 是纯字符串，而 M5 第二道闸要求 `{message, cellIds}`，所以真实环境里**每一次被拒的 `propose_code_change` 都被整条替换为占位文本**，模型看不到拒绝原因（ADR-012 G-1 时模型在搬移定义上反复失败，可能与此有关）。现在在 stage 边界解析为结构化形式；FakeKernel 的单赋值检查也改为与 `dag.py` 同格式的字符串。
+- **execute_cell 过渡确认**：工具改走 `agent.executeCell`。bridge 广播 `agent.confirmRequest`（含将执行的源码），前端弹窗，默认焦点在「拒绝」；任一窗口先答即生效（`agent.confirmResponse`），随后广播 `agent.confirmResolved`。拒绝、超时（120 s）、等待期间切换 notebook 或源码被改，都返回 `{denied, reason, message}`，不执行。没有可确认的窗口（`--mcp` 模式）一律拒绝。这套握手是 ADR-013 O1(b)「每轮第一次运行先问用户」的基础。
+
+先红后绿：F2 路由单测 5 失败 / 1 通过，F3 并发 1 失败，确认握手 9 失败；真实内核验收先暴露字符串 compileError 与捕获组错误，修正后通过。工程门：bridge 315（25 文件）、app 388（29 文件）、Python 261 + 5 跳过、脚本 24、真实内核验收 17（7 文件，新增 `router.diffqueue.acceptance.ts` 3 个）、类型检查与生产构建。真实 Chromium smoke `scripts/agent-safety-smoke.mjs`（`AGENT_SAFETY_SMOKE_OK`）：拒绝不执行、允许后在用户 kernel 上执行；依赖 chip 可见，乱序 Accept 被拒并在卡片显示原因且 notebook 不变，按序采纳后 helper 落到新 cell。另外五个既有浏览器 smoke 与集成 / packaged smoke 复测通过。
+
+边界：仅 Windows、Chromium + Vite dev；超时只有单测；未用真实模型验证 `dependsOn` / `denied` 下的行为。**行为变化**：外部 MCP Agent 不能再执行 cell（只能读和提议）。
+
+## 13. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

@@ -97,6 +97,31 @@ describe('白名单外键被丢弃并审计', () => {
       rejected,
     );
   });
+
+  it('execute_cell 未获批准 → {denied, reason, message} 放行（模型据此停下来问用户）', async () => {
+    const denied = { denied: true, reason: 'user-declined', message: 'The user declined to run this cell, so nothing was executed.' };
+    rpc.mockResolvedValue({ ...denied, code: CANARY });
+    expect(await exec('execute_cell', { cellId: 'c1' })).toEqual(denied);
+    rpc.mockResolvedValue({ denied: true, reason: 'made-up', message: 'x' });
+    expect(await exec('execute_cell', { cellId: 'c1' })).toBe(REDACTED_TEXT);
+  });
+
+  it('propose_code_change 的 F2 字段（dependsOn / hint / conflictsWith）放行，其余仍 strip', async () => {
+    rpc.mockResolvedValue({ diffId: 'diff-2', dependsOn: ['diff-1'], newCode: CANARY });
+    expect(await exec('propose_code_change', { targetCellId: 'a', action: 'insert_below', newCode: 'y = 1' })).toEqual({
+      diffId: 'diff-2',
+      dependsOn: ['diff-1'],
+    });
+    const rejected = {
+      rejected: true,
+      reason: { message: "multiple definitions of 'w' (cells a, b)", cellIds: ['a', 'b'] },
+      hint: "'w' is already defined in cell 'b'.",
+      conflictsWith: ['diff-1'],
+    };
+    rpc.mockResolvedValue(rejected);
+    expect(await exec('propose_code_change', { targetCellId: 'a', action: 'update', newCode: 'w = 2' })).toEqual(rejected);
+    expect(lastAudit()).toMatchObject({ droppedKeys: [], redacted: false });
+  });
 });
 
 describe('fail closed', () => {
@@ -131,7 +156,7 @@ describe('fail closed', () => {
       error: BRIDGE_UPGRADE_MESSAGE,
     });
     rpc.mockRejectedValue(new Error('kernel busy'));
-    expect(await exec('execute_cell', { cellId: 'c1' })).toEqual({ toolError: 'kernel busy', method: 'cell.run' });
+    expect(await exec('execute_cell', { cellId: 'c1' })).toEqual({ toolError: 'kernel busy', method: 'agent.executeCell' });
     expect(lastAudit().redacted).toBe(false);
   });
 });
