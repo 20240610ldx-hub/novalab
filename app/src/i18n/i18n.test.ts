@@ -73,4 +73,14 @@ describe('interpolate / translate', () => {
     expect(translate('en', 'kernel.viewOnlyFooter', { time: '15:14' })).toContain('ended 15:14');
     expect(translate('zh', 'kernel.viewOnlyFooter', { time: '15:14' })).toContain('结束于 15:14');
   });
+
+  it('{var|单数|复数}：按数值选词（英文单复数），缺键同样保留原文', () => {
+    expect(interpolate('{n|cell|cells}', { n: 1 })).toBe('1 cell');
+    expect(interpolate('{n|cell|cells}', { n: 0 })).toBe('0 cells');
+    expect(interpolate('{n|cell|cells}', { n: 2 })).toBe('2 cells');
+    expect(interpolate('{n|cell|cells}', {})).toBe('{n|cell|cells}');
+    expect(translate('en', 'kernel.cells', { count: 1 })).toBe('1 cell');
+    expect(translate('en', 'sessionModal.summary', { sessions: 1, cells: 1 })).toBe('1 session · 1 cell');
+    expect(translate('en', 'sessionModal.summary', { sessions: 2, cells: 4 })).toBe('2 sessions · 4 cells');
+  });
 });

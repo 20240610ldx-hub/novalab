@@ -25,7 +25,7 @@ export const en = {
   /* ---- KernelStatusBar ---- */
   'kernel.shared': 'Python kernel · shared with the agent',
   'kernel.viewOnlyFooter': "Python · ended {time} — view only; this kernel's namespace no longer exists",
-  'kernel.cells': '{count} cells',
+  'kernel.cells': '{count|cell|cells}',
   'kernel.cascadeTitle': 'Policy for stale downstream cells after upstream re-runs / diff acceptance',
   'kernel.handleTitle': 'drag to expand variable inspector · double-click to toggle',
 
@@ -49,7 +49,7 @@ export const en = {
   /* ---- SessionModal ---- */
   'sessionModal.title': 'Session notebook',
   'sessionModal.noNotebook': 'no notebook open',
-  'sessionModal.summary': '{sessions} sessions · {cells} cells',
+  'sessionModal.summary': '{sessions|session|sessions} · {cells|cell|cells}',
   'sessionModal.importPlaceholder': 'path/to/notes.ipynb',
   'sessionModal.importAria': 'import .ipynb path',
   'sessionModal.importButton': 'import .ipynb',
@@ -131,7 +131,7 @@ export const en = {
   'onboarding.skipped': 'skipped — a previous check failed',
   'onboarding.fixLabel': 'Fix command (copy and run in the repo root):',
   'chip.title': 'Click to audit exactly what was sent to the model',
-  'chip.summary': 'context: {schemas} schemas · {tracebacks} traceback · {tools} tool results',
+  'chip.summary': 'context: {schemas|schema|schemas} · {tracebacks|traceback|tracebacks} · {tools|tool result|tool results}',
   'chip.outputsWithheld': 'cell outputs stay local',
   'chip.none': 'No request sent yet.',
   'chip.lastRequest': 'Last request · {sections} sections · {bytes} B (each section capped at 4096 B)',

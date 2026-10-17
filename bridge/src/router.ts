@@ -1488,6 +1488,15 @@ export class RpcRouter {
     const ctx = this.ctxByPath(p);
     if (!ctx) return;
     this.accumulateOutput(ctx, method, params);
+    if (ctx.cache && method === 'run.error') {
+      // 失败的运行也计数（novakernel ≥ 本版随 run.error 下发 execCount；旧内核缺省 → 不动）
+      const rp = params as { cellId?: unknown; execCount?: unknown };
+      if (typeof rp.cellId === 'string' && typeof rp.execCount === 'number') {
+        ctx.cache.execCounts[rp.cellId] = rp.execCount;
+        const cell = ctx.cache.cells.find((c) => c.id === rp.cellId);
+        if (cell) cell.execCount = rp.execCount;
+      }
+    }
     if (ctx.cache && method === 'run.done') {
       const rp = params as RunDoneParams;
       ctx.cache.execCounts[rp.cellId] = rp.execCount;

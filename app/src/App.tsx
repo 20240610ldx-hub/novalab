@@ -2,7 +2,17 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { House } from 'lucide-react';
 import { useNotebook } from './store/notebook';
 import { appModeFromSearch, searchWithAppMode, useUi } from './store/ui';
-import { AGENT_MAX, AGENT_MIN, DEFAULT_LAYOUT, SIDE_MAX, SIDE_MIN, useLayout } from './store/layout';
+import {
+  AGENT_MAX,
+  AGENT_MIN,
+  AGENT_SHRINK_FLOOR,
+  DEFAULT_LAYOUT,
+  EDITOR_MIN_WIDTH,
+  panelFlexStyle,
+  SIDE_MAX,
+  SIDE_MIN,
+  useLayout,
+} from './store/layout';
 import { useI18n } from './i18n';
 import { CellList } from './components/CellList';
 import { KernelStatusBar } from './components/KernelStatusBar';
@@ -148,7 +158,11 @@ export function App() {
           </>
         )}
 
-        <main className="flex min-w-0 flex-1 flex-col bg-[var(--bg)]" data-testid="editor">
+        <main
+          className="flex flex-1 flex-col bg-[var(--bg)]"
+          style={{ minWidth: EDITOR_MIN_WIDTH }}
+          data-testid="editor"
+        >
           {/* 降级横幅：bridge 连接失败（编辑器 UI 仍可浏览，内核功能不可用） */}
           {bridgeStatus === 'reconnecting' && (
             <div role="status" data-testid="bridge-reconnecting" className="border-b border-[var(--accent-err)] bg-[var(--diff-del)] px-3 py-1.5 text-[12px] text-[var(--accent-err)]">
@@ -236,8 +250,8 @@ export function App() {
             />
             <aside
               data-testid="agent-panel"
-              style={{ width: agentWidth }}
-              className="flex shrink-0 flex-col bg-[var(--side)]"
+              style={panelFlexStyle(agentWidth, AGENT_SHRINK_FLOOR)}
+              className="flex flex-col bg-[var(--side)]"
             >
               <Suspense fallback={<div data-testid="agent-panel-loading" className="p-3 text-[12px] text-[var(--muted)]">…</div>}>
                 <AgentPanel />

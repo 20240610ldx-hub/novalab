@@ -494,6 +494,15 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
 | F7 追加 | 设置面板每个 provider 可填「最大输出 tokens」（256–262144，留空 = 自动，占位显示自动值）；`providers.set/list` 可选 `maxOutputTokens`，store/router 双重校验、null 清除、坏值读回丢弃。先红：bridge 3 项、app 3 项 |
 
+### 2026-10-17 界面打磨第一批：会话记录完整性与窄窗口（Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 失败计数 | `run.error` 携带 `execCount`（内核 / fake kernel / bridge 缓存 / 前端 reducer），失败 cell 不再显示 `[0]`、不再从实时会话视图消失。先红：Python 1、bridge 1、app 1 |
+| traceback | 剥掉开头的内核调度帧（`runtime.py _run_cell`），frames 从用户 cell 开始。先红：Python 1 |
+| 视觉 | 会话视图出错行整行红底；英文单复数插值 `{n|cell|cells}`（先红 1）；~800px 窗口编辑区保底 320px、两侧栏按比例收缩、状态栏单行截断 |
+| 边界 | Windows-only；真实 Chromium 人工核对（800 / 1440 宽），未做像素回归 |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。
