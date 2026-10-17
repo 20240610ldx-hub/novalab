@@ -63,6 +63,24 @@ export interface NotebookTab {
    * bridge 换代后据此核对重开时的磁盘：一致才允许草稿继续保存，不一致或未知走冲突流程。
    */
   baselineSha256?: string;
+  /** 第 7 轮：重开时发现的草稿恢复日志（只提示，不自动应用）。 */
+  draftRecovery?: DraftRecoveryOffer;
+  /** 第 7 轮：恢复日志写入失败的提示（如超过单份上限）；草稿仍留在内存。 */
+  draftJournalError?: string;
+  /** 第 7 轮：notebook 旁存在本会话写入/恢复的日志；保存后无剩余草稿时清除。 */
+  draftJournaled?: boolean;
+}
+
+/** notebook.open 附带的草稿恢复提示（bridge 读 notebook 旁 .novalab/drafts 最新一份）。 */
+export interface DraftRecoveryOffer {
+  draftId: string;
+  savedAt: string;
+  /** 日志记录的基线指纹 = 本次加载的磁盘指纹；false 时只能保存为本地副本。 */
+  baselineMatches: boolean;
+  dirtyCellIds: string[];
+  cells: { id: string; code: string }[];
+  /** 前端：保存为本地副本/丢弃失败的提示（可重试）。 */
+  error?: string;
 }
 
 /** 一个 notebook 的焦点视图切片缓存（切换时捕获/恢复）。 */
@@ -95,6 +113,7 @@ export interface NotebookStateResult {
     execCounts?: Record<string, number | null>;
     baselineSha256?: string;
   };
+  draftRecovery?: DraftRecoveryOffer;
 }
 
 /** kernel.restart 响应：冷加载结果必须带回原 notebook owner。 */
@@ -168,6 +187,9 @@ export function normalizeTabs(payload: unknown, prev: readonly NotebookTab[]): N
       ...(old?.conflict ? { conflict: old.conflict } : {}),
       ...(old?.reloading ? { reloading: true } : {}),
       ...(old?.recoveryPath ? { recoveryPath: old.recoveryPath } : {}),
+      ...(old?.draftRecovery ? { draftRecovery: old.draftRecovery } : {}),
+      ...(old?.draftJournalError ? { draftJournalError: old.draftJournalError } : {}),
+      ...(old?.draftJournaled ? { draftJournaled: true } : {}),
       ...(old?.restarting ? { restarting: true } : {}),
       ...(old?.baselineSha256 ? { baselineSha256: old.baselineSha256 } : {}),
     });
@@ -211,6 +233,11 @@ interface NotebooksStore {
   markBridgeLost: () => void;
   /** 冷重开成功：把旧代 tab/cache/焦点原子改键到新 notebookId。 */
   rekeyTab: (oldId: string, newId: string, cache: NotebookCache, patch?: Partial<NotebookTab>) => void;
+  /** 第 7 轮：设置/清除重开时的草稿恢复提示。 */
+  setDraftRecovery: (id: string, offer?: DraftRecoveryOffer) => void;
+  /** 第 7 轮：恢复日志写入失败提示（undefined 清除）。 */
+  setDraftJournalError: (id: string, message?: string) => void;
+  setDraftJournaled: (id: string, value: boolean) => void;
   /** D4：记录某 owner 最新确认的基线指纹（只接受字符串）。 */
   setBaseline: (id: string, baselineSha256: unknown) => void;
   setTabs: (tabs: NotebookTab[]) => void;
@@ -283,6 +310,15 @@ export const useNotebooks = create<NotebooksStore>((set, get) => ({
       });
     set({ tabs, caches, activeId: get().activeId === oldId ? newId : get().activeId });
   },
+
+  setDraftRecovery: (id, offer) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, draftRecovery: offer } : t)) }),
+
+  setDraftJournalError: (id, message) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, draftJournalError: message } : t)) }),
+
+  setDraftJournaled: (id, value) =>
+    set({ tabs: get().tabs.map((t) => (t.notebookId === id ? { ...t, draftJournaled: value || undefined } : t)) }),
 
   setBaseline: (id, baselineSha256) => {
     if (typeof baselineSha256 !== 'string' || !baselineSha256) return;
