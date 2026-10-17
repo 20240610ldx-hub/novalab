@@ -87,6 +87,27 @@ describe('set / list（CRUD + 掩码）', () => {
   });
 });
 
+describe('maxOutputTokens（输出预算，可在设置里调整）', () => {
+  it('设置后落盘并出现在摘要里；省略 = 清除（回到按模型的默认）', () => {
+    const { store } = tmpStore();
+    const set = store.set(input({ id: 'p1', maxOutputTokens: 16384 }));
+    expect(set.maxOutputTokens).toBe(16384);
+    expect(store.list().providers[0]!.maxOutputTokens).toBe(16384);
+    const cleared = store.set(input({ id: 'p1' }));
+    expect('maxOutputTokens' in cleared).toBe(false);
+  });
+
+  it('非法值（非整数 / 越界）→ 抛 ProvidersStoreError；文件里的坏值读回时丢弃', () => {
+    const { store, file } = tmpStore();
+    for (const bad of [0, 100, 1.5, 300_000, Number.NaN]) {
+      expect(() => store.set(input({ maxOutputTokens: bad }))).toThrow(ProvidersStoreError);
+    }
+    store.set(input({ id: 'p1', maxOutputTokens: 4096 }));
+    writeFileSync(file, readFileSync(file, 'utf8').replace('4096', '"lots"'));
+    expect('maxOutputTokens' in store.list().providers[0]!).toBe(false);
+  });
+});
+
 describe('落盘（.novalab/providers.json）', () => {
   it('文件存 apiKeyCipher 密文（v1. 前缀），明文 key 不出现', () => {
     const { store, file } = tmpStore();

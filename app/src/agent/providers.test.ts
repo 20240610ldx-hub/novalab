@@ -23,6 +23,7 @@ interface FakeEntry {
   baseURL: string;
   model: string;
   apiKey?: string;
+  maxOutputTokens?: number;
 }
 
 interface FakeBridge {
@@ -49,6 +50,7 @@ function installFakeBridge(opts: { fail?: boolean; methodNotFound?: boolean } = 
             baseURL: e.baseURL,
             model: e.model,
             hasKey: e.apiKey !== undefined && e.apiKey !== '',
+            ...(e.maxOutputTokens !== undefined ? { maxOutputTokens: e.maxOutputTokens } : {}),
           })),
           activeProviderId: active,
         };
@@ -66,6 +68,7 @@ function installFakeBridge(opts: { fail?: boolean; methodNotFound?: boolean } = 
           baseURL: String(p['baseURL']),
           model: String(p['model']),
           ...(apiKey !== undefined ? { apiKey } : {}),
+          ...(typeof p['maxOutputTokens'] === 'number' ? { maxOutputTokens: p['maxOutputTokens'] } : {}),
         };
         entries.set(id, next);
         return { id, kind: next.kind, name: next.name, baseURL: next.baseURL, model: next.model, hasKey: next.apiKey !== undefined };
@@ -179,6 +182,33 @@ describe('rpc 适配器 · saveProviderState（全量同步）', () => {
     const setCall = rpcMock.mock.calls.find((c) => c[0] === 'providers.set');
     expect(setCall?.[1]).not.toHaveProperty('apiKey');
     expect(fake.entries.get('p1')!.apiKey).toBe('sk-stored');
+  });
+
+  it('maxOutputTokens：上行透传；未设置时显式发 null（= bridge 清除旧值）；list 回灌', async () => {
+    const fake = installFakeBridge();
+    const mod = await freshProviders();
+    await mod.saveProviderState({
+      providers: [makeConfig({ maxOutputTokens: 32000 }), makeConfig({ id: 'p2' })],
+      activeProviderId: null,
+    });
+    const sets = rpcMock.mock.calls.filter((c) => c[0] === 'providers.set').map((c) => c[1] as Record<string, unknown>);
+    expect(sets.map((s) => s['maxOutputTokens'])).toEqual([32000, null]);
+    expect(fake.entries.get('p1')!.maxOutputTokens).toBe(32000);
+    const state = await mod.loadProviderState();
+    expect(state.providers.find((p) => p.id === 'p1')!.maxOutputTokens).toBe(32000);
+    expect(state.providers.find((p) => p.id === 'p2')).not.toHaveProperty('maxOutputTokens');
+  });
+});
+
+describe('输出预算输入（设置面板）', () => {
+  it('parseMaxOutputTokensInput：空 = 自动；范围内整数；非法 → error', async () => {
+    const mod = await freshProviders();
+    expect(mod.parseMaxOutputTokensInput('')).toEqual({ ok: true, value: undefined });
+    expect(mod.parseMaxOutputTokensInput('  16384 ')).toEqual({ ok: true, value: 16384 });
+    expect(mod.parseMaxOutputTokensInput('16,384')).toEqual({ ok: true, value: 16384 });
+    for (const bad of ['abc', '1.5', '100', '999999', '-1']) {
+      expect(mod.parseMaxOutputTokensInput(bad).ok).toBe(false);
+    }
   });
 });
 
@@ -368,6 +398,9 @@ describe('保留行为（P2.1 契约不变）', () => {
       ).toBe(mod.UNKNOWN_MODEL_MAX_OUTPUT_TOKENS);
       const claude = await call(makeConfig({ model: 'claude-sonnet-4-5' }));
       expect(claude.max_tokens).toBeGreaterThan(mod.UNKNOWN_MODEL_MAX_OUTPUT_TOKENS);
+      // 设置里的覆盖值优先于自动默认（Claude / 未知模型都一样）
+      expect((await call(makeConfig({ maxOutputTokens: 32000 }))).max_tokens).toBe(32000);
+      expect((await call(makeConfig({ model: 'claude-sonnet-4-5', maxOutputTokens: 2048 }))).max_tokens).toBe(2048);
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
