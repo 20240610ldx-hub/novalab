@@ -187,6 +187,17 @@ Agent 安全小包后列出的「第二包」，均为不改产品边界的修�
 - 结果：install / uv sync / 双端 tsc / 构建 / bridge 345 / app 399 / Python 302（3.12 与 3.14）/ 脚本 / 真实内核验收 / 集成 smoke + acceptance / build-bridge / sync-py / packaged smoke / packaged acceptance 12/12 全部通过。未测：Linux 下真实 Chromium smoke、Tauri WebView / AppImage。
 
 ## 15. 决策停点
+## 14. 第七轮记录：跨应用 dirty 草稿有界恢复（本包已验收，Windows-only 浏览器证据，2026-10-17）
+
+Owner 裁决存储为"notebook 旁、7 天"。核实发现正常编辑 300 ms 内即自动保存，草稿只会在保存失败或冲突暂停时长期滞留，而此时内核可能已不可用，因此由 bridge 而非内核写恢复日志：去抖 1.5 s 后仍未保存才写，沿用第 4 轮"临时文件 + fsync + rename"，日志只含持久 cell 的 id/code、dirty 列表与 bridge 记录的基线指纹，每 notebook 最多 5 份、7 天删除、单份 2 MiB，保存成功即删。重开只提示：指纹一致可恢复为本地草稿而不写盘，不一致只能保存为同目录本地副本或丢弃。
+
+先红（bridge 20、app 8 失败）后绿：bridge 319、app 393、Python 261+5 跳过、Rust 5、脚本 24、类型检查、生产构建、集成与构建目录 packaged smoke 通过。真实 Chromium smoke 以只读文件让自动保存持续失败，只杀自有 gen-1 bridge 并关闭页面，再以 gen-2 与新页面重开：磁盘未变的 notebook 被提示并经点击恢复、全程不写盘，之后正常保存清除日志；断线期间被外部改写的 notebook 只能保存为本地副本，原文件保持外部字节；页面错误 0、23 个自有 PID 全部退出。证据为 `manifest-drafts-round7.json` / `results-drafts-round7.json` 与 `stage7-*.log`，前六轮封存只读核对未变。A15 仍开放：Linux CI、bridge 断线期间的草稿落盘（需 Tauri 侧写盘通道）、生产环境旧内核清理；去抖、单份上限与"恢复不写盘"等默认值待确认。
+
+## 15. 第七轮后续 7b：断线期间草稿落盘（本包已验收，Windows-only，真实 Tauri 窗口，2026-10-17）
+
+Owner 按建议批准 O1–O6：断线或 bridge-lost 时由 Tauri Rust 命令 `write_draft_journal` 写入与第七轮完全相同的日志（同目录、同格式、同界限），只接受已存在的绝对 `.py` 文件，基线取前端最后确认的指纹；在线仍由 bridge 写，浏览器 dev 断线不写，读取与恢复仍只在 bridge。格式由 Node 与 Rust 共用的夹具约束。先红（Rust 8、app 5 失败）后绿：bridge 330、app 400、Rust 13、Python 261+5 跳过、脚本 24、构建、集成与 packaged smoke 通过。WebView2 远程调试驱动真实 debug 窗口：只杀自有 bridge → Rust 监督重启 → bridge-lost 中编辑 → 经 Tauri IPC 写出日志（bridge `draft.write` 0 次）→ 杀整个应用 → 重启后提示并点击恢复、不写盘；36 个自有 PID 全部退出。证据 `manifest-drafts-offline-round7b.json` / `results-…`，前七轮封存未变。新发现：桌面冷启动时 WebView 先于 bridge 监听加载，首次 `connect()` 只尝试一次且 store 只在首次成功后订阅状态，窗口停在"bridge 未连接 … 刷新"横幅，`retryBridge` 在 idle 状态无法恢复界面，只能刷新（既有行为，本包未修，建议另立小包）。A15 仍开放：Linux CI、生产环境旧内核清理、冷启动首次连接重试。
+
+## 16. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

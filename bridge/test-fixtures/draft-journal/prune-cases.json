@@ -1,0 +1,11 @@
+{
+  "comment": "Shared by bridge/src/drafts.fixtures.test.ts and app/src-tauri/src/drafts.rs tests. Times are ms since epoch; files are named <notebook>.<ms>-<rand8>.draft.json. Expect = kept timestamps, newest first.",
+  "maxCopies": 5,
+  "ttlMs": 604800000,
+  "cases": [
+    { "name": "keeps newest five", "now": 1760688010000, "existing": [1760688000000, 1760688001000, 1760688002000, 1760688003000, 1760688004000, 1760688005000, 1760688006000], "expect": [1760688006000, 1760688005000, 1760688004000, 1760688003000, 1760688002000] },
+    { "name": "drops older than seven days", "now": 1761292800001, "existing": [1760688000000, 1761292800000], "expect": [1761292800000] },
+    { "name": "exactly seven days is kept", "now": 1761292800000, "existing": [1760688000000], "expect": [1760688000000] },
+    { "name": "empty", "now": 1760688000000, "existing": [], "expect": [] }
+  ]
+}

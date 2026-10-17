@@ -1,0 +1,10 @@
+{
+  "comment": "Each body must be rejected by the bridge reader (readDraft → null) and must never be produced by the Rust writer.",
+  "cases": [
+    { "name": "wrong-version", "body": "{\"version\":2,\"notebook\":\"a.py\",\"baselineSha256\":null,\"savedAt\":\"x\",\"cells\":[],\"dirtyCellIds\":[]}" },
+    { "name": "cell-missing-code", "body": "{\"version\":1,\"notebook\":\"a.py\",\"baselineSha256\":null,\"savedAt\":\"x\",\"cells\":[{\"id\":\"a\"}],\"dirtyCellIds\":[]}" },
+    { "name": "cell-code-not-string", "body": "{\"version\":1,\"notebook\":\"a.py\",\"baselineSha256\":null,\"savedAt\":\"x\",\"cells\":[{\"id\":\"a\",\"code\":1}],\"dirtyCellIds\":[]}" },
+    { "name": "dirty-not-strings", "body": "{\"version\":1,\"notebook\":\"a.py\",\"baselineSha256\":null,\"savedAt\":\"x\",\"cells\":[],\"dirtyCellIds\":[1]}" },
+    { "name": "truncated", "body": "{\"version\":1,\"cells\":" }
+  ]
+}
