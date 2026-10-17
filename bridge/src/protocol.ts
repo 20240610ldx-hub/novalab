@@ -217,11 +217,17 @@ export interface CompileError {
   cellIds: string[];
 }
 
+/**
+ * 内核 set_cells / validate_cells 实际回传的 compileError：真实内核（dag.py）是换行拼接的纯字符串，
+ * 测试替身可能给对象。cell.save / diff.accept 原样转发（app 两种都认）；agent 路径在 diff.stage 归一为 CompileError。
+ */
+export type KernelCompileError = CompileError | string;
+
 /** cell.save 响应（发给前端的子集）。 */
 export interface SaveResult {
   dagEdges: DagEdge[];
   staleSet: string[];
-  compileError?: CompileError;
+  compileError?: KernelCompileError;
   /** D4（cell.save / diff.accept 响应）：本次落盘后的基线指纹。 */
   baselineSha256?: string;
 }
@@ -308,8 +314,20 @@ export interface StagedDiff {
   action: DiffAction;
   newCode: string;
   rationale?: string;
+  /** 只有叠加这些待审 diff 才编译通过（F2）；diff.accept 要求它们已被采纳。 */
+  dependsOn?: string[];
   status: DiffStatus;
   createdAt: string;
+  /** ADR-013 核验状态（软约束：只标注，不阻止入队/采纳；源码变动后 router 重算为 expired）。 */
+  verification?: DiffVerification;
+}
+
+/** ADR-013 §4.4：V0 只改注释/空行 · V1 任意改动 · V2 数据变换 · V3 声称行为不变（intent refactor）。 */
+export interface DiffVerification {
+  status: 'verified' | 'unverified' | 'failed' | 'expired' | 'not-required';
+  level: 'V0' | 'V1' | 'V2' | 'V3';
+  /** 还缺什么才能 verified（如 shadow_run、contract、equivalent:df）。 */
+  missing: string[];
 }
 
 export interface DiffUpdatedParams {

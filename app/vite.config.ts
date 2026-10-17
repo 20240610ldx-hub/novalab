@@ -15,6 +15,20 @@ export default defineConfig(({ mode }) => {
   const llmTarget = (env.VITE_NOVALAB_LLM_BASE_URL ?? '').replace(/\/v1\/?$/, '');
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      rolldownOptions: {
+        output: {
+          // 体积大且很少变的依赖单独成块：应用代码更新时浏览器/WebView 缓存仍命中。
+          // AI SDK 不在此列——它经 Agent/设置面板懒加载自成一块（见 App.tsx）。
+          codeSplitting: {
+            groups: [
+              { name: 'vendor-react', test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ },
+              { name: 'vendor-codemirror', test: /node_modules[\\/](@codemirror|@lezer|codemirror|crelt|style-mod|w3c-keyname)[\\/]/ },
+            ],
+          },
+        },
+      },
+    },
     server: {
       port: 5199,
       strictPort: true,

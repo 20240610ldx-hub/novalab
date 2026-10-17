@@ -1,8 +1,4 @@
-import { createAnthropic } from '@ai-sdk/anthropic';
-import type { LanguageModel } from 'ai';
 import { bridge } from '../bridge/client';
-import { createOpenAICompat } from './openaiCompat';
-import { llmFetch } from './retryFetch';
 
 /**
  * M6 模型解耦：provider 注册表（P2.1；P4 迁移加密存储 + LLM 代理，ADR-008 落地）。
@@ -125,24 +121,6 @@ export function requestTargetFor(
   return remote
     ? { baseURL: proxyBaseURL(config.id, proxyOrigin), apiKey: PROXY_KEY_PLACEHOLDER }
     : { baseURL: config.baseURL, apiKey: config.apiKey };
-}
-
-export function createLanguageModel(config: ProviderConfig): LanguageModel {
-  const { baseURL, apiKey } = requestTargetFor(
-    config,
-    bridgeReady,
-    bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN,
-  );
-  const proxyHeaders = bridgeReady ? bridge.getLlmProxyHeaders?.() : undefined;
-  // 网络波动防御：代理与直连两条路径共用同一重试层（见 retryFetch.ts）
-  const settings = { baseURL, apiKey, fetch: llmFetch, ...(proxyHeaders ? { headers: proxyHeaders } : {}) };
-  switch (config.kind) {
-    case 'anthropic-compat':
-      return createAnthropic(settings)(config.model);
-    case 'openai-compat':
-      // deepseek / ollama / vLLM 等走 OpenAI 兼容协议（本地最小 provider，见 openaiCompat.ts）
-      return createOpenAICompat(settings)(config.model);
-  }
 }
 
 function isProviderSummaryWire(v: unknown): v is ProviderSummaryWire {
@@ -350,50 +328,9 @@ export async function initProviderState(): Promise<ProviderState> {
   }
 }
 
-export function getDevLanguageModel(): LanguageModel | null {
-  const envBaseURL = import.meta.env.VITE_NOVALAB_LLM_BASE_URL as string | undefined;
-  const apiKey = import.meta.env.VITE_NOVALAB_LLM_API_KEY as string | undefined;
-  if (!envBaseURL || !apiKey) return null;
-  const model =
-    (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
-  if (bridgeReady) {
-    // P4 主路径：dev-env 已播种进 bridge 加密存储 → 走 LLM 代理（key 不再驻留浏览器请求）
-    const proxyHeaders = bridge.getLlmProxyHeaders?.();
-    return createAnthropic({
-      baseURL: proxyBaseURL(DEV_ENV_PROVIDER_ID, bridge.getLlmProxyOrigin?.() ?? LLM_PROXY_ORIGIN),
-      apiKey: PROXY_KEY_PLACEHOLDER,
-      ...(proxyHeaders ? { headers: proxyHeaders } : {}),
-    })(model);
-  }
-  // 无 bridge 兜底（降级，原 L-1 主路径）：DEV（vite）走同源代理 /llm/v1 →
-  // vite.config.ts server.proxy 转发 envBaseURL；生产直连（端点缺 CORS 头会失败）。
-  const baseURL = import.meta.env.DEV ? '/llm/v1' : envBaseURL;
-  return createAnthropic({ baseURL, apiKey })(model);
-}
-
 export function hasDevEnvModel(): boolean {
   return Boolean(
     import.meta.env.VITE_NOVALAB_LLM_BASE_URL && import.meta.env.VITE_NOVALAB_LLM_API_KEY,
   );
 }
 
-/** 当前生效模型：用户选中的 provider 优先，否则 dev .env.local 兜底，都没有 → null。 */
-export function resolveActiveModel(state: ProviderState): {
-  model: LanguageModel | null;
-  source: 'user' | 'dev-env' | null;
-  label: string;
-} {
-  const active =
-    state.activeProviderId != null
-      ? state.providers.find((p) => p.id === state.activeProviderId)
-      : undefined;
-  if (active) {
-    return { model: createLanguageModel(active), source: 'user', label: `${active.name} · ${active.model}` };
-  }
-  const dev = getDevLanguageModel();
-  if (dev) {
-    const model = (import.meta.env.VITE_NOVALAB_LLM_MODEL as string | undefined) ?? TOKENPLAN_MODELS[0];
-    return { model: dev, source: 'dev-env', label: `dev .env.local · ${model}` };
-  }
-  return { model: null, source: null, label: '未配置' };
-}

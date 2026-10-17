@@ -61,7 +61,7 @@ afterEach(async () => {
 });
 
 describe('MCP server · 注册面', () => {
-  it('工具列表快照（六工具，spec §7）', async () => {
+  it('工具列表快照（六工具 spec §7 + ADR-013 影子工具）', async () => {
     await connect();
     const { tools } = await client!.listTools();
     expect(tools.map((t) => [t.name, t.description])).toMatchInlineSnapshot(`
@@ -76,11 +76,11 @@ describe('MCP server · 注册面', () => {
         ],
         [
           "propose_code_change",
-          "提议代码变更 → staged diff，交前端行内审阅（Tab 采纳 / Esc 拒绝）；禁止直接覆盖 cell。入队前有编译预检：多重定义 / DAG 环等会被拒绝并返回 reason，请据其自纠后重试",
+          "提议代码变更 → staged diff，交前端行内审阅（Tab 采纳 / Esc 拒绝）；禁止直接覆盖 cell。入队前有编译预检（相对当前 notebook，并叠加全部待审 diff）：多重定义 / DAG 环等会被拒绝并返回 reason（可能附 hint），请据其自纠后重试。把定义搬到别的 cell 要两条提议：先 update 原 cell 去掉定义，再提交新位置；第二条返回 dependsOn，需按序采纳。返回 conflictsWith 表示与这些待审 diff 不能同时采纳",
         ],
         [
           "execute_cell",
-          "执行指定 cell；cascade=true 时按 DAG 级联下游。返回 run 报告 {cellId, ok, cascaded, durationMs, traceback?}",
+          "在用户的 kernel 上执行指定 cell；cascade=true 时按 DAG 级联下游。每次执行都需要用户在 NovaLab 界面点「允许」。返回 run 报告 {cellId, ok, cascaded, durationMs, traceback?}；未获批准时返回 {denied, reason, message}——此时什么都没执行，不要自动重试，向用户说明原因并询问下一步。",
         ],
         [
           "list_cells",
@@ -90,9 +90,17 @@ describe('MCP server · 注册面', () => {
           "get_cell_code",
           "读取指定 cell 的源码原文 {cellId, code}",
         ],
+        [
+          "shadow_run",
+          "在独立的影子进程里运行候选改动：按源码重放上游 cell，再运行改后的下游闭包。用户的 kernel、变量和文件都不会被改动；影子进程禁止网络、子进程和临时目录外的写入（被拦截的操作计入 blocked）。每轮第一次运行前用户需要在 NovaLab 界面点「允许」。返回 schema 级报告 {runId, verificationId, status, after{plan, cells}, vars[{name, before, after, delta}], autoChecks, blocked, nondeterminism, budget}——只有类型、形状、列名和聚合统计，没有行数据。未获批准时返回 {denied, reason, message}：此时什么都没运行，本轮不要重试。",
+        ],
+        [
+          "verify",
+          "在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / sum_conserved / row_sums / match_rate / equivalent），只返回每条的状态与计数 {runId, verificationId, status, contracts}。把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。",
+        ],
       ]
     `);
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(8);
   });
 
   it('propose_code_change 的 JSON schema 形状（zod 单一来源投影）', async () => {
@@ -163,10 +171,11 @@ describe('MCP server · callTool → router', () => {
     expect(code.code).toBe('print(y)');
   });
 
-  it('execute_cell + get_cell_output：run 报告与隐私安全输出摘要', async () => {
+  it('execute_cell：MCP 模式没有能确认的界面 → denied no-confirmer，不执行；get_cell_output 仍是隐私安全摘要', async () => {
     await connect();
-    const report = (await callToolJson('execute_cell', { cellId: 'a' })) as { ok: boolean };
-    expect(report.ok).toBe(true);
+    const report = (await callToolJson('execute_cell', { cellId: 'a' })) as { denied?: boolean; reason?: string };
+    expect(report).toMatchObject({ denied: true, reason: 'no-confirmer' });
+    expect(fakes[0]!.countOf('exec_cell')).toBe(0);
     const out = (await callToolJson('get_cell_output', { cellId: 'a' })) as Record<string, unknown>;
     expect(out).toEqual({ traceback: null, mimeKeys: [] });
   });
@@ -181,16 +190,18 @@ describe('MCP server · callTool → router', () => {
     })) as { diffId: string };
     expect(staged.diffId).toBe('diff-1');
 
-    fakes[0]!.nextCompileError = { message: 'multiple definitions of x', cellIds: ['a', 'b'] };
+    // 有待审 diff 时预检跑两次（单独 + 叠加，F2）：用与 dag.py 同格式的单赋值检查，而不是一次性注入
+    fakes[0]!.detectDuplicateDefs = true;
     const rejected = (await callToolJson('propose_code_change', {
       targetCellId: 'b',
       action: 'update',
       newCode: 'x = 99',
     })) as StageResult;
-    expect(rejected).toEqual({
+    expect(rejected).toMatchObject({
       rejected: true,
-      reason: { message: 'multiple definitions of x', cellIds: ['a', 'b'] },
+      reason: { message: "multiple definitions of 'x' (cells a, b)", cellIds: ['a', 'b'] },
     });
+    expect((rejected as { hint?: string }).hint).toContain("cell 'a'");
   });
 
   it('router 异常 → isError 文本（不炸连接）', async () => {

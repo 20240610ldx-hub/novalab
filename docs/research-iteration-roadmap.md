@@ -140,17 +140,44 @@ Watcher 改为仅通知；前端暂停所属 tab 自动保存，继续保留本�
 
 **D4 补充（同日，Owner 批准）**：内核 `load_file`/`save_file` 报告基线原始字节的 `baselineSha256`，bridge 在 notebook 状态、`cell.save`、`diff.accept` 中透传；前端按 tab 记录，bridge 换代后 dirty tab 也可点击重开——指纹与旧代一致才恢复自动保存，不一致或未知走第四轮冲突流程，不盲写。先红（Python 13、bridge 4、app 4 失败）后绿；app 339、bridge 278、Python 261+5 跳过、Rust 5、脚本 24、构建与集成/packaged smoke 通过；同一真实 Chromium smoke 扩为三 tab，覆盖"磁盘已变 → 冲突 → 保留副本加载磁盘"与"磁盘未变 → 草稿落盘、指纹推进"，页面错误 0、31 个自有 PID 全部退出。证据为新增 `manifest-reconnect-round6-d4.json` / `results-reconnect-round6-d4.json` 与 `stage6d4-*.log`，第六轮封存只读核对未变。A15 仍开放：跨应用草稿恢复、生产环境旧内核清理（Job Object 跟进项）、跨平台复测。
 
-## 12. 第七轮记录：跨应用 dirty 草稿有界恢复（本包已验收，Windows-only 浏览器证据，2026-10-17）
+## 12. Agent 安全小包：F2 多格 diff 队列 + execute_cell 过渡确认（Windows-only，2026-10-17）
+
+Owner 裁决："F2 和 execute_cell 过渡确认，先作为一个小包修掉，再进入 ADR-013 实现。"对应阶段 3「完善多格 Diff 队列」与共享 Agent 可信性。
+
+- **F2**：`diff.stage` 在有待审 diff 时验证两次：相对当前 notebook，以及叠加全部待审 diff 之后。单独不过、叠加通过 → 入队并带 `dependsOn`（搬移定义 = 先 update 原 cell 去掉定义、再提交新位置）；单独通过、叠加不过 → 拒绝并带 `conflictsWith`；单赋值冲突附 `hint`，指出先 update 哪个 cell。`diff.accept` 要求依赖已采纳，否则在改动 notebook 前拒绝。前端 diff 卡片显示「依赖 diff-N」和 Accept 被拒的原因。
+- **F3（ADR-012 顺带发现）**：AI SDK 会并发执行同一消息里的工具调用，`diff.stage` 现在与 accept / save 一样排在 notebook 写队列上，后到的一条能叠加先到的一条。
+- **顺带修复**：真实内核的 `compileError` 是纯字符串，而 M5 第二道闸要求 `{message, cellIds}`，所以真实环境里**每一次被拒的 `propose_code_change` 都被整条替换为占位文本**，模型看不到拒绝原因（ADR-012 G-1 时模型在搬移定义上反复失败，可能与此有关）。现在在 stage 边界解析为结构化形式；FakeKernel 的单赋值检查也改为与 `dag.py` 同格式的字符串。
+- **execute_cell 过渡确认**：工具改走 `agent.executeCell`。bridge 广播 `agent.confirmRequest`（含将执行的源码），前端弹窗，默认焦点在「拒绝」；任一窗口先答即生效（`agent.confirmResponse`），随后广播 `agent.confirmResolved`。拒绝、超时（120 s）、等待期间切换 notebook 或源码被改，都返回 `{denied, reason, message}`，不执行。没有可确认的窗口（`--mcp` 模式）一律拒绝。这套握手是 ADR-013 O1(b)「每轮第一次运行先问用户」的基础。
+
+先红后绿：F2 路由单测 5 失败 / 1 通过，F3 并发 1 失败，确认握手 9 失败；真实内核验收先暴露字符串 compileError 与捕获组错误，修正后通过。工程门：bridge 315（25 文件）、app 388（29 文件）、Python 261 + 5 跳过、脚本 24、真实内核验收 17（7 文件，新增 `router.diffqueue.acceptance.ts` 3 个）、类型检查与生产构建。真实 Chromium smoke `scripts/agent-safety-smoke.mjs`（`AGENT_SAFETY_SMOKE_OK`）：拒绝不执行、允许后在用户 kernel 上执行；依赖 chip 可见，乱序 Accept 被拒并在卡片显示原因且 notebook 不变，按序采纳后 helper 落到新 cell。另外五个既有浏览器 smoke 与集成 / packaged smoke 复测通过。
+
+边界：仅 Windows、Chromium + Vite dev；超时只有单测；未用真实模型验证 `dependsOn` / `denied` 下的行为。**行为变化**：外部 MCP Agent 不能再执行 cell（只能读和提议）。
+
+## 13. 维护包：输出预算、首屏拆包、测试临时目录、依赖与交接文书（Windows-only，2026-10-17）
+
+Agent 安全小包后列出的「第二包」，均为不改产品边界的修复与优化。
+
+- **F7 输出预算**：`@ai-sdk/anthropic` 对未知模型 id（tokenplan 的 qwen/glm/deepseek）把输出上限压到 4096，openai-compat 不传 `max_tokens` 时由服务端默认（DeepSeek 4096），长代码提议会被截断。现在未知模型显式带 8192（`defaultSettingsMiddleware`，调用方显式值仍优先），已知 Claude 模型沿用 SDK 按型号的上限。顺带：dev `.env.local` 兜底模型此前绕过了重试层与预算，现在与用户 provider 走同一构造路径。
+- **首屏拆包**：模型构造从 `agent/providers.ts` 拆到 `agent/models.ts`，AI SDK（`ai` / `@ai-sdk/*` / `zod`）只经懒加载的 Agent 面板与设置面板进入。主包 1,399.6 kB（gzip 409.6）→ 206.8 kB（gzip 61.4），另有 `vendor-react` 218.8 kB、`vendor-codemirror` 376.1 kB 两个长缓存块；AI SDK 块 557.3 kB 在首帧后加载。`scripts/app-bundle-boundary.test.mjs` 沿 `main.tsx` 的静态 import 图守住边界（对旧 `App.tsx` 先红）。
+- **测试临时目录**：bridge 单测与验收此前在 %TEMP% 累积了 8,234 个 `novalab-*` 目录。新增 vitest `globalSetup`（`bridge/src/testing/temp-sandbox.ts`）：每次运行把 TEMP/TMP/TMPDIR 指向专属 `novalab-vitest-*` 目录，结束只删这一个，不按前缀扫删别处。整套单测与真实内核验收后新增残留为 0。已有的 8,234 个旧目录未删除（属于用户临时目录，可能有并行会话在用）。
+- **依赖**：`@earendil-works/pi-agent-core` / `pi-ai` 从 bridge `dependencies` 移到 `devDependencies`（只有 ADR-012 spike 与其测试引用；打包的 `bridge.mjs` 中 0 处引用）。
+- **交接文书**：`docs/handover-dead-restart-package.md` 顶部加 10-17 状态条（第五轮已关闭并合入），正文保留原貌。
+
+工程门：bridge 342、app 395、Python 296 + 5 跳过、脚本 27、真实内核验收 24、集成 / packaged acceptance 12/12，六个真实 Chromium smoke 全部通过。
+
+未做：bridge 重连后的「全部重开」按钮——与第七轮（草稿恢复）和冷启动重连修复改同一批前端恢复代码，等它们合入后再做，避免冲突。
+
+## 14. 第七轮记录：跨应用 dirty 草稿有界恢复（本包已验收，Windows-only 浏览器证据，2026-10-17）
 
 Owner 裁决存储为"notebook 旁、7 天"。核实发现正常编辑 300 ms 内即自动保存，草稿只会在保存失败或冲突暂停时长期滞留，而此时内核可能已不可用，因此由 bridge 而非内核写恢复日志：去抖 1.5 s 后仍未保存才写，沿用第 4 轮"临时文件 + fsync + rename"，日志只含持久 cell 的 id/code、dirty 列表与 bridge 记录的基线指纹，每 notebook 最多 5 份、7 天删除、单份 2 MiB，保存成功即删。重开只提示：指纹一致可恢复为本地草稿而不写盘，不一致只能保存为同目录本地副本或丢弃。
 
 先红（bridge 20、app 8 失败）后绿：bridge 319、app 393、Python 261+5 跳过、Rust 5、脚本 24、类型检查、生产构建、集成与构建目录 packaged smoke 通过。真实 Chromium smoke 以只读文件让自动保存持续失败，只杀自有 gen-1 bridge 并关闭页面，再以 gen-2 与新页面重开：磁盘未变的 notebook 被提示并经点击恢复、全程不写盘，之后正常保存清除日志；断线期间被外部改写的 notebook 只能保存为本地副本，原文件保持外部字节；页面错误 0、23 个自有 PID 全部退出。证据为 `manifest-drafts-round7.json` / `results-drafts-round7.json` 与 `stage7-*.log`，前六轮封存只读核对未变。A15 仍开放：Linux CI、bridge 断线期间的草稿落盘（需 Tauri 侧写盘通道）、生产环境旧内核清理；去抖、单份上限与"恢复不写盘"等默认值待确认。
 
-## 13. 第七轮后续 7b：断线期间草稿落盘（本包已验收，Windows-only，真实 Tauri 窗口，2026-10-17）
+## 15. 第七轮后续 7b：断线期间草稿落盘（本包已验收，Windows-only，真实 Tauri 窗口，2026-10-17）
 
 Owner 按建议批准 O1–O6：断线或 bridge-lost 时由 Tauri Rust 命令 `write_draft_journal` 写入与第七轮完全相同的日志（同目录、同格式、同界限），只接受已存在的绝对 `.py` 文件，基线取前端最后确认的指纹；在线仍由 bridge 写，浏览器 dev 断线不写，读取与恢复仍只在 bridge。格式由 Node 与 Rust 共用的夹具约束。先红（Rust 8、app 5 失败）后绿：bridge 330、app 400、Rust 13、Python 261+5 跳过、脚本 24、构建、集成与 packaged smoke 通过。WebView2 远程调试驱动真实 debug 窗口：只杀自有 bridge → Rust 监督重启 → bridge-lost 中编辑 → 经 Tauri IPC 写出日志（bridge `draft.write` 0 次）→ 杀整个应用 → 重启后提示并点击恢复、不写盘；36 个自有 PID 全部退出。证据 `manifest-drafts-offline-round7b.json` / `results-…`，前七轮封存未变。新发现：桌面冷启动时 WebView 先于 bridge 监听加载，首次 `connect()` 只尝试一次且 store 只在首次成功后订阅状态，窗口停在"bridge 未连接 … 刷新"横幅，`retryBridge` 在 idle 状态无法恢复界面，只能刷新（既有行为，本包未修，建议另立小包）。A15 仍开放：Linux CI、生产环境旧内核清理、冷启动首次连接重试。
 
-## 14. 决策停点
+## 16. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

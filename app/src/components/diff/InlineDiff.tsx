@@ -107,6 +107,31 @@ function RejectButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/** ADR-013 核验徽章：软约束，只告诉用户 Agent 有没有在影子环境里验证过这条改动。 */
+const VERIFICATION_LABEL: Record<NonNullable<StagedDiff['verification']>['status'], { text: string; color: string; title: string }> = {
+  verified: { text: '已影子核验', color: 'var(--accent-ok)', title: 'Agent 在影子环境里运行并核验过这条改动' },
+  unverified: { text: '未核验', color: 'var(--muted)', title: '这条改动没有完整的影子核验证据' },
+  failed: { text: '核验失败', color: 'var(--accent-err)', title: '影子运行出错或契约 / 默认检查未通过' },
+  expired: { text: '核验已过期', color: 'var(--accent-stale)', title: '核验之后 notebook 源码变了，结论不再适用' },
+  'not-required': { text: '无需核验', color: 'var(--muted)', title: '只改了注释或空行' },
+};
+
+function VerificationBadge({ v }: { v: NonNullable<StagedDiff['verification']> }) {
+  const label = VERIFICATION_LABEL[v.status];
+  const missing = v.missing.length > 0 ? `；还缺：${v.missing.join('、')}` : '';
+  return (
+    <span
+      data-testid="diff-verification"
+      data-status={v.status}
+      title={`${label.title}（${v.level}${missing}）`}
+      className="rounded border px-1.5 py-0.5"
+      style={{ borderColor: label.color, color: label.color }}
+    >
+      {label.text}
+    </span>
+  );
+}
+
 function StateBadges({ diff }: { diff: StagedDiff }) {
   return (
     <>
@@ -117,6 +142,23 @@ function StateBadges({ diff }: { diff: StagedDiff }) {
       {(diff.state === 'edited-staged' || diff.origin === 'user') && (
         <span className="rounded border border-[var(--accent-ok)] px-1.5 py-0.5 text-[var(--accent-ok)]">
           user-edited
+        </span>
+      )}
+      {/* F2：搬移定义的第二条依赖第一条，须按序采纳 */}
+      {diff.dependsOn?.map((dep) => (
+        <span
+          key={dep}
+          data-testid="diff-depends-on"
+          title={`先采纳 ${dep}，再采纳本条`}
+          className="rounded border border-[var(--accent-stale)] px-1.5 py-0.5 text-[var(--muted)]"
+        >
+          依赖 {dep}
+        </span>
+      ))}
+      {diff.verification && <VerificationBadge v={diff.verification} />}
+      {diff.acceptError && (
+        <span role="alert" data-testid="diff-accept-error" className="px-1.5 py-0.5 text-[var(--accent-err)]">
+          {diff.acceptError}
         </span>
       )}
     </>

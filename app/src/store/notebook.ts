@@ -236,6 +236,23 @@ export function mapKernelState(state: KernelStatusPayload['state'] | string): Ke
  * 状态字段是 `status`（proposed|accepted|rejected），映射到前端的 `state`；
  * 'edited-staged' 为纯前端态，bridge 不会产生。兼容 `id` 别名以防契约演进。
  */
+const VERIFICATION_STATUSES = new Set(['verified', 'unverified', 'failed', 'expired', 'not-required']);
+const VERIFICATION_LEVELS = new Set(['V0', 'V1', 'V2', 'V3']);
+
+function verificationOf(v: unknown): { verification?: NonNullable<StagedDiff['verification']> } {
+  const r = asRecord(v);
+  if (typeof r.status !== 'string' || !VERIFICATION_STATUSES.has(r.status)) return {};
+  if (typeof r.level !== 'string' || !VERIFICATION_LEVELS.has(r.level)) return {};
+  const missing = Array.isArray(r.missing) ? r.missing.filter((m): m is string => typeof m === 'string') : [];
+  return {
+    verification: {
+      status: r.status as NonNullable<StagedDiff['verification']>['status'],
+      level: r.level as NonNullable<StagedDiff['verification']>['level'],
+      missing,
+    },
+  };
+}
+
 export function normalizeDiffs(payload: unknown): StagedDiff[] {
   const arr = asRecord(payload).diffs;
   if (!Array.isArray(arr)) return [];
@@ -250,6 +267,8 @@ export function normalizeDiffs(payload: unknown): StagedDiff[] {
       action: r.action === 'insert_below' ? 'insert_below' : 'update',
       newCode: String(r.newCode ?? ''),
       rationale: r.rationale != null ? String(r.rationale) : undefined,
+      ...(Array.isArray(r.dependsOn) && r.dependsOn.length > 0 ? { dependsOn: r.dependsOn.map(String) } : {}),
+      ...verificationOf(r.verification),
       origin: r.origin === 'user' ? 'user' : 'agent',
       state,
     };
@@ -459,6 +478,8 @@ interface NotebookStore {
   lastRunMs: Record<string, number>;
   /** 'ask' 档待确认的级联请求；null = 无弹窗。 */
   cascadeAsk: CascadeAskRequest | null;
+  /** Agent 请求执行 cell、等待用户批准的队列（bridge agent.confirmRequest；先到先显示）。 */
+  runConfirms: RunConfirmRequest[];
 
   setState: (patch: Partial<Omit<NotebookStore, 'setState' | 'setActive'>>) => void;
   setActive: (cellId: string | null) => void;
@@ -506,6 +527,87 @@ interface NotebookStore {
   reStageDiff: (diffId: string, newCode: string) => Promise<void>;
   /** 'ask' 弹窗裁决：run=true → 级联重跑下游。 */
   resolveCascadeAsk: (run: boolean) => void;
+  /** Agent 执行确认裁决 → bridge agent.confirmResponse（别的窗口先答了也无妨）。 */
+  answerRunConfirm: (requestId: string, allow: boolean) => Promise<void>;
+}
+
+/** bridge agent.confirmRequest 载荷：execute_cell（每次）或 shadow_run（ADR-013，每轮首次）。 */
+export type RunConfirmRequest = ExecuteConfirmRequest | ShadowConfirmRequest;
+
+export interface ExecuteConfirmRequest {
+  kind: 'execute_cell';
+  requestId: string;
+  notebookId: string;
+  cellId: string;
+  code: string;
+  cascade: boolean;
+}
+
+export interface ShadowConfirmChange {
+  cellId: string;
+  action: 'update' | 'insert_below';
+  firstLine: string;
+}
+
+export interface ShadowConfirmRequest {
+  kind: 'shadow_run';
+  requestId: string;
+  notebookId: string;
+  /** null = 没有轮次（旧前端 / 漏接线）：允许只对这一次有效。 */
+  turnId: string | null;
+  changes: ShadowConfirmChange[];
+  memLimitBytes: number;
+  runMs: number;
+  runsLeft: number;
+  rememberForTurn: boolean;
+}
+
+function shadowConfirmFrom(requestId: string, p: Record<string, unknown>): ShadowConfirmRequest {
+  const summary = asRecord(p.summary);
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const changes = (Array.isArray(summary.changes) ? summary.changes : []).flatMap((c): ShadowConfirmChange[] => {
+    const r = asRecord(c);
+    if (typeof r.cellId !== 'string' || typeof r.firstLine !== 'string') return [];
+    if (r.action !== 'update' && r.action !== 'insert_below') return [];
+    return [{ cellId: r.cellId, action: r.action, firstLine: r.firstLine }];
+  });
+  return {
+    kind: 'shadow_run',
+    requestId,
+    notebookId: String(p.notebookId ?? ''),
+    turnId: typeof p.turnId === 'string' ? p.turnId : null,
+    changes,
+    memLimitBytes: num(summary.memLimitBytes),
+    runMs: num(summary.runMs),
+    runsLeft: num(summary.runsLeft),
+    rememberForTurn: summary.rememberForTurn === true,
+  };
+}
+
+/** agent.confirmRequest / agent.confirmResolved → 待批准队列（纯函数，供单测）。 */
+export function applyRunConfirmEvent(
+  list: readonly RunConfirmRequest[],
+  method: string,
+  params: unknown,
+): RunConfirmRequest[] {
+  const p = asRecord(params);
+  const requestId = typeof p.requestId === 'string' ? p.requestId : '';
+  if (!requestId) return [...list];
+  if (method === 'agent.confirmResolved') return list.filter((r) => r.requestId !== requestId);
+  if (method !== 'agent.confirmRequest' || list.some((r) => r.requestId === requestId)) return [...list];
+  if (p.kind === 'shadow_run') return [...list, shadowConfirmFrom(requestId, p)];
+  if (p.kind !== 'execute_cell') return [...list];
+  return [
+    ...list,
+    {
+      kind: 'execute_cell',
+      requestId,
+      notebookId: String(p.notebookId ?? ''),
+      cellId: String(p.cellId ?? ''),
+      code: String(p.code ?? ''),
+      cascade: p.cascade === true,
+    },
+  ];
 }
 
 /** 连接 promise 记忆化：StrictMode 双挂载/多处调用只建一条 WS、只订阅一次通知。 */
@@ -536,7 +638,8 @@ function handleBridgeStatus(event: BridgeStatusEvent): void {
       const cache = nb.readCache(tab.notebookId);
       if (cache && tab.notebookId !== nb.activeId) nb.saveCache(tab.notebookId, { ...cache, cells: interruptRunning(cache.cells) });
     }
-    useNotebook.setState({ bridgeConnected: false, bridgeStatus: event.status, cells: interruptRunning(store.cells) });
+    // 断线：在途的执行确认已无法送达（bridge 侧超时按「未执行」结算），撤掉弹窗
+    useNotebook.setState({ bridgeConnected: false, bridgeStatus: event.status, cells: interruptRunning(store.cells), runConfirms: [] });
     return;
   }
   if (event.status !== 'connected') return;
@@ -624,8 +727,18 @@ function revertDiffState(
   diffs: readonly StagedDiff[],
   diffId: string,
   back: StagedDiff['state'],
+  acceptError?: string,
 ): StagedDiff[] {
-  return diffs.map((d) => (d.id === diffId ? { ...d, state: back } : d));
+  return diffs.map((d) => {
+    if (d.id !== diffId) return d;
+    const { acceptError: _stale, ...rest } = d;
+    return acceptError ? { ...rest, state: back, acceptError } : { ...rest, state: back };
+  });
+}
+
+/** diff.accept 被拒（依赖未采纳 / 已被拒绝 / 内核错误）→ diff 卡片上的提示文本。 */
+function acceptErrorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** bridge CompileError（{message, cellIds}）/字符串两种形态 → 行内提示文本。 */
@@ -984,6 +1097,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   cascadeOverride: 'policy',
   lastRunMs: {},
   cascadeAsk: null,
+  runConfirms: [],
 
   setState: (patch) => set(patch),
   setActive: (cellId) => {
@@ -1073,6 +1187,10 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           }
           case 'notebook.state':
             s.applyNotebookState(params);
+            break;
+          case 'agent.confirmRequest':
+          case 'agent.confirmResolved':
+            set({ runConfirms: applyRunConfirmEvent(get().runConfirms, method, params) });
             break;
           case 'diff.updated': {
             // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
@@ -1659,6 +1777,15 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     set({ cascadeAsk: null });
     ask?.resolve(run);
   },
+  answerRunConfirm: async (requestId, allow) => {
+    set({ runConfirms: get().runConfirms.filter((r) => r.requestId !== requestId) });
+    try {
+      await bridge.rpc('agent.confirmResponse', { requestId, allow });
+    } catch (err) {
+      // 已超时 / 别的窗口先答 / 断线：bridge 侧已按「未执行」结算，这里只留日志
+      console.warn('agent.confirmResponse 未生效:', err);
+    }
+  },
 
   /**
    * Accept（proposed/edited-staged → accepted）：
@@ -1751,8 +1878,8 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
         const conflict = tab && errorFileConflict(err, tab.path);
         if (conflict) pauseForConflict(notebookId, conflict);
         const cache = owningCache(notebookId);
-        if (cache) writeCache(notebookId, { ...cache, diffs: revertDiffState(cache.diffs, diffId, prev.state) });
-      } else set({ diffs: revertDiffState(get().diffs, diffId, prev.state) });
+        if (cache) writeCache(notebookId, { ...cache, diffs: revertDiffState(cache.diffs, diffId, prev.state, acceptErrorText(err)) });
+      } else set({ diffs: revertDiffState(get().diffs, diffId, prev.state, acceptErrorText(err)) });
     }
   },
 

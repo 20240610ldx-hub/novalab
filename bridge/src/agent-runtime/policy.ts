@@ -21,9 +21,14 @@ export const TOOL_ROUTER_METHODS: Record<AgentToolName, string> = {
   execute_cell: 'cell.run',
   list_cells: 'agent.listCells',
   get_cell_code: 'agent.cellCode',
+  shadow_run: 'shadow.run',
+  verify: 'shadow.verify',
 };
 
-const ALLOWED_METHODS = new Set(Object.values(TOOL_ROUTER_METHODS));
+/** 工具转发之外允许的辅助方法：Stop / abortSignal 取消影子运行（只终止影子进程，不碰用户状态）。 */
+const AUX_METHODS = ['shadow.cancel'];
+
+const ALLOWED_METHODS = new Set([...Object.values(TOOL_ROUTER_METHODS), ...AUX_METHODS]);
 
 export class M4Violation extends Error {
   constructor(method: string) {

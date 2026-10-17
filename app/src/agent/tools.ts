@@ -74,9 +74,12 @@ const SAFE_RPC_ENVELOPE = z.union([
   z.object({ toolError: z.string(), method: z.string() }),
 ]);
 
-/** 执行单一来源工具并过 M5 第二道闸；审计记录过闸后的实际出口。 */
-export async function runGatedTool(name: AgentToolName, args: unknown): Promise<JSONValue> {
-  const raw = await executeAgentTool(rpcHost, name, args);
+/**
+ * 执行单一来源工具并过 M5 第二道闸；审计记录过闸后的实际出口。
+ * abortSignal（用户点 Stop）交给 executeAgentTool：影子运行 / 核验在途时转成 shadow.cancel（F4）。
+ */
+export async function runGatedTool(name: AgentToolName, args: unknown, abortSignal?: AbortSignal): Promise<JSONValue> {
+  const raw = await executeAgentTool(rpcHost, name, args, abortSignal ? { signal: abortSignal } : {});
   const gate = sanitizeToolOutput(name, raw, { envelope: SAFE_RPC_ENVELOPE });
   useAgentStore.getState().recordToolResult(auditToolResult(name, gate.output, gate));
   return gate.output as JSONValue;
@@ -89,7 +92,8 @@ function buildAgentTools(): Record<AgentToolName, Tool> {
       description: def.description,
       inputSchema: def.inputSchema,
       // v0.1.1：每次工具返回都记账（ContextChip 审计"实际发给模型的工具输出"）
-      execute: (args: unknown) => runGatedTool(def.name, args),
+      execute: (args: unknown, options?: { abortSignal?: AbortSignal }) =>
+        runGatedTool(def.name, args, options?.abortSignal),
     });
   }
   return tools;

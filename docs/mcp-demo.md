@@ -42,8 +42,8 @@ claude mcp add novalab -- pnpm --dir "D:/Notebook Agent/bridge" exec tsx src/mai
 |---|---|---|---|
 | `get_notebook_context` | — | `{dagEdges, schemas, focusCellId, staleSet}` | 依赖拓扑 + 变量 schema（过 PreviewSerializer 4KB 硬截断）；**无原始数据** |
 | `get_cell_output` | `cellId` | `{traceback, mimeKeys}` | 隐私安全摘要；stdout、stderr 与文件路径只留在本地 UI/session，不发送给 Agent |
-| `propose_code_change` | `targetCellId, action(update\|insert_below), newCode, rationale?` | `{diffId}` 或 `{rejected:true, reason}` | 只产生 staged diff；入队前编译预检（多重定义/DAG 环 → 拒绝并回 reason，供模型自纠） |
-| `execute_cell` | `cellId, cascade?` | run 报告 `{cellId, ok, cascaded, durationMs, traceback?}` | 与前端同一内核、同一执行队列 |
+| `propose_code_change` | `targetCellId, action(update\|insert_below), newCode, rationale?` | `{diffId, dependsOn?}` 或 `{rejected:true, reason, hint?, conflictsWith?}` | 只产生 staged diff；入队前编译预检，相对当前 notebook 并叠加全部待审 diff（多重定义/DAG 环 → 拒绝并回 reason/hint，供模型自纠）。搬移定义 = 先 update 原 cell、再提交新位置，第二条带 `dependsOn`，须按序采纳 |
+| `execute_cell` | `cellId, cascade?` | run 报告 `{cellId, ok, cascaded, durationMs, traceback?}`，或 `{denied:true, reason, message}` | 与前端同一内核、同一执行队列。**每次执行都要用户在 NovaLab 窗口点「允许」**（ADR-013 影子执行落地前的过渡闸）；`--mcp` 模式没有可确认的窗口，一律返回 `denied`（`no-confirmer`），不执行 |
 | `list_cells` | — | `[{id, execCount, status, firstLine, defs, refs}]` | status ∈ idle / ok / stale / error |
 | `get_cell_code` | `cellId` | `{cellId, code}` | 源码原文 |
 

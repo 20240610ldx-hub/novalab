@@ -19,6 +19,8 @@ import {
 import { FakeKernel } from './testing/fake-kernel';
 import { PREVIEW_STRING_LIMIT, TRUNCATION_SUFFIX } from './preview';
 import type { DiffUpdatedParams, NotebookState, RpcResponse } from './protocol';
+/** ADR-013：未经影子运行的改动照常入队，只标注 unverified（软约束）。 */
+const UNVERIFIED = { status: 'unverified', level: 'V1', missing: ['shadow_run'] };
 
 const NB_PATH = path.join(mkdtempSync(path.join(tmpdir(), 'novalab-agent-')), 'demo.py');
 
@@ -317,7 +319,7 @@ describe('diff.stage 编译预检（P2.7）', () => {
       newCode: 'y = x + 2',
     });
     const out = res.result as StageResult;
-    expect(out).toEqual({ diffId: 'diff-1' });
+    expect(out).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
     expect(countNotes('diff.updated')).toBe(1);
 
     const requests = fakes[0]!.requests.slice(start);
@@ -338,7 +340,7 @@ describe('diff.stage 编译预检（P2.7）', () => {
       action: 'insert_below',
       newCode: 'z = x * 10',
     });
-    expect(res.result).toEqual({ diffId: 'diff-1' });
+    expect(res.result).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
     const validations = fakes[0]!.requests.filter((r) => r.method === 'validate_cells');
     expect(validations).toHaveLength(1);
     const candidate = (validations[0]!.params as { cells: { id: string; code: string }[] }).cells;

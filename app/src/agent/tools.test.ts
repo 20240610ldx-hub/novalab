@@ -38,9 +38,9 @@ beforeEach(() => {
 });
 
 describe('agentTools（单一来源重建）', () => {
-  it('工具名与 bridge AGENT_TOOL_NAMES 完全一致（spec §7 六工具）', () => {
+  it('工具名与 bridge AGENT_TOOL_NAMES 完全一致（spec §7 六工具 + ADR-013 shadow_run / verify）', () => {
     expect(Object.keys(agentTools).sort()).toEqual([...AGENT_TOOL_NAMES].sort());
-    expect(Object.keys(agentTools)).toHaveLength(6);
+    expect(Object.keys(agentTools)).toHaveLength(8);
   });
 
   it('每个工具带 description 与 inputSchema（来自单一来源 meta/schema）', () => {
@@ -58,7 +58,7 @@ describe('agentTools（单一来源重建）', () => {
     expect(out).toEqual({ cellId: 'c1', code: 'x = 1' });
   });
 
-  it('propose_code_change → diff.stage（透传 rationale）；execute_cell → cell.run（cascade 默认 false）', async () => {
+  it('propose_code_change → diff.stage（透传 rationale）；execute_cell → agent.executeCell（逐次用户确认；cascade 默认 false）', async () => {
     rpc.mockResolvedValue({ staged: true });
     await exec('propose_code_change', {
       targetCellId: 'c1',
@@ -76,7 +76,7 @@ describe('agentTools（单一来源重建）', () => {
     rpc.mockClear();
     rpc.mockResolvedValue({ ok: true });
     await exec('execute_cell', { cellId: 'c2' });
-    expect(rpc).toHaveBeenCalledWith('cell.run', { cellId: 'c2', cascade: false });
+    expect(rpc).toHaveBeenCalledWith('agent.executeCell', { cellId: 'c2', cascade: false });
   });
 
   it('入参不满足单一来源 zod schema → ZodError 抛出（ai 会转为 tool-error 部件）', async () => {

@@ -5,6 +5,7 @@ import type { KernelState } from '../kernel/types';
 import { useI18n } from '../i18n';
 import { DiffTray } from './diff/Tray';
 import { CascadeAskDialog } from './diff/CascadeAskDialog';
+import { RunConfirmDialog } from './agent/RunConfirmDialog';
 
 /** 前端 KernelState → 状态栏文案（live/connecting 显示为 idle，截图元素 6）。 */
 function statusText(s: KernelState): string {
@@ -83,6 +84,7 @@ export function KernelStatusBar({ onHandlePointerDown }: KernelStatusBarProps) {
       {/* fixed 定位的 diff 审阅托盘与级联确认窗（视觉位置在顶栏右侧/视口中央） */}
       <DiffTray />
       <CascadeAskDialog />
+      <RunConfirmDialog />
 
       <span>{leftText}</span>
       {/* 拖拽把手：P3.2 拖出变量 inspector（S3）；双击 = 折叠/展开（dragStore 内判定） */}

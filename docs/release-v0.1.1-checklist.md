@@ -463,6 +463,36 @@ Owner 批准（2026-10-16）原话："D4 approved: add a baselineSha256 field to
 
 本补充关闭第六轮遗留的「dirty bridge-lost tab 跨代恢复（D4）」（仅 Windows）；跨应用草稿恢复、生产环境旧内核清理与跨平台仍缺，**A15 保持未勾选**。
 
+### 2026-10-17 Agent 安全小包：F2 多格 diff 队列 + execute_cell 过渡确认（Windows-only）
+
+Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉，再进入 ADR-013 实现。"分支 `claude/novalab-agent-safety-fixes`，基于重试提交 56fd8b1。
+
+| 项 | 结果 |
+|---|---|
+| F2 | `diff.stage` 有待审 diff 时验证「当前」与「叠加全部待审」两次；`dependsOn` / `conflictsWith` / `hint`；`diff.accept` 依赖未采纳或已被拒时在改动前拒绝；前端依赖 chip 与 Accept 拒绝原因；system prompt 与工具描述写明搬移定义的两步顺序 |
+| F3 | `diff.stage` 排在 notebook 写队列上（并发工具调用按到达顺序） |
+| compileError | 真实内核回传纯字符串，旧实现使被拒的 `propose_code_change` 在 M5 第二道闸整条被替换为占位文本；现在 stage 边界解析为 `{message, cellIds}`。`cell.save` / `diff.accept` 仍原样转发（app 两种都认），协议类型改为 `CompileError \| string` 如实描述 |
+| execute_cell | `agent.executeCell` 逐次确认：`agent.confirmRequest` → `agent.confirmResponse`（先到先得）→ `agent.confirmResolved`；拒绝 / 超时 120 s / 切 notebook / 源码变更 → `{denied, reason, message}`；`--mcp` 无确认者一律拒绝；M5 白名单加入 denied 形状（未知 reason fail closed） |
+| 先红 | router F2 5 失败 / 1 通过；F3 并发 1 失败；确认握手 9 失败；真实内核验收 1 失败（字符串 compileError）后又暴露 cellIds 捕获组错误，均修正 |
+| 工程门 | bridge `tsc --noEmit` + vitest 315（25 文件）；app `tsc -b` + vitest 388（29 文件）+ 生产构建（主 JS 1387.15 kB）；Python 261 + 5 跳过；`pnpm test:scripts` 24；真实内核验收 17（7 文件）；集成 smoke + acceptance；sidecar / py-resources 重建；构建目录 packaged smoke + acceptance |
+| 真实 Chromium | 新 `scripts/agent-safety-smoke.mjs` 通过：确认弹窗显示源码且默认焦点「拒绝」，拒绝不执行，允许后执行；F2 两条 diff，`依赖 diff-1` chip 可见，乱序 Accept 被拒并显示原因、cells 不变，按序采纳后 helper 进入新 cell。kernel-restart / bridge-reconnect / file-conflict / save-lifecycle / html-output 复测通过 |
+| 证据 | 本工作树 gitignored `validation-20261014/`：`seal-agent-safety.mjs`、`manifest-agent-safety.json` / `results-agent-safety.json` 与 `stage-safety-*.log`（脱敏）；此前全部封存只读核对未变 |
+| 边界 | Windows-only；Chromium + Vite dev，非 Tauri WebView / 安装器；确认超时只有单测；未用真实模型复测；外部 MCP Agent 不再能执行 cell（行为变化，已写入 `docs/mcp-demo.md`） |
+
+**A15 保持未勾选。**
+
+### 2026-10-17 维护包：输出预算、首屏拆包、测试临时目录、依赖（Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| F7 | 未知模型显式 `maxOutputTokens` 8192（anthropic-compat 不再回落 4096、openai-compat 不再交给服务端默认）；已知 Claude 模型沿用 SDK 上限；dev 兜底模型改走同一构造路径（补上重试层与预算）。先红：请求体 `max_tokens` 为 4096 |
+| 拆包 | 主 JS 1,399.6 → 206.8 kB（gzip 409.6 → 61.4）；AI SDK 557.3 kB 随 Agent / 设置面板懒加载；React、CodeMirror 独立长缓存块；`scripts/app-bundle-boundary.test.mjs` 守边界（对旧 App.tsx 先红）；真实浏览器中 Agent 面板与设置面板懒加载后正常渲染、控制台无错误 |
+| 临时目录 | bridge vitest 单测与验收配置加 `globalSetup` 专属临时根；整套运行后 %TEMP% `novalab-*` 新增 0（之前 8,234 个历史残留未动） |
+| 依赖 | pi 两包移入 bridge `devDependencies`，lockfile 离线更新；打包 bridge 中 0 处引用 |
+| 工程门 | bridge `tsc` + vitest 342（27 文件）；app `tsc -b` + vitest 395（30 文件）+ 生产构建；Python 296 + 5 跳过；`pnpm test:scripts` 27；真实内核验收 24（8 文件）；集成 smoke 13；sidecar / py-resources 重建；构建目录 packaged smoke + acceptance 12/12；真实 Chromium 六个 smoke（kernel-restart / bridge-reconnect / file-conflict / save-lifecycle / html-output / agent-safety）全部通过 |
+| 证据 | 本工作树 gitignored `validation-20261014/`：`manifest-maintenance.json` / `results-maintenance.json` 与 `stage-maint-*.log` |
+| 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
+
 ### 2026-10-17 第七轮：跨应用 dirty 草稿有界恢复（Windows-only 浏览器证据）
 
 Owner 裁决（2026-10-17）："Next to the notebook, 7 days (Recommended)"；总体指示"先按照你建议的路径推进"。基线 `56fd8b1`（`claude/novalab-reliability-stack`：第 6 轮 + D4、F1、LLM 重试）加未提交修改，分支 `claude/novalab-draft-recovery`；设计见 `docs/proposal-draft-recovery.md`，协议见 `docs/spec.md`。

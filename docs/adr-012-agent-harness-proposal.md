@@ -122,8 +122,8 @@ token 是估算值：取两边归一化后的请求内容（system、工具声�
 ### 顺带发现（与选型无关，建议另开工作包）
 
 - **F1**：Vercel 路径的 M5 只有一道闸（5.3）。把白名单的第二道闸补到 `app/src/agent/tools.ts` 成本很低，而且无论选 A 还是 B 都成立。
-- **F2**：`diff.stage` 的预检只校验"当前 cells + 本条 diff"，不叠加已经 staged 的 diff。因此"把定义搬到新 cell"会和原 cell 里仍然存在的定义冲突而被拒（n3-split）。stub 策略改用新名字绕过了，这也恰好符合 Reactive Rulebook。这和路线图阶段 3"完善多格 Diff 队列"直接相关。
-- **F3**：AI SDK 会**并发**执行同一条消息里的多个工具调用，router 因此会收到并发的 `diff.stage`。入队顺序目前依赖内核按 FIFO 应答，并没有文档化的保证。pi 原型把写入类工具设为串行。另外，bench 的 FakeKernel 曾因为共享的 `nextCompileError` 字段在并发下错配，已在 `OracleKernel` 里修正。真内核按请求独立计算，没有这个问题。
+- **F2**：`diff.stage` 的预检只校验"当前 cells + 本条 diff"，不叠加已经 staged 的 diff。因此"把定义搬到新 cell"会和原 cell 里仍然存在的定义冲突而被拒（n3-split）。stub 策略改用新名字绕过了，这也恰好符合 Reactive Rulebook。这和路线图阶段 3"完善多格 Diff 队列"直接相关。**（2026-10-17 已修复：叠加待审 diff 预检 + `dependsOn` / `conflictsWith` / `hint`，见路线图 §12。）**
+- **F3**：AI SDK 会**并发**执行同一条消息里的多个工具调用，router 因此会收到并发的 `diff.stage`。入队顺序目前依赖内核按 FIFO 应答，并没有文档化的保证。pi 原型把写入类工具设为串行。另外，bench 的 FakeKernel 曾因为共享的 `nextCompileError` 字段在并发下错配，已在 `OracleKernel` 里修正。真内核按请求独立计算，没有这个问题。**（2026-10-17：`diff.stage` 已排入 notebook 写队列，并发 stage 按到达顺序串行，见路线图 §12。）**
 - **F4**：`executeAgentTool` 不接 abortSignal（5.4 的 I2）。
 - **F6**：在 `anthropic-compat` 下，pi 走的是 `@anthropic-ai/sdk` 的 beta 接口，请求路径是 `/v1/messages?beta=true`；app 的 `@ai-sdk/anthropic` 用的是 `/v1/messages`。如果代理严格匹配查询串，pi 会不兼容。G-1 第一次运行时就能看出来。bridge `llm-proxy` 是否透传查询串，需要在 G-2 接线时确认。
 - **F7**：`@ai-sdk/anthropic` 遇到未知模型 id（tokenplan 的 qwen/glm/deepseek 等）会把输出上限压到 **4096**，运行时有 warning。也就是说 **app 现网对这些模型的输出预算就是 4096**，长代码提议可能被截断。G-1 脚本让 pi 也对齐到 4096，保证对比公平。这一点与选型无关，可以单独评估是否给 app 显式设置 `maxOutputTokens`。
