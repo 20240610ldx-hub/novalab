@@ -61,7 +61,7 @@ afterEach(async () => {
 });
 
 describe('MCP server · 注册面', () => {
-  it('工具列表快照（六工具，spec §7）', async () => {
+  it('工具列表快照（六工具 spec §7 + ADR-013 影子工具）', async () => {
     await connect();
     const { tools } = await client!.listTools();
     expect(tools.map((t) => [t.name, t.description])).toMatchInlineSnapshot(`
@@ -90,9 +90,17 @@ describe('MCP server · 注册面', () => {
           "get_cell_code",
           "读取指定 cell 的源码原文 {cellId, code}",
         ],
+        [
+          "shadow_run",
+          "在独立的影子进程里运行候选改动：按源码重放上游 cell，再运行改后的下游闭包。用户的 kernel、变量和文件都不会被改动；影子进程禁止网络、子进程和临时目录外的写入（被拦截的操作计入 blocked）。每轮第一次运行前用户需要在 NovaLab 界面点「允许」。返回 schema 级报告 {runId, verificationId, status, after{plan, cells}, vars[{name, before, after, delta}], autoChecks, blocked, nondeterminism, budget}——只有类型、形状、列名和聚合统计，没有行数据。未获批准时返回 {denied, reason, message}：此时什么都没运行，本轮不要重试。",
+        ],
+        [
+          "verify",
+          "在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / sum_conserved / row_sums / match_rate / equivalent），只返回每条的状态与计数 {runId, verificationId, status, contracts}。把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。",
+        ],
       ]
     `);
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(8);
   });
 
   it('propose_code_change 的 JSON schema 形状（zod 单一来源投影）', async () => {

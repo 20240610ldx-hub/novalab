@@ -126,6 +126,12 @@ export interface RunReport {
 
 export type KernelState = 'connecting' | 'live' | 'busy' | 'restarting' | 'dead';
 
+export interface DiffVerification {
+  status: 'verified' | 'unverified' | 'failed' | 'expired' | 'not-required';
+  level: 'V0' | 'V1' | 'V2' | 'V3';
+  missing: string[];
+}
+
 export interface StagedDiff {
   id: string;
   targetCellId: string;
@@ -134,6 +140,8 @@ export interface StagedDiff {
   rationale?: string;
   /** 须先采纳的待审 diff（F2：搬移定义的第二条依赖第一条）。 */
   dependsOn?: string[];
+  /** ADR-013 核验状态（bridge 按源码修订重算；软约束，只标注不拦截）。 */
+  verification?: DiffVerification;
   origin: 'agent' | 'user';
   state: 'proposed' | 'edited-staged' | 'accepted' | 'rejected';
   /** 纯前端：最近一次 Accept 被 bridge 拒绝的原因（下一次 diff.updated 或重试即清除）。 */

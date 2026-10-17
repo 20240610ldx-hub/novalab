@@ -1,7 +1,7 @@
 /**
  * Agent 工具集单一来源（spec §7，P2.6）。
  *
- * 六个工具的 zod schema + description + execute 实现都在这里：
+ * 全部工具（六个基础工具 + ADR-013 的 shadow_run / verify）的 zod schema + description + execute 实现都在这里：
  * - MCP stdio server（bridge/src/mcp/server.ts）注册这些 schema 并调 executeAgentTool；
  * - 前端（app 线，经 `@novalab/bridge/mcp-tools` 导入）消费纯 schema + meta（AGENT_TOOL_DEFS），
  *   前端 in-process 工具与 MCP server 共用同一 execute 语义（都落到 router.invoke 的同一批方法）。
@@ -25,7 +25,7 @@ export {
   type ToolOutputGateResult,
 } from './output-whitelist';
 
-/** 六工具名（spec §7 顺序：4 核心 + 2 只读辅助）。 */
+/** 工具名（spec §7 顺序：4 核心 + 2 只读辅助；ADR-013 追加影子运行与核验）。 */
 export const AGENT_TOOL_NAMES = [
   'get_notebook_context',
   'get_cell_output',
@@ -33,6 +33,8 @@ export const AGENT_TOOL_NAMES = [
   'execute_cell',
   'list_cells',
   'get_cell_code',
+  'shadow_run',
+  'verify',
 ] as const;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
@@ -43,6 +45,66 @@ export interface AgentToolHost {
 }
 
 // ---------- zod schema（单一来源；app 线与 MCP server 都从这里取） ----------
+
+const cellEdit = z.object({
+  targetCellId: z.string().describe('目标 cell id；insert_below 时新 cell 插到它之后'),
+  action: z.enum(['update', 'insert_below']).describe('update=改写该 cell；insert_below=在其后插入新 cell'),
+  newCode: z.string().describe('改后的完整 cell 源码'),
+});
+
+const phase = z.enum(['before', 'after']).optional().describe('改前（before）或改后（after，默认）的影子命名空间');
+const target = z.string().describe('变量名');
+const columns = z.array(z.string());
+
+/** ADR-013 §4.2 声明式契约（与 py/novakernel/shadow.py _eval_one 一一对应；不接受任意代码）。 */
+const contractSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('columns_present'), target, columns: columns.min(1), phase }),
+  z.object({ kind: z.literal('dtype'), target, column: z.string().optional(), expect: z.string().describe('如 int64 / float / datetime64 / object'), phase }),
+  z.object({
+    kind: z.literal('range'),
+    target,
+    column: z.string().optional(),
+    min: z.number().optional(),
+    max: z.number().optional(),
+    inclusive: z.boolean().optional(),
+    phase,
+  }),
+  z.object({ kind: z.literal('not_null'), target, columns: columns.optional(), phase }),
+  z.object({ kind: z.literal('unique_key'), target, columns: columns.optional(), phase }),
+  z.object({
+    kind: z.literal('row_count'),
+    target,
+    op: z.enum(['==', '<=', '>=']).optional(),
+    ref: z.union([z.number(), z.object({ target, phase })]).describe('数字，或另一个变量（可指定 before/after）'),
+    tolerance: z.number().optional(),
+    phase,
+  }),
+  z.object({
+    kind: z.literal('sum_conserved'),
+    before: z.object({ target, column: z.string().optional(), by: columns.optional(), phase }),
+    after: z.object({ target, column: z.string().optional(), by: columns.optional(), phase }),
+    rtol: z.number().optional(),
+    atol: z.number().optional(),
+  }),
+  z.object({
+    kind: z.literal('row_sums'),
+    target,
+    axis: z.union([z.literal(0), z.literal(1)]).optional(),
+    expect: z.number().optional(),
+    atol: z.number().optional(),
+    phase,
+  }),
+  z.object({
+    kind: z.literal('match_rate'),
+    left: z.string(),
+    right: z.string(),
+    on: columns.min(1),
+    min: z.number().min(0).max(1),
+    phase,
+    rightPhase: phase,
+  }),
+  z.object({ kind: z.literal('equivalent'), targets: columns.min(1).describe('改前改后应当相等的变量'), rtol: z.number().optional() }),
+]);
 
 export const agentToolSchemas = {
   get_notebook_context: z.object({}),
@@ -56,6 +118,8 @@ export const agentToolSchemas = {
       '符合 Reactive Rulebook 的 Python 代码：单赋值、不重定义已有全局名、倾向函数式与新名字',
     ),
     rationale: z.string().optional().describe('一句话变更理由（审阅 UI 展示）'),
+    verificationId: z.string().optional().describe('shadow_run / verify 返回的 verificationId：把核验证据绑定到这条提议'),
+    intent: z.enum(['refactor', 'fix', 'feature', 'cleanup']).optional().describe('refactor = 声称行为不变（需要 equivalent 核验）'),
   }),
   execute_cell: z.object({
     cellId: z.string().describe('要执行的 cell id'),
@@ -64,6 +128,14 @@ export const agentToolSchemas = {
   list_cells: z.object({}),
   get_cell_code: z.object({
     cellId: z.string().describe('目标 cell id'),
+  }),
+  shadow_run: z.object({
+    changes: z.array(cellEdit).min(1).max(20).describe('按序应用到当前 notebook 的候选改动'),
+    seed: z.number().int().optional().describe('随机种子（默认 0；numpy / random 都会被设定）'),
+  }),
+  verify: z.object({
+    runId: z.string().describe('最近一次 shadow_run 返回的 runId'),
+    contracts: z.array(contractSchema).max(64),
   }),
 } satisfies Record<AgentToolName, z.ZodType>;
 
@@ -104,6 +176,21 @@ export const agentToolMeta = {
     title: '读取 cell 源码',
     description: '读取指定 cell 的源码原文 {cellId, code}',
   },
+  shadow_run: {
+    title: '影子运行',
+    description:
+      '在独立的影子进程里运行候选改动：按源码重放上游 cell，再运行改后的下游闭包。用户的 kernel、变量和文件都不会被改动；' +
+      '影子进程禁止网络、子进程和临时目录外的写入（被拦截的操作计入 blocked）。每轮第一次运行前用户需要在 NovaLab 界面点「允许」。' +
+      '返回 schema 级报告 {runId, verificationId, status, after{plan, cells}, vars[{name, before, after, delta}], autoChecks, blocked, nondeterminism, budget}' +
+      '——只有类型、形状、列名和聚合统计，没有行数据。未获批准时返回 {denied, reason, message}：此时什么都没运行，本轮不要重试。',
+  },
+  verify: {
+    title: '核验契约',
+    description:
+      '在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / ' +
+      'sum_conserved / row_sums / match_rate / equivalent），只返回每条的状态与计数 {runId, verificationId, status, contracts}。' +
+      '把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。',
+  },
 } satisfies Record<AgentToolName, { title: string; description: string }>;
 
 /** app 线消费的纯 schema + meta 列表（无 execute，无 bridge 运行时依赖）。 */
@@ -131,6 +218,7 @@ export async function executeAgentTool(
   host: AgentToolHost,
   name: AgentToolName,
   args: unknown,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<unknown> {
   switch (name) {
     case 'get_notebook_context': {
@@ -148,6 +236,8 @@ export async function executeAgentTool(
         action: a.action,
         newCode: a.newCode,
         ...(a.rationale !== undefined ? { rationale: a.rationale } : {}),
+        ...(a.verificationId !== undefined ? { verificationId: a.verificationId } : {}),
+        ...(a.intent !== undefined ? { intent: a.intent } : {}),
       });
     }
     case 'execute_cell': {
@@ -163,9 +253,35 @@ export async function executeAgentTool(
       const a = agentToolSchemas.get_cell_code.parse(args);
       return host.invoke('agent.cellCode', { cellId: a.cellId });
     }
+    case 'shadow_run': {
+      const a = agentToolSchemas.shadow_run.parse(args);
+      // F4：harness 的 abortSignal（用户点 Stop）→ shadow.cancel，影子进程树立即终止
+      return withCancel(host, opts.signal, () =>
+        host.invoke('shadow.run', { changes: a.changes, ...(a.seed !== undefined ? { seed: a.seed } : {}) }),
+      );
+    }
+    case 'verify': {
+      const a = agentToolSchemas.verify.parse(args);
+      return withCancel(host, opts.signal, () => host.invoke('shadow.verify', { runId: a.runId, contracts: a.contracts }));
+    }
     default: {
       const exhaustive: never = name;
       throw new Error(`unknown agent tool: ${String(exhaustive)}`);
     }
+  }
+}
+
+/** 运行期间 signal 触发 → 通知 bridge 取消（结果仍以 router 的 cancelled 报告结算）。 */
+async function withCancel<T>(host: AgentToolHost, signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  if (!signal) return run();
+  const onAbort = (): void => {
+    host.invoke('shadow.cancel', {}).catch(() => undefined);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await run();
+  } finally {
+    signal.removeEventListener('abort', onAbort);
   }
 }

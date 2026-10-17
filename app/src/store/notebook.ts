@@ -235,6 +235,23 @@ export function mapKernelState(state: KernelStatusPayload['state'] | string): Ke
  * 状态字段是 `status`（proposed|accepted|rejected），映射到前端的 `state`；
  * 'edited-staged' 为纯前端态，bridge 不会产生。兼容 `id` 别名以防契约演进。
  */
+const VERIFICATION_STATUSES = new Set(['verified', 'unverified', 'failed', 'expired', 'not-required']);
+const VERIFICATION_LEVELS = new Set(['V0', 'V1', 'V2', 'V3']);
+
+function verificationOf(v: unknown): { verification?: NonNullable<StagedDiff['verification']> } {
+  const r = asRecord(v);
+  if (typeof r.status !== 'string' || !VERIFICATION_STATUSES.has(r.status)) return {};
+  if (typeof r.level !== 'string' || !VERIFICATION_LEVELS.has(r.level)) return {};
+  const missing = Array.isArray(r.missing) ? r.missing.filter((m): m is string => typeof m === 'string') : [];
+  return {
+    verification: {
+      status: r.status as NonNullable<StagedDiff['verification']>['status'],
+      level: r.level as NonNullable<StagedDiff['verification']>['level'],
+      missing,
+    },
+  };
+}
+
 export function normalizeDiffs(payload: unknown): StagedDiff[] {
   const arr = asRecord(payload).diffs;
   if (!Array.isArray(arr)) return [];
@@ -250,6 +267,7 @@ export function normalizeDiffs(payload: unknown): StagedDiff[] {
       newCode: String(r.newCode ?? ''),
       rationale: r.rationale != null ? String(r.rationale) : undefined,
       ...(Array.isArray(r.dependsOn) && r.dependsOn.length > 0 ? { dependsOn: r.dependsOn.map(String) } : {}),
+      ...verificationOf(r.verification),
       origin: r.origin === 'user' ? 'user' : 'agent',
       state,
     };
@@ -506,13 +524,57 @@ interface NotebookStore {
   answerRunConfirm: (requestId: string, allow: boolean) => Promise<void>;
 }
 
-/** bridge agent.confirmRequest 载荷（router.agentExecuteCell）。 */
-export interface RunConfirmRequest {
+/** bridge agent.confirmRequest 载荷：execute_cell（每次）或 shadow_run（ADR-013，每轮首次）。 */
+export type RunConfirmRequest = ExecuteConfirmRequest | ShadowConfirmRequest;
+
+export interface ExecuteConfirmRequest {
+  kind: 'execute_cell';
   requestId: string;
   notebookId: string;
   cellId: string;
   code: string;
   cascade: boolean;
+}
+
+export interface ShadowConfirmChange {
+  cellId: string;
+  action: 'update' | 'insert_below';
+  firstLine: string;
+}
+
+export interface ShadowConfirmRequest {
+  kind: 'shadow_run';
+  requestId: string;
+  notebookId: string;
+  /** null = 没有轮次（旧前端 / 漏接线）：允许只对这一次有效。 */
+  turnId: string | null;
+  changes: ShadowConfirmChange[];
+  memLimitBytes: number;
+  runMs: number;
+  runsLeft: number;
+  rememberForTurn: boolean;
+}
+
+function shadowConfirmFrom(requestId: string, p: Record<string, unknown>): ShadowConfirmRequest {
+  const summary = asRecord(p.summary);
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const changes = (Array.isArray(summary.changes) ? summary.changes : []).flatMap((c): ShadowConfirmChange[] => {
+    const r = asRecord(c);
+    if (typeof r.cellId !== 'string' || typeof r.firstLine !== 'string') return [];
+    if (r.action !== 'update' && r.action !== 'insert_below') return [];
+    return [{ cellId: r.cellId, action: r.action, firstLine: r.firstLine }];
+  });
+  return {
+    kind: 'shadow_run',
+    requestId,
+    notebookId: String(p.notebookId ?? ''),
+    turnId: typeof p.turnId === 'string' ? p.turnId : null,
+    changes,
+    memLimitBytes: num(summary.memLimitBytes),
+    runMs: num(summary.runMs),
+    runsLeft: num(summary.runsLeft),
+    rememberForTurn: summary.rememberForTurn === true,
+  };
 }
 
 /** agent.confirmRequest / agent.confirmResolved → 待批准队列（纯函数，供单测）。 */
@@ -525,12 +587,13 @@ export function applyRunConfirmEvent(
   const requestId = typeof p.requestId === 'string' ? p.requestId : '';
   if (!requestId) return [...list];
   if (method === 'agent.confirmResolved') return list.filter((r) => r.requestId !== requestId);
-  if (method !== 'agent.confirmRequest' || p.kind !== 'execute_cell' || list.some((r) => r.requestId === requestId)) {
-    return [...list];
-  }
+  if (method !== 'agent.confirmRequest' || list.some((r) => r.requestId === requestId)) return [...list];
+  if (p.kind === 'shadow_run') return [...list, shadowConfirmFrom(requestId, p)];
+  if (p.kind !== 'execute_cell') return [...list];
   return [
     ...list,
     {
+      kind: 'execute_cell',
       requestId,
       notebookId: String(p.notebookId ?? ''),
       cellId: String(p.cellId ?? ''),

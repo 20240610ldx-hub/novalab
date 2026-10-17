@@ -17,6 +17,7 @@ import {
   AGENT_TOOL_DEFS,
   agentToolSchemas,
   executeAgentTool,
+  sanitizeToolOutput,
   type AgentToolHost,
 } from './tools';
 import type { AgentContext } from '../router';
@@ -44,10 +45,12 @@ export function createMcpServer(host: AgentToolHost): McpServer {
         description: def.description,
         inputSchema: schema.shape,
       },
-      async (args: Record<string, unknown>) => {
+      async (args: Record<string, unknown>, extra: { signal?: AbortSignal }) => {
         try {
-          // execute 内部再过一遍 zod parse（单一来源校验，MCP 层与 in-process 层行为一致）
-          return jsonResult(await executeAgentTool(host, def.name, args));
+          // execute 内部再过一遍 zod parse（单一来源校验，MCP 层与 in-process 层行为一致）；
+          // 结果过第二道 M5 闸（F1 白名单）再出进程，与前端 / pi 路径同一语义
+          const raw = await executeAgentTool(host, def.name, args, { signal: extra.signal });
+          return jsonResult(sanitizeToolOutput(def.name, raw).output);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           return {

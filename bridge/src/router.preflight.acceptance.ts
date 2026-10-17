@@ -8,6 +8,8 @@ import { afterEach, expect, it } from 'vitest';
 import { RpcRouter } from './router';
 import { KernelSupervisor, StdioKernelTransport } from './supervisor';
 import type { KernelRequest, RpcResponse } from './protocol';
+/** ADR-013：未经影子运行的改动照常入队，只标注 unverified（软约束）。 */
+const UNVERIFIED = { status: 'unverified', level: 'V1', missing: ['shadow_run'] };
 
 const pyDir = fileURLToPath(new URL('../../py/', import.meta.url));
 const python = path.join(pyDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
@@ -88,7 +90,7 @@ it('real kernel: stage validates once and preserves controls, values, source, DA
   const valid = await call('diff.stage', {
     targetCellId: 'bbbbbbbb', action: 'update', newCode: 'y = s.value + 100',
   });
-  expect(valid.result).toEqual({ diffId: 'diff-1' });
+  expect(valid.result).toEqual({ diffId: 'diff-1', verification: UNVERIFIED });
   const rejected = await call('diff.stage', {
     targetCellId: 'bbbbbbbb', action: 'update', newCode: 's = 2',
   });
@@ -100,7 +102,7 @@ it('real kernel: stage validates once and preserves controls, values, source, DA
   const inserted = await call('diff.stage', {
     targetCellId: 'aaaaaaaa', action: 'insert_below', newCode: 'extra = s.value',
   });
-  expect(inserted.result).toEqual({ diffId: 'diff-2' });
+  expect(inserted.result).toEqual({ diffId: 'diff-2', verification: UNVERIFIED });
 
   // This assertion fails against the old probe/rollback implementation.
   // First stage validates once; with diff-1 pending, each later stage validates alone + stacked (F2).

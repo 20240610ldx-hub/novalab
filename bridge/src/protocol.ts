@@ -301,6 +301,16 @@ export interface StagedDiff {
   dependsOn?: string[];
   status: DiffStatus;
   createdAt: string;
+  /** ADR-013 核验状态（软约束：只标注，不阻止入队/采纳；源码变动后 router 重算为 expired）。 */
+  verification?: DiffVerification;
+}
+
+/** ADR-013 §4.4：V0 只改注释/空行 · V1 任意改动 · V2 数据变换 · V3 声称行为不变（intent refactor）。 */
+export interface DiffVerification {
+  status: 'verified' | 'unverified' | 'failed' | 'expired' | 'not-required';
+  level: 'V0' | 'V1' | 'V2' | 'V3';
+  /** 还缺什么才能 verified（如 shadow_run、contract、equivalent:df）。 */
+  missing: string[];
 }
 
 export interface DiffUpdatedParams {
