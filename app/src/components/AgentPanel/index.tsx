@@ -125,7 +125,7 @@ export function AgentPanel() {
             {hasDevEnvModel() ? '' : ' 先在 ⚙ 设置中添加 provider。'}
             <br />
             工具：get_notebook_context / get_cell_output / propose_code_change /
-            execute_cell / list_cells / get_cell_code
+            execute_cell / list_cells / get_cell_code / shadow_run / verify / get_run_history
           </p>
         )}
         {messages.map((m) => (

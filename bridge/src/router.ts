@@ -74,7 +74,17 @@ import { NotebookWatcher, type FsEventSource } from './watch';
 import { UiStore, type NotebookUiState, type UiPatch } from './ui-store';
 import { serializePreview, TRUNCATION_SUFFIX } from './preview';
 import { exportIpynb, IpynbError, parseTracebackTail, type ExportCell, type ExportRunSummary } from './exporter';
-import { RunLog, readRunLog, runLogFileFor, type RunActor, type RunLogRecord, type RunTrigger } from './run-log';
+import {
+  RUN_HISTORY_DEFAULT_LIMIT,
+  RunLog,
+  agentRunHistory,
+  readRunLog,
+  runLogFileFor,
+  type AgentRunHistory,
+  type RunActor,
+  type RunLogRecord,
+  type RunTrigger,
+} from './run-log';
 import { ImportError, importIpynb } from './importer';
 import type { CellSrc, ShadowRunner } from './shadow/manager';
 import { buildRunReport, CONTRACT_KINDS, contractResults, type ContractResult, type ShadowBudgetView, type ShadowRunReport } from './shadow/report';
@@ -463,6 +473,8 @@ export class RpcRouter {
         return this.agentListCells();
       case 'agent.cellCode':
         return this.agentCellCode(params);
+      case 'agent.runHistory':
+        return this.agentRunHistory(params);
       case 'agent.cellOutput':
         return this.agentCellOutput(params);
       case 'agent.executeCell':
@@ -1456,6 +1468,16 @@ export class RpcRouter {
     const cell = cache.cells.find((c) => c.id === cellId);
     if (!cell) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
     return { cellId, code: cell.code };
+  }
+
+  /** get_run_history（ADR-014 O2）：当前会话该 cell 的最近尝试；无运行日志（未开会话）→ 空历史。 */
+  private agentRunHistory(params: Record<string, unknown>): AgentRunHistory {
+    const ctx = this.focusCtx();
+    const cellId = strParam(params, 'cellId');
+    if (!ctx.cache!.cells.some((c) => c.id === cellId)) throw new RpcFault(ERR_INVALID_PARAMS, `unknown cellId: ${cellId}`);
+    const limit = typeof params['limit'] === 'number' ? params['limit'] : RUN_HISTORY_DEFAULT_LIMIT;
+    const records = ctx.runLog ? readRunLog(ctx.runLog.file).records : [];
+    return agentRunHistory(records, cellId, limit);
   }
 
   /**

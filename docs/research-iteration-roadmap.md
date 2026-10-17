@@ -195,7 +195,8 @@ Owner 裁决"先做追加式运行日志"。目标是回答复盘时最常见的
 - **真实内核顺序**：novakernel 的级联根 `run.done` 在下游完成之后才发出，因此耗时取 `run.done` 自带值，读取按 runId 序号排序（真实内核验收先红）。
 - **读取**：rpc `session.runs`（校验 sessionId 属于该 notebook）；`.ipynb` 导出在每个 cell 的 `metadata.novalab.runs` 附最近 50 次尝试（无代码正文）。
 - **界面**：会话记录里每个 cell 头部显示「N 次运行」，展开后列出每次尝试（#、ok / 错误类名 + 行号、触发方式、Agent 标记、耗时、时刻），选中一次显示相对上一次的逐行差异；同代码重跑显示"代码与上一次相同"。
-- **未开放**：Agent 读取运行历史（ADR-014 O2，需 Owner 裁决）；历史快照存图（Owner 未裁决，默认不存）。
+- **Agent 读取**（Owner 裁决 O2 = 开放）：新工具 `get_run_history {cellId, limit?}` 返回当前会话该 cell 最近 ≤20 次尝试的成败、错误类名与行号、触发方式、耗时和相对上一次的变化行（每次 ≤2000 字符）；不含输出、evalue、哈希。过 router 与 M5 白名单两道闸，pi 受限宿主放行该只读方法。
+- **历史快照存图**：Owner 裁决不存。
 
 边界：仅 Windows、Chromium + Vite dev 人工核对（演示 notebook 失败→修改→重跑，中英文各一次）；未测 Linux。
 

@@ -13,6 +13,7 @@
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { TRUNCATION_SUFFIX } from './preview';
 
 export type RunActor = 'user' | 'agent';
 export type RunTrigger = 'direct' | 'cascade' | 'accept' | 'repl';
@@ -184,4 +185,105 @@ export function readRunLog(file: string, filter: { cellId?: string } = {}): { re
   const seq = (r: RunLogRecord): number => Number(r.runId.slice(2)) || 0;
   records.sort((a, b) => seq(a) - seq(b));
   return { records, truncated };
+}
+
+// ---------- Agent 视图（get_run_history，ADR-014 O2 已由 Owner 开放） ----------
+
+/** 每次尝试的代码差异上限（字符）；超出截断。 */
+export const RUN_DIFF_CHAR_LIMIT = 2000;
+export const RUN_HISTORY_DEFAULT_LIMIT = 10;
+export const RUN_HISTORY_MAX_LIMIT = 20;
+/** 逐行差异的计算上限（n·m）；超过则整体替换。与前端 runLog.ts 同值。 */
+const LCS_CELL_LIMIT = 1_000_000;
+
+export interface AgentRunAttempt {
+  attempt: number;
+  ok: boolean;
+  actor: RunActor;
+  trigger: RunTrigger;
+  durationMs: number;
+  error?: { name: string; line?: number };
+  /** 相对上一次尝试代码是否变化（首次尝试为 false）。 */
+  codeChanged: boolean;
+  /** 变化行：`- 旧` / `+ 新`；正文未记录（超预算）时缺省。 */
+  diff?: string;
+}
+
+export interface AgentRunHistory {
+  cellId: string;
+  /** 本会话该 cell 的尝试总数（attempts 只含最近 limit 次）。 */
+  totalAttempts: number;
+  attempts: AgentRunAttempt[];
+}
+
+/** 只含变化行的逐行差异（LCS）。 */
+export function changedLines(before: string, after: string): string {
+  const a = before.split('\n');
+  const b = after.split('\n');
+  const out: string[] = [];
+  if (a.length * b.length > LCS_CELL_LIMIT) {
+    for (const t of a) out.push(`- ${t}`);
+    for (const t of b) out.push(`+ ${t}`);
+    return out.join('\n');
+  }
+  const w = b.length + 1;
+  const dp = new Uint32Array((a.length + 1) * w);
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i * w + j] = a[i] === b[j] ? dp[(i + 1) * w + j + 1]! + 1 : Math.max(dp[(i + 1) * w + j]!, dp[i * w + j + 1]!);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j]! >= dp[i * w + j + 1]!) {
+      out.push(`- ${a[i++]}`);
+    } else {
+      out.push(`+ ${b[j++]}`);
+    }
+  }
+  while (i < a.length) out.push(`- ${a[i++]}`);
+  while (j < b.length) out.push(`+ ${b[j++]}`);
+  return out.join('\n');
+}
+
+/**
+ * 会话全部记录 → 某 cell 最近 limit 次尝试的 Agent 视图。
+ * 不含输出内容与 evalue（日志本就不存）；代码只以"相对上一次的变化行"出现。
+ * 正文按哈希在整个会话里查（同一段代码可能首次出现在别的 cell）。
+ */
+export function agentRunHistory(records: readonly RunLogRecord[], cellId: string, limit = RUN_HISTORY_DEFAULT_LIMIT): AgentRunHistory {
+  const codeByHash = new Map<string, string>();
+  for (const r of records) if (r.code !== undefined && !codeByHash.has(r.codeSha256)) codeByHash.set(r.codeSha256, r.code);
+  const mine = records.filter((r) => r.cellId === cellId);
+  const n = Math.max(1, Math.min(RUN_HISTORY_MAX_LIMIT, Math.floor(limit)));
+  const start = Math.max(0, mine.length - n);
+  const attempts: AgentRunAttempt[] = [];
+  for (let k = start; k < mine.length; k++) {
+    const r = mine[k]!;
+    const prev = k > 0 ? mine[k - 1] : undefined;
+    const codeChanged = prev !== undefined && prev.codeSha256 !== r.codeSha256;
+    const a: AgentRunAttempt = {
+      attempt: r.attempt,
+      ok: r.ok,
+      actor: r.actor,
+      trigger: r.trigger,
+      durationMs: r.durationMs,
+      codeChanged,
+    };
+    if (r.error) a.error = r.error;
+    if (codeChanged) {
+      const before = codeByHash.get(prev!.codeSha256);
+      const after = codeByHash.get(r.codeSha256);
+      if (before !== undefined && after !== undefined) {
+        const d = changedLines(before, after);
+        a.diff = d.length > RUN_DIFF_CHAR_LIMIT ? d.slice(0, RUN_DIFF_CHAR_LIMIT) + TRUNCATION_SUFFIX : d;
+      }
+    }
+    attempts.push(a);
+  }
+  return { cellId, totalAttempts: mine.length, attempts };
 }

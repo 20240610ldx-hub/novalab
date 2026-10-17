@@ -11,6 +11,7 @@ import { RpcRouter } from './router';
 import { FakeKernel } from './testing/fake-kernel';
 import type { RpcResponse } from './protocol';
 import type { RunLogRecord } from './run-log';
+import { executeAgentTool, sanitizeToolOutput } from './mcp/tools';
 
 let sup: KernelSupervisor | undefined;
 let fakes: FakeKernel[] = [];
@@ -139,5 +140,33 @@ describe('运行日志（ADR-014）', () => {
     const staged = (await call('diff.stage', { targetCellId: 'a', action: 'update', newCode: 'x = 5' })).result as { diffId: string };
     await call('diff.accept', { diffId: staged.diffId });
     expect((await runs({ cellId: 'a' })).records.at(-1)).toMatchObject({ trigger: 'accept', code: 'x = 5' });
+  });
+
+  it('Agent 工具 get_run_history（O2）：成败 / 错误类名 / 变化行过白名单闸，异常信息正文不出进程', async () => {
+    setup();
+    await open();
+    fakes[0]!.failCell = { cellId: 'a', traceback: "Traceback (most recent call last):\nKeyError: 'secret-value'" };
+    await call('cell.run', { cellId: 'a' });
+    fakes[0]!.failCell = undefined;
+    await call('cell.save', { cellId: 'a', code: 'x = 2' });
+    await call('cell.run', { cellId: 'a' });
+    await call('cell.run', { cellId: 'a' });
+    const raw = await executeAgentTool(router, 'get_run_history', { cellId: 'a' });
+    const gate = sanitizeToolOutput('get_run_history', raw);
+    expect(gate.redacted).toBe(false);
+    expect(gate.droppedKeys).toEqual([]);
+    expect(gate.output).toEqual({
+      cellId: 'a',
+      totalAttempts: 3,
+      attempts: [
+        { attempt: 1, ok: false, actor: 'user', trigger: 'direct', durationMs: expect.any(Number), error: { name: 'KeyError' }, codeChanged: false },
+        { attempt: 2, ok: true, actor: 'user', trigger: 'direct', durationMs: expect.any(Number), codeChanged: true, diff: '- x = 1\n+ x = 2' },
+        { attempt: 3, ok: true, actor: 'user', trigger: 'direct', durationMs: expect.any(Number), codeChanged: false },
+      ],
+    });
+    expect(JSON.stringify(gate.output)).not.toContain('secret-value');
+    const last = await executeAgentTool(router, 'get_run_history', { cellId: 'a', limit: 1 });
+    expect(last).toMatchObject({ totalAttempts: 3, attempts: [{ attempt: 3 }] });
+    expect((await call('agent.runHistory', { cellId: 'nope' })).error).toBeDefined();
   });
 });

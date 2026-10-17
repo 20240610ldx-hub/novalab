@@ -513,7 +513,8 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 读取 / 导出 | rpc `session.runs`；`.ipynb` cell `metadata.novalab.runs` 最近 50 次（无代码） |
 | 界面 | 会话记录 cell 头「N 次运行」→ 尝试列表 + 相邻差异；中英文 |
 | 测试 | run-log 单元 7、router 7、真实内核验收 1（先红：级联根顺序）、app 4 |
-| 边界 | Windows-only；Agent 读取运行历史未开放（O2 待裁决） |
+| Agent 读取 | Owner 裁决 O2 = 开放：`get_run_history`（成败 / 错误类名 + 行号 / 触发 / 耗时 / 变化行 ≤2000 字符），过 router + M5 白名单；测试：视图单元 3、router 经工具 + 闸 1（断言 evalue 不出进程）、pi↔zod 参数一致性样例 6 |
+| 边界 | Windows-only；历史快照不存图（Owner 裁决） |
 
 ### 当前放行结论
 

@@ -46,6 +46,7 @@ claude mcp add novalab -- pnpm --dir "D:/Notebook Agent/bridge" exec tsx src/mai
 | `execute_cell` | `cellId, cascade?` | run 报告 `{cellId, ok, cascaded, durationMs, traceback?}`，或 `{denied:true, reason, message}` | 与前端同一内核、同一执行队列。**每次执行都要用户在 NovaLab 窗口点「允许」**（ADR-013 影子执行落地前的过渡闸）；`--mcp` 模式没有可确认的窗口，一律返回 `denied`（`no-confirmer`），不执行 |
 | `list_cells` | — | `[{id, execCount, status, firstLine, defs, refs}]` | status ∈ idle / ok / stale / error |
 | `get_cell_code` | `cellId` | `{cellId, code}` | 源码原文 |
+| `get_run_history` | `cellId, limit?` | `{cellId, totalAttempts, attempts[{attempt, ok, actor, trigger, durationMs, error?, codeChanged, diff?}]}` | 当前会话该 cell 的尝试历史（ADR-014 §6）；`diff` 只含相对上一次的变化行，≤2000 字符；不含输出与 evalue |
 
 ## Resources
 

@@ -24,6 +24,8 @@ import type { AgentToolName } from './tools';
 
 /** = router.OUTPUT_CHAR_LIMIT（不 import router：会把内核监督链拉进 app bundle）。 */
 export const TRACEBACK_CHAR_LIMIT = 8192;
+/** get_run_history 每次尝试的代码变化行上限（= run-log.RUN_DIFF_CHAR_LIMIT；本模块不 import bridge 运行时）。 */
+export const RUN_DIFF_CHAR_LIMIT = 2000;
 
 export const REDACTED_TEXT = '[novalab] tool result withheld by privacy whitelist (M5)';
 
@@ -201,6 +203,22 @@ export const TOOL_OUTPUT_WHITELIST = {
     status: z.enum(['pass', 'fail', 'error', 'not-retained', 'timeout', 'crashed', 'cancelled', 'unavailable']),
     contracts: z.array(contractResult),
   }),
+  get_run_history: z.object({
+    cellId: z.string(),
+    totalAttempts: z.number(),
+    attempts: z.array(
+      z.object({
+        attempt: z.number(),
+        ok: z.boolean(),
+        actor: z.enum(['user', 'agent']),
+        trigger: z.enum(['direct', 'cascade', 'accept', 'repl']),
+        durationMs: z.number(),
+        error: z.object({ name: z.string(), line: z.number().optional() }).optional(),
+        codeChanged: z.boolean(),
+        diff: z.string().optional(),
+      }),
+    ),
+  }),
 } satisfies Record<AgentToolName, z.ZodType>;
 
 /**
@@ -211,6 +229,7 @@ const PATH_LIMITS: Partial<Record<AgentToolName, Record<string, number>>> = {
   get_cell_output: { traceback: TRACEBACK_CHAR_LIMIT },
   execute_cell: { traceback: TRACEBACK_CHAR_LIMIT },
   get_cell_code: { code: Number.POSITIVE_INFINITY },
+  get_run_history: { 'attempts[].diff': RUN_DIFF_CHAR_LIMIT },
   shadow_run: { 'after.cells[].traceback': TRACEBACK_CHAR_LIMIT, 'before.cells[].traceback': TRACEBACK_CHAR_LIMIT },
 };
 

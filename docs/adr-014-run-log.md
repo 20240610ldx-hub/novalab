@@ -1,8 +1,8 @@
 # ADR-014 追加式运行日志：每次运行都留下可复盘的记录
 
-> 状态：**实施中**（Owner 2026-10-17："先做追加式运行日志"）。下表 §5 的取舍按推荐默认先实现，均可逆；需要 Owner 改的列在 §5。
+> 状态：**已采纳**（Owner 2026-10-17："先做追加式运行日志"；同日裁决 O2 = 开放 Agent 读取运行历史、历史快照不存图）。§5 其余取舍按推荐默认实现，均可逆。
 > 关联：[运行包洞察](workflow-insights-bundles.md) §2/§4 · ADR-013（影子执行）· [路线](research-iteration-roadmap.md) wave-2「Agent 运行复盘」「带核验附录的交付」
-> 硬约束（不变）：本地优先，记录只落 notebook 目录下 `.novalab/`；Agent 出口仍按 M5 白名单（本 ADR 不新增 Agent 工具）。
+> 硬约束（不变）：本地优先，记录只落 notebook 目录下 `.novalab/`；Agent 出口仍按 M5 白名单（新增工具 `get_run_history` 同样过两道闸，见 §6）。
 
 ## 1. 问题
 
@@ -27,7 +27,7 @@
 - **只追加**，崩溃时最多丢最后一行；读取宽容（坏行跳过）。
 - **不存输出内容**（stdout 正文、图、表）：日志回答"跑了什么、成没成、改了哪里"，结果内容仍归快照/导出。
 - **预算**：每会话最多 10,000 行；代码正文累计 2 MB 后只记哈希（`codeOmitted: true`）。超限只写一次 `{"v":1,"truncated":true}` 标记。
-- **读取**：rpc `session.runs {path?, sessionId?, cellId?}` → `{records, truncated}`，只给本机前端（不进 Agent 工具）。
+- **读取**：rpc `session.runs {path?, sessionId?, cellId?}` → `{records, truncated}`，给本机前端；Agent 只经 `get_run_history`（§6）读当前会话的精简视图。
 - **导出**：`.ipynb` 每个 cell 的 `metadata.novalab.runs` 附该 cell 最近 50 次尝试的 `{attempt, ts, durationMs, ok, error, actor, trigger, codeSha256}`（无代码正文、无输出），交付物里能看到"跑过几次、哪次失败"。
 - **界面**：Session 视图 cell 头显示「N runs」，展开看每次尝试（成败、触发方、耗时）与相对上一次的代码差异。
 
@@ -37,8 +37,7 @@
 
 ## 4. 非目标（本包不做）
 
-- Agent 复盘工具（`get_run_history`）：先确认 Owner 是否允许 Agent 读历史代码与错误名（§5 O2）。
-- 历史快照存图（Owner 未裁，默认不存）。
+- 历史快照存图（Owner 2026-10-17 裁决：不存）。
 - 交付附录生成（用本日志 + 溯源做，下一包）。
 
 ## 5. 取舍（推荐默认已实现，均可逆）
@@ -46,6 +45,14 @@
 | # | 问题 | 推荐（已实现） | 备选 |
 |---|---|---|---|
 | O1 | 代码正文存不存 | 存，按哈希去重，2 MB/会话上限 | 只存哈希（无法回放"改了什么"） |
-| O2 | Agent 能否读运行历史 | 暂不开放；后续工具只回 `{cellId, attempt, ok, error.name, codeSha256}` | 开放代码差异给 Agent |
+| O2 | Agent 能否读运行历史 | **Owner 裁决：开放**（§6），含相对上一次的代码变化行 | 只回元数据、不给代码差异 |
 | O3 | 错误信息粒度 | 异常类名 + 用户 cell 行号，不存 evalue | 存截断的 evalue（可能含数据值） |
 | O4 | 导出附历史 | 附元数据（最近 50 次，无代码） | 不附 / 附代码各版本 |
+
+## 6. Agent 读取：`get_run_history`（O2）
+
+- **入参**：`{cellId, limit?}`（默认 10、最多 20 次）。只读当前聚焦 notebook 的**当前会话**，不能翻历史会话。
+- **出参**：`{cellId, totalAttempts, attempts[{attempt, ok, actor, trigger, durationMs, error?{name, line?}, codeChanged, diff?}]}`。`diff` 只含相对上一次尝试的变化行（`- 旧` / `+ 新`），每次上限 2000 字符；正文因预算未记录时只给 `codeChanged`。
+- **不出进程**：stdout / stderr / evalue / 富输出 / 写入路径 / 代码哈希。代码以"变化行"出现，和 `get_cell_code` 同属 spec §7 白名单"代码文本"类。
+- **两道闸**：router `agent.runHistory` 只构造上述字段；M5 输出白名单再按 zod 形状 strip 未知键、`attempts[].diff` 封顶。pi 运行时的受限宿主（M4）放行 `agent.runHistory`（只读）。
+- **用途**（system prompt）：反复失败或用户问"之前改过什么"时查看，避免重复已经失败过的改法。

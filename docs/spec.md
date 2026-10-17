@@ -210,6 +210,7 @@ kernel 进程只说"执行语"，不含 diff 概念。方法与结果形状：
 4. `execute_cell(cellId, cascade?)` → run 报告（含 cascaded ids 与每格成败）。
 5. `list_cells()` → `[{id, execCount, status, firstLine, defs, refs}]`。
 6. `get_cell_code(cellId)` → 源码原文。
+7. `get_run_history(cellId, limit?)`（ADR-014 §6）→ 当前会话该 cell 最近 ≤20 次尝试：成败、错误类名与行号、触发方式、耗时、相对上一次的变化行；不含输出与 evalue。
 
 Agent system prompt 注入 **Reactive Rulebook**（intent 风险章）：单赋值、禁重定义已有全局名、倾向函数式与新名字；Bridge 在 `propose_code_change` 入口做轻量 AST 校验（多重定义 → 拒绝并回 reason，让模型自纠）。
 
