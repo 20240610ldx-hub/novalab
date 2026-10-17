@@ -136,6 +136,8 @@ describe('agent.listCells', () => {
     await call('cell.run', { cellId: 'b' });
     const failed = (await call('agent.listCells')).result as AgentCellSummary[];
     expect(failed.find((c) => c.id === 'b')!.status).toBe('error');
+    // 失败的运行也计数（run.error 携带 execCount）：agent / 会话快照能看到"跑过且失败"
+    expect(failed.find((c) => c.id === 'b')!.execCount).toBe(1);
   });
 });
 

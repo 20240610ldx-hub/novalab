@@ -48,7 +48,8 @@ function ReadOnlyCode({ code, errorLine }: { code: string; errorLine: number | n
   const lines = useMemo(() => tokenizeLines(code), [code]);
   return (
     <div className="nl-scroll-thin overflow-x-auto rounded-md bg-[var(--bg)] py-2 text-[12.5px] leading-[1.7]">
-      <table className="border-collapse">
+      {/* min-w-full：出错行红底铺满面板宽度（短行时不只覆盖文字） */}
+      <table className="min-w-full border-collapse">
         <tbody>
           {lines.map((toks, i) => (
             <tr key={i} className={errorLine === i + 1 ? 'nl-err-line' : ''}>
@@ -218,7 +219,11 @@ function SessionGroup({ seg, defaultOpen, isLive }: { seg: SessionSegment; defau
   const loadSnapshot = useSession((s) => s.loadSnapshot);
   const liveCells = useNotebook((s) => s.cells);
   const executed = useMemo(
-    () => liveCells.filter((c) => c.kind === 'code' && c.execCount !== null && c.execCount > 0),
+    // 失败的运行同样属于会话记录（旧内核 run.error 不带 execCount → 以 traceback 兜底）
+    () =>
+      liveCells.filter(
+        (c) => c.kind === 'code' && ((c.execCount !== null && c.execCount > 0) || c.output?.traceback != null),
+      ),
     [liveCells],
   );
 

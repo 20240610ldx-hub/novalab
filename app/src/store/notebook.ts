@@ -186,6 +186,8 @@ export function applyRunEvent(cells: readonly Cell[], method: string, params: un
       return patchCell(cells, cellId, (c) => ({
         ...c,
         status: 'error',
+        // 失败的运行也计数（旧内核不带 → 保持原值）
+        execCount: typeof p.execCount === 'number' ? p.execCount : c.execCount,
         output: {
           ...(c.output ?? createEmptyOutput()),
           traceback: { text: asText(p.traceback), frames },

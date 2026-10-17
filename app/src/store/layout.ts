@@ -36,6 +36,19 @@ export const SIDE_MAX = 560;
 export const AGENT_MIN = 280;
 export const AGENT_MAX = 720;
 
+/**
+ * 窄窗口退让：侧栏 / Agent 栏按用户宽度作 flex-basis、可收缩到下列地板，编辑区至少
+ * EDITOR_MIN_WIDTH（否则 ~800px 窗口下编辑区被挤成 0 宽，cell 不可见）。
+ */
+export const SIDE_SHRINK_FLOOR = 160;
+export const AGENT_SHRINK_FLOOR = 240;
+export const EDITOR_MIN_WIDTH = 320;
+
+/** 侧栏 / Agent 栏的 flex 样式：首选用户宽度，空间不足时按比例收缩到地板。 */
+export function panelFlexStyle(width: number, floor: number): { flex: string; minWidth: number } {
+  return { flex: `0 1 ${width}px`, minWidth: Math.min(width, floor) };
+}
+
 export const DEFAULT_LAYOUT: LayoutPrefs = {
   activity: 'explorer',
   sideOpen: true,

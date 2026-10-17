@@ -50,12 +50,17 @@ export function persistLang(storage: Pick<Storage, 'setItem'>, lang: Lang): void
   }
 }
 
-/** `{var}` 插值：vars 缺键/值为 undefined 时保留占位原文（可见的坏，好过静默吞）。 */
+/**
+ * `{var}` 插值：vars 缺键/值为 undefined 时保留占位原文（可见的坏，好过静默吞）。
+ * `{var|单数|复数}`：输出 `值 + 空格 + (值 === 1 ? 单数 : 复数)`（英文计数用；中文词条不需要）。
+ */
 export function interpolate(template: string, vars?: Record<string, string | number>): string {
   if (!vars) return template;
-  return template.replace(/\{(\w+)\}/g, (m, name: string) => {
+  return template.replace(/\{(\w+)(?:\|([^|}]*)\|([^|}]*))?\}/g, (m, name: string, one?: string, many?: string) => {
     const v = vars[name];
-    return v === undefined ? m : String(v);
+    if (v === undefined) return m;
+    if (one === undefined) return String(v);
+    return `${v} ${Number(v) === 1 ? one : many}`;
   });
 }
 
