@@ -666,6 +666,103 @@ function handleBridgeStatus(event: BridgeStatusEvent): void {
   }
 }
 
+/** bridge 通知 → store（run.* / kernel.status / notebook.state / diff.updated …）。 */
+function handleBridgeNotification(method: string, params: unknown): void {
+  const set = useNotebook.setState;
+  const get = useNotebook.getState;
+  const s = get();
+  switch (method) {
+    case 'notebook.externalChange': {
+      const p = asRecord(params);
+      if (typeof p.notebookId === 'string' && typeof p.notebookPath === 'string') {
+        pauseForConflict(p.notebookId, { notebookPath: p.notebookPath, recoveryPath:
+          useNotebooks.getState().tabs.find((t) => t.notebookId === p.notebookId)?.conflict?.recoveryPath ?? null });
+      }
+      break;
+    }
+    case 'run.started':
+    case 'run.stdout':
+    case 'run.stderr':
+    case 'run.mime':
+    case 'run.error':
+    case 'run.notify':
+      set({ cells: applyRunEvent(s.cells, method, params) });
+      break;
+    case 'run.done': {
+      // 除 cells reducer 外，记录 durationMs（级联决策的 lastRunMs 输入，P2.4）
+      const p = asRecord(params);
+      const ms = Number(p.durationMs);
+      set({
+        cells: applyRunEvent(s.cells, method, params),
+        ...(typeof p.cellId === 'string' && p.cellId !== '' && Number.isFinite(ms)
+          ? { lastRunMs: { ...get().lastRunMs, [p.cellId]: ms } }
+          : {}),
+      });
+      break;
+    }
+    case 'kernel.status': {
+      // 旧代 tab 的内核已随上一代 bridge 消失；新代的状态通知不属于它。
+      if (tabBridgeLost(useNotebooks.getState().activeId)) break;
+      const raw = String(asRecord(params).state ?? '');
+      set({ kernelState: mapKernelState(raw) });
+      // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
+      const aid = useNotebooks.getState().activeId;
+      if (
+        aid &&
+        (raw === 'idle' || raw === 'busy' || raw === 'restarting' || raw === 'dead')
+      ) {
+        useNotebooks.getState().setKernelState(aid, raw);
+      }
+      break;
+    }
+    case 'focus.changed': {
+      // P3.1：焦点切换（本端 switchTab 的回声 id===activeId 时跳过，防环）。
+      // 纯本地恢复：不再回调 bridge（避免二次 switch）。
+      const id = String(asRecord(params).notebookId ?? '');
+      const nb = useNotebooks.getState();
+      if (!id || id === nb.activeId) break;
+      if (nb.activeId) nb.saveCache(nb.activeId, captureCache());
+      nb.setActive(id);
+      const tab = nb.tabs.find((t) => t.notebookId === id);
+      set({ notebookPath: tab?.path ?? null, historyView: false });
+      // Uncached focus must stop displaying the previous owner's runtime immediately.
+      const cached = nb.readCache(id);
+      hydrateCache(cached ?? emptyCache());
+      set({ cascadeAsk: null });
+      break;
+    }
+    case 'kernel.schemas': {
+      // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
+      // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
+      const arr = asRecord(params).schemas;
+      if (Array.isArray(arr)) set({ schemas: arr as VarSchema[] });
+      break;
+    }
+    case 'notebook.state':
+      s.applyNotebookState(params);
+      break;
+    case 'agent.confirmRequest':
+    case 'agent.confirmResolved':
+      set({ runConfirms: applyRunConfirmEvent(get().runConfirms, method, params) });
+      break;
+    case 'diff.updated': {
+      // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
+      const merged = mergeDiffMarks(normalizeDiffs(params), get().diffMarks);
+      set({ diffs: merged.diffs, diffMarks: merged.marks });
+      break;
+    }
+  }
+}
+
+/** 通知与状态订阅只注册一次：首连成功、首连失败转重连、或 idle 下直接 retryBridge 都走这里。 */
+let bridgeSubscribed = false;
+function subscribeBridge(): void {
+  if (bridgeSubscribed) return;
+  bridgeSubscribed = true;
+  bridge.onNotification(handleBridgeNotification);
+  bridge.onStatus?.(handleBridgeStatus);
+}
+
 /** UI 状态持久化（ui.set）的 debounce 窗口：折叠切换/激活 cell 共用一条通道。 */
 export const UI_PERSIST_DEBOUNCE_MS = 500;
 let uiPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1114,95 +1211,14 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       try {
         await bridge.connect();
       } catch {
-        connectPromise = null; // 允许后续重试（如 P1.8 的重连逻辑）
-        set({ bridgeConnected: false });
+        // 桌面冷启动竞态：WebView 常先于 bridge 监听加载。首连失败不停在 idle 横幅，
+        // 先订阅状态再进入既有有界重连（退避 + 预算，耗尽 → down + 重试按钮；浏览器开发态同样有界）。
+        subscribeBridge();
+        await bridge.retry();
+        if (bridge.getStatus() !== 'connected') connectPromise = null; // down 后允许再次 connectBridge
         return;
       }
-      bridge.onNotification((method, params) => {
-        const s = get();
-        switch (method) {
-          case 'notebook.externalChange': {
-            const p = asRecord(params);
-            if (typeof p.notebookId === 'string' && typeof p.notebookPath === 'string') {
-              pauseForConflict(p.notebookId, { notebookPath: p.notebookPath, recoveryPath:
-                useNotebooks.getState().tabs.find((t) => t.notebookId === p.notebookId)?.conflict?.recoveryPath ?? null });
-            }
-            break;
-          }
-          case 'run.started':
-          case 'run.stdout':
-          case 'run.stderr':
-          case 'run.mime':
-          case 'run.error':
-          case 'run.notify':
-            set({ cells: applyRunEvent(s.cells, method, params) });
-            break;
-          case 'run.done': {
-            // 除 cells reducer 外，记录 durationMs（级联决策的 lastRunMs 输入，P2.4）
-            const p = asRecord(params);
-            const ms = Number(p.durationMs);
-            set({
-              cells: applyRunEvent(s.cells, method, params),
-              ...(typeof p.cellId === 'string' && p.cellId !== '' && Number.isFinite(ms)
-                ? { lastRunMs: { ...get().lastRunMs, [p.cellId]: ms } }
-                : {}),
-            });
-            break;
-          }
-          case 'kernel.status': {
-            // 旧代 tab 的内核已随上一代 bridge 消失；新代的状态通知不属于它。
-            if (tabBridgeLost(useNotebooks.getState().activeId)) break;
-            const raw = String(asRecord(params).state ?? '');
-            set({ kernelState: mapKernelState(raw) });
-            // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
-            const aid = useNotebooks.getState().activeId;
-            if (
-              aid &&
-              (raw === 'idle' || raw === 'busy' || raw === 'restarting' || raw === 'dead')
-            ) {
-              useNotebooks.getState().setKernelState(aid, raw);
-            }
-            break;
-          }
-          case 'focus.changed': {
-            // P3.1：焦点切换（本端 switchTab 的回声 id===activeId 时跳过，防环）。
-            // 纯本地恢复：不再回调 bridge（避免二次 switch）。
-            const id = String(asRecord(params).notebookId ?? '');
-            const nb = useNotebooks.getState();
-            if (!id || id === nb.activeId) break;
-            if (nb.activeId) nb.saveCache(nb.activeId, captureCache());
-            nb.setActive(id);
-            const tab = nb.tabs.find((t) => t.notebookId === id);
-            set({ notebookPath: tab?.path ?? null, historyView: false });
-            // Uncached focus must stop displaying the previous owner's runtime immediately.
-            const cached = nb.readCache(id);
-            hydrateCache(cached ?? emptyCache());
-            set({ cascadeAsk: null });
-            break;
-          }
-          case 'kernel.schemas': {
-            // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
-            // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
-            const arr = asRecord(params).schemas;
-            if (Array.isArray(arr)) set({ schemas: arr as VarSchema[] });
-            break;
-          }
-          case 'notebook.state':
-            s.applyNotebookState(params);
-            break;
-          case 'agent.confirmRequest':
-          case 'agent.confirmResolved':
-            set({ runConfirms: applyRunConfirmEvent(get().runConfirms, method, params) });
-            break;
-          case 'diff.updated': {
-            // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
-            const merged = mergeDiffMarks(normalizeDiffs(params), get().diffMarks);
-            set({ diffs: merged.diffs, diffMarks: merged.marks });
-            break;
-          }
-        }
-      });
-      bridge.onStatus?.(handleBridgeStatus);
+      subscribeBridge();
       set({ bridgeConnected: true, bridgeStatus: 'connected' });
     })();
     return connectPromise;
@@ -1351,6 +1367,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   },
 
   retryBridge: async () => {
+    subscribeBridge(); // idle（从未订阅）下点击也必须能驱动横幅/状态
     if (isTauri()) {
       try {
         await invoke('restart_bridge');
