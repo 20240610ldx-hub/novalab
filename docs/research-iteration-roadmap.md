@@ -186,7 +186,20 @@ Agent 安全小包后列出的「第二包」，均为不改产品边界的修�
 - **packaged 验收首启超时（测试设计，已修）**：干净机器首启要下载解释器与依赖（~60 s），产品预算 300 s，但验收单用例 60 s，超时用例的后台操作再污染下一个用例的成功计数。改为用例前按产品同款命令预热并留痕。
 - 结果：install / uv sync / 双端 tsc / 构建 / bridge 345 / app 399 / Python 302（3.12 与 3.14）/ 脚本 / 真实内核验收 / 集成 smoke + acceptance / build-bridge / sync-py / packaged smoke / packaged acceptance 12/12 全部通过。未测：Linux 下真实 Chromium smoke、Tauri WebView / AppImage。
 
-## 15. 决策停点
+## 15. 第二波第一包：追加式运行日志（ADR-014，Windows-only，2026-10-17）
+
+Owner 裁决"先做追加式运行日志"。目标是回答复盘时最常见的三个问题：这个 cell 这一会话里跑了几次、每次成没成（错在哪一行）、两次之间代码改了什么——而不保存任何输出内容。
+
+- **记录**：每次执行一行，追加到 `.novalab/sessions/<sessionId>.runs.jsonl`。字段：时间、耗时、cellId、第几次尝试、谁触发（user / agent）、怎么触发（direct / cascade / accept / repl）、级联根、代码 SHA-256、成败、错误类名与 cell 内行号、输出字节数与 MIME 类型、写入文件路径。**不存** stdout / stderr / evalue / 富输出 / 变量值。
+- **代码正文**：会话内按哈希去重，只在首次出现时内联；会话预算 1 万条记录 / 200 万字符，超出后只记哈希（`codeOmitted`）。
+- **真实内核顺序**：novakernel 的级联根 `run.done` 在下游完成之后才发出，因此耗时取 `run.done` 自带值，读取按 runId 序号排序（真实内核验收先红）。
+- **读取**：rpc `session.runs`（校验 sessionId 属于该 notebook）；`.ipynb` 导出在每个 cell 的 `metadata.novalab.runs` 附最近 50 次尝试（无代码正文）。
+- **界面**：会话记录里每个 cell 头部显示「N 次运行」，展开后列出每次尝试（#、ok / 错误类名 + 行号、触发方式、Agent 标记、耗时、时刻），选中一次显示相对上一次的逐行差异；同代码重跑显示"代码与上一次相同"。
+- **未开放**：Agent 读取运行历史（ADR-014 O2，需 Owner 裁决）；历史快照存图（Owner 未裁决，默认不存）。
+
+边界：仅 Windows、Chromium + Vite dev 人工核对（演示 notebook 失败→修改→重跑，中英文各一次）；未测 Linux。
+
+## 16. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

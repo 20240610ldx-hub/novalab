@@ -504,6 +504,17 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 | 边界 | Windows-only；真实 Chromium 人工核对（800 / 1440 宽），未做像素回归 |
 | Linux 首测 | WSL Ubuntu 24.04 干净 clone + 清空 uv 缓存：16 项门全过（含真实内核验收、packaged acceptance 12/12）。修复影子看门狗在无 `os.pidfd_open` 的 CPython 3.14.5 上不退出（先红：no-pidfd 用例在 3.12 / 3.14 均失败）；packaged 验收前预热首启 Python。未测 Linux Chromium smoke / AppImage |
 
+### 2026-10-17 第二波第一包：追加式运行日志（ADR-014，Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 记录 | 每次执行一行 `.runs.jsonl`：尝试序号、触发者 / 方式、级联根、代码 SHA-256（会话内去重）、成败、错误类名 + 行号、输出字节数 / MIME / 写入路径；不存输出正文与 evalue |
+| 预算 | 1 万条 / 200 万代码字符，超出只记哈希 |
+| 读取 / 导出 | rpc `session.runs`；`.ipynb` cell `metadata.novalab.runs` 最近 50 次（无代码） |
+| 界面 | 会话记录 cell 头「N 次运行」→ 尝试列表 + 相邻差异；中英文 |
+| 测试 | run-log 单元 7、router 7、真实内核验收 1（先红：级联根顺序）、app 4 |
+| 边界 | Windows-only；Agent 读取运行历史未开放（O2 待裁决） |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。

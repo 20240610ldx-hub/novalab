@@ -66,6 +66,17 @@ export const zh: Record<keyof typeof en, string> = {
   'sessionModal.exportPendingSuffix': '（接线 pending）',
   'sessionModal.importWarnings': 'import 降级警告（{count}）',
   'sessionModal.errorBadgeTitle': '最近一次运行失败',
+  'sessionModal.runs': '{n} 次运行',
+  'sessionModal.runsTitle': '这个 cell 的运行历史（谁跑的、成没成、改了什么）',
+  'sessionModal.runByAgent': 'Agent 在你确认后运行',
+  'sessionModal.trigger.direct': '运行',
+  'sessionModal.trigger.cascade': '级联',
+  'sessionModal.trigger.accept': '采纳 Diff',
+  'sessionModal.trigger.repl': 'REPL',
+  'sessionModal.firstAttempt': '本会话第一次运行',
+  'sessionModal.codeUnchanged': '代码与上一次相同',
+  'sessionModal.codeOmitted': '这次的代码未记录（会话日志已达上限）',
+  'sessionModal.diffVsPrev': '相对第 {attempt} 次的改动',
 
   /* ---- SettingsPanel ---- */
   'settings.title': '设置 · LLM Provider',

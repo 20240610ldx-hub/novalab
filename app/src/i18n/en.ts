@@ -65,6 +65,17 @@ export const en = {
   'sessionModal.exportPendingSuffix': ' (wiring pending)',
   'sessionModal.importWarnings': 'import demotion warnings ({count})',
   'sessionModal.errorBadgeTitle': 'most recent run failed',
+  'sessionModal.runs': '{n|run|runs}',
+  'sessionModal.runsTitle': 'run history for this cell (who ran it, whether it passed, what changed)',
+  'sessionModal.runByAgent': 'run by the agent after your confirmation',
+  'sessionModal.trigger.direct': 'run',
+  'sessionModal.trigger.cascade': 'cascade',
+  'sessionModal.trigger.accept': 'accepted diff',
+  'sessionModal.trigger.repl': 'REPL',
+  'sessionModal.firstAttempt': 'first attempt in this session',
+  'sessionModal.codeUnchanged': 'same code as the previous attempt',
+  'sessionModal.codeOmitted': 'code for this attempt was not recorded (session log budget reached)',
+  'sessionModal.diffVsPrev': 'changes since attempt #{attempt}',
 
   /* ---- SettingsPanel ---- */
   'settings.title': 'Settings · LLM Provider',
