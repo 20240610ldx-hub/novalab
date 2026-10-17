@@ -153,7 +153,21 @@ Owner 裁决："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 
 边界：仅 Windows、Chromium + Vite dev；超时只有单测；未用真实模型验证 `dependsOn` / `denied` 下的行为。**行为变化**：外部 MCP Agent 不能再执行 cell（只能读和提议）。
 
-## 13. 决策停点
+## 13. 维护包：输出预算、首屏拆包、测试临时目录、依赖与交接文书（Windows-only，2026-10-17）
+
+Agent 安全小包后列出的「第二包」，均为不改产品边界的修复与优化。
+
+- **F7 输出预算**：`@ai-sdk/anthropic` 对未知模型 id（tokenplan 的 qwen/glm/deepseek）把输出上限压到 4096，openai-compat 不传 `max_tokens` 时由服务端默认（DeepSeek 4096），长代码提议会被截断。现在未知模型显式带 8192（`defaultSettingsMiddleware`，调用方显式值仍优先），已知 Claude 模型沿用 SDK 按型号的上限。顺带：dev `.env.local` 兜底模型此前绕过了重试层与预算，现在与用户 provider 走同一构造路径。
+- **首屏拆包**：模型构造从 `agent/providers.ts` 拆到 `agent/models.ts`，AI SDK（`ai` / `@ai-sdk/*` / `zod`）只经懒加载的 Agent 面板与设置面板进入。主包 1,399.6 kB（gzip 409.6）→ 206.8 kB（gzip 61.4），另有 `vendor-react` 218.8 kB、`vendor-codemirror` 376.1 kB 两个长缓存块；AI SDK 块 557.3 kB 在首帧后加载。`scripts/app-bundle-boundary.test.mjs` 沿 `main.tsx` 的静态 import 图守住边界（对旧 `App.tsx` 先红）。
+- **测试临时目录**：bridge 单测与验收此前在 %TEMP% 累积了 8,234 个 `novalab-*` 目录。新增 vitest `globalSetup`（`bridge/src/testing/temp-sandbox.ts`）：每次运行把 TEMP/TMP/TMPDIR 指向专属 `novalab-vitest-*` 目录，结束只删这一个，不按前缀扫删别处。整套单测与真实内核验收后新增残留为 0。已有的 8,234 个旧目录未删除（属于用户临时目录，可能有并行会话在用）。
+- **依赖**：`@earendil-works/pi-agent-core` / `pi-ai` 从 bridge `dependencies` 移到 `devDependencies`（只有 ADR-012 spike 与其测试引用；打包的 `bridge.mjs` 中 0 处引用）。
+- **交接文书**：`docs/handover-dead-restart-package.md` 顶部加 10-17 状态条（第五轮已关闭并合入），正文保留原貌。
+
+工程门：bridge 342、app 395、Python 296 + 5 跳过、脚本 27、真实内核验收 24、集成 / packaged acceptance 12/12，六个真实 Chromium smoke 全部通过。
+
+未做：bridge 重连后的「全部重开」按钮——与第七轮（草稿恢复）和冷启动重连修复改同一批前端恢复代码，等它们合入后再做，避免冲突。
+
+## 14. 决策停点
 
 只在某个阶段确实需要改变既有边界时请求 Owner；先准备具体、可比较且带证据的结果。最近停点是 ADR-011 正式采纳：已有白名单表格实现与本轮浏览器证据，仍需明确是否作为产品承诺进入当前候选。它不阻止先完成请求健壮性、纯预检和并行 RPC 验收。
 

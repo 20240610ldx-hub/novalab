@@ -481,6 +481,18 @@ Owner 原话："F2 和 execute_cell 过渡确认，先作为一个小包修掉�
 
 **A15 保持未勾选。**
 
+### 2026-10-17 维护包：输出预算、首屏拆包、测试临时目录、依赖（Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| F7 | 未知模型显式 `maxOutputTokens` 8192（anthropic-compat 不再回落 4096、openai-compat 不再交给服务端默认）；已知 Claude 模型沿用 SDK 上限；dev 兜底模型改走同一构造路径（补上重试层与预算）。先红：请求体 `max_tokens` 为 4096 |
+| 拆包 | 主 JS 1,399.6 → 206.8 kB（gzip 409.6 → 61.4）；AI SDK 557.3 kB 随 Agent / 设置面板懒加载；React、CodeMirror 独立长缓存块；`scripts/app-bundle-boundary.test.mjs` 守边界（对旧 App.tsx 先红）；真实浏览器中 Agent 面板与设置面板懒加载后正常渲染、控制台无错误 |
+| 临时目录 | bridge vitest 单测与验收配置加 `globalSetup` 专属临时根；整套运行后 %TEMP% `novalab-*` 新增 0（之前 8,234 个历史残留未动） |
+| 依赖 | pi 两包移入 bridge `devDependencies`，lockfile 离线更新；打包 bridge 中 0 处引用 |
+| 工程门 | bridge `tsc` + vitest 342（27 文件）；app `tsc -b` + vitest 395（30 文件）+ 生产构建；Python 296 + 5 跳过；`pnpm test:scripts` 27；真实内核验收 24（8 文件）；集成 smoke 13；sidecar / py-resources 重建；构建目录 packaged smoke + acceptance 12/12；真实 Chromium 六个 smoke（kernel-restart / bridge-reconnect / file-conflict / save-lifecycle / html-output / agent-safety）全部通过 |
+| 证据 | 本工作树 gitignored `validation-20261014/`：`manifest-maintenance.json` / `results-maintenance.json` 与 `stage-maint-*.log` |
+| 边界 | Windows-only；8192 是对主流兼容服务的保守选择，个别上限更低的模型会被服务端拒绝（400，不重试，错误如实显示）；「全部重开」按钮延后 |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。

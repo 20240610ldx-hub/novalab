@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { generateText } from 'ai';
 import { useAgentStore } from '../../store/agent';
+import { createLanguageModel } from '../../agent/models';
 import {
-  createLanguageModel,
   hasDevEnvModel,
   isProviderStorageRemote,
   modelSuggestionsFor,

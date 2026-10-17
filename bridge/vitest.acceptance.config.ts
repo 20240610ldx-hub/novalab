@@ -5,5 +5,6 @@ export default defineConfig({
   test: {
     include: ['src/*.acceptance.ts'],
     fileParallelism: false,
+    globalSetup: ['src/testing/temp-sandbox.ts'],
   },
 });
