@@ -150,11 +150,40 @@ def _watch_parent() -> None:
             k32.WaitForSingleObject(handle, 0xFFFFFFFF)
             os._exit(3)
     else:
+        import select
+
+        # 退出句柄必须在沙箱安装前拿到：之后 os.kill 探测属于 process-control，会被拦截。
+        # bridge 不一定是直接父进程（例如经 shell / 包装器启动），所以按 pid 等待，getppid 变化只是兜底。
         start = os.getppid()
+        pidfd: int | None = None
+        kq = None
+        try:
+            pidfd = os.pidfd_open(ppid)  # Linux ≥ 5.3
+        except ProcessLookupError:
+            os._exit(3)  # 父进程已不在
+        except (AttributeError, OSError):
+            pidfd = None
+        if pidfd is None and hasattr(select, "kqueue"):  # macOS / BSD
+            try:
+                kq = select.kqueue()
+                kq.control([select.kevent(ppid, filter=select.KQ_FILTER_PROC,
+                                          flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                          fflags=select.KQ_NOTE_EXIT)], 0, 0)
+            except ProcessLookupError:
+                os._exit(3)
+            except OSError:
+                kq = None
 
         def wait() -> None:
             while os.getppid() == start:
-                time.sleep(0.5)
+                if pidfd is not None:
+                    if select.select([pidfd], [], [], 0.5)[0]:
+                        break
+                elif kq is not None:
+                    if kq.control(None, 1, 0.5):
+                        break
+                else:
+                    time.sleep(0.5)
             os._exit(3)
 
     threading.Thread(target=wait, name="novalab-shadow-parent-watch", daemon=True).start()
