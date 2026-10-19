@@ -218,6 +218,28 @@ def test_writes_into_environment_dirs_are_not_results(tmp_path, monkeypatch):
         rtmod._ENV_ROOTS = None
 
 
+def test_library_reported_cache_dirs_are_not_results(tmp_path, monkeypatch):
+    """matplotlib 的缓存目录因平台而异（Windows 在 %LOCALAPPDATA%\\matplotlib）：以库自报为准。"""
+    import types
+
+    cache = tmp_path / "LocalAppData" / "matplotlib"
+    cache.mkdir(parents=True)
+    fake = types.SimpleNamespace(get_cachedir=lambda: str(cache), get_configdir=lambda: str(cache))
+    monkeypatch.setitem(sys.modules, "matplotlib", fake)
+    font_cache = cache / "fontlist-v3.11.0.json"
+    font_cache.write_text("{}", encoding="utf-8")
+    result = tmp_path / "fig.png"
+    code = (
+        f"open({lit(font_cache)}).read()\n"
+        f"open({lit(font_cache)}, 'w').write('{{}}')\n"
+        f"open({lit(result)}, 'wb').write(b'png')\n"
+    )
+    rt, col = make([("mpl", code)])
+    assert rt.exec_cell("mpl")["ok"]
+    assert writes(col, "mpl") == [str(result)]
+    assert reads(col, "mpl") == []
+
+
 def test_hook_window_closes_after_exec(tmp_path):
     """exec 结束后宿主进程（runtime 自身/测试代码）的写不再产生通知。"""
     rt, col = make([("n1", "x = 1")])

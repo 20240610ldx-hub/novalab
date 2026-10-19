@@ -195,6 +195,23 @@ def _env_roots() -> tuple[str, ...]:
         _ENV_ROOTS = tuple(sorted(r + os.sep for r in norm if r))
     return _ENV_ROOTS
 
+
+def _library_cache_roots() -> tuple[str, ...]:
+    """已导入的库自报的配置 / 缓存目录（各平台位置不同，例如 matplotlib 在 Windows 是
+    %LOCALAPPDATA%\\matplotlib）。在 exec 结束时调用：此时库已完整导入，问它本身最准。"""
+    roots: list[str] = []
+    mpl = sys.modules.get("matplotlib")
+    for name in ("get_cachedir", "get_configdir"):
+        fn = getattr(mpl, name, None)
+        if callable(fn):
+            try:
+                roots.append(fn())
+            except Exception:  # noqa: BLE001 — 库自身异常不影响执行结果
+                pass
+    norm = {os.path.normcase(os.path.abspath(r)).rstrip("\\/") for r in roots if isinstance(r, str) and r}
+    return tuple(r + os.sep for r in norm if r)
+
+
 _ACTIVE_WATCHER: "_WriteWatcher | None" = None
 _AUDIT_INSTALLED = False
 
@@ -283,14 +300,19 @@ class _WriteWatcher:
         self.reads.append(absp)
 
     def flush(self) -> None:
+        lib_roots = _library_cache_roots()
         for p in self.paths:
             # 本次 exec 内写完又删掉的临时文件（如 tempfile.gettempdir() 的可写探测）不是结果
             if not os.path.lexists(p):
                 continue
+            if lib_roots and os.path.normcase(p).startswith(lib_roots):
+                continue  # 库的字体 / 配置缓存（matplotlib 首次导入写 fontlist）
             self.emit("run.notify", {
                 "cellId": self.cell_id, "kind": "file-write", "path": p,
             })
         for p in self.reads:
+            if lib_roots and os.path.normcase(p).startswith(lib_roots):
+                continue
             self.emit("run.notify", {
                 "cellId": self.cell_id, "kind": "file-read", "path": p,
             })
