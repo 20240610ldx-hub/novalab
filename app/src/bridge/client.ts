@@ -145,7 +145,7 @@ export class BridgeClient {
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** 首次连接：单次尝试；失败由调用方展示降级横幅（不进入自动重连）。 */
+  /** 首次连接：单次尝试（本身不进入自动重连）；冷启动失败由 store.connectBridge 转入 retry() 的有界循环。 */
   async connect(): Promise<void> {
     await this.connectOnce();
     this.markConnected();

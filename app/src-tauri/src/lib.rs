@@ -27,13 +27,14 @@
 //! 生成物（bridge-dist/、py-resources/、binaries/*.exe）不入库，由
 //! scripts/build-bridge.mjs + scripts/sync-py-resources.mjs 在打包前产出。
 
+mod drafts;
 mod supervisor;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use supervisor::{Decision, RestartPolicy};
 
@@ -69,7 +70,7 @@ pub fn run() {
             shutting_down: AtomicBool::new(false),
             watching: AtomicBool::new(false),
         })
-        .invoke_handler(tauri::generate_handler![restart_bridge])
+        .invoke_handler(tauri::generate_handler![restart_bridge, write_draft_journal])
         .setup(|app| {
             spawn_bridge(app.handle());
             start_watcher(app.handle());
@@ -194,6 +195,30 @@ fn restart_bridge(app: tauri::AppHandle) -> bool {
     }
     start_watcher(&app);
     true
+}
+
+/// Offline draft journal (round 7 follow-up): the frontend calls this only while the bridge is
+/// disconnected or the tab is bridge-lost. Writes the round-7 format next to the notebook;
+/// the bridge remains the only reader (offer / restore / preserve / clear).
+#[tauri::command]
+fn write_draft_journal(
+    notebook_path: String,
+    baseline_sha256: Option<String>,
+    cells: Vec<drafts::DraftCell>,
+    dirty_cell_ids: Vec<String>,
+) -> Result<drafts::DraftWritten, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    drafts::write_draft(
+        Path::new(&notebook_path),
+        baseline_sha256.as_deref(),
+        &cells,
+        &dirty_cell_ids,
+        now_ms,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Spawn the bridge unless `NOVALAB_BRIDGE=external`.
