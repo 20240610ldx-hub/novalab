@@ -22,9 +22,9 @@ let observed;
 async function processes() {
   if (process.platform === 'win32') {
     const { stdout } = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'],
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,@{n="Created";e={if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }}} | ConvertTo-Json -Compress'],
     { windowsHide: true, timeout: 15_000 });
-    return JSON.parse(stdout).map((p) => ({ pid: p.ProcessId, parent: p.ParentProcessId }));
+    return JSON.parse(stdout).map((p) => ({ pid: p.ProcessId, parent: p.ParentProcessId, created: Number(p.Created) || 0 }));
   }
   const { stdout } = await runFile('ps', ['-A', '-o', 'pid=', '-o', 'ppid='], { timeout: 15_000 });
   return stdout.trim().split('\n').map((line) => {
@@ -33,17 +33,23 @@ async function processes() {
   });
 }
 
+/**
+ * Windows 的 ParentProcessId 不随父进程退出而更新：长寿的系统进程可能指向一个已退出、
+ * 且 PID 恰被本次自有进程复用的"父进程"。只认创建时间不早于父进程的子进程（POSIX 无此问题，created 缺省）。
+ */
 async function descendants(pid) {
   const rows = await processes();
+  const createdOf = new Map(rows.map((r) => [r.pid, r.created]));
   const owned = new Set([pid]);
   let changed;
   do {
     changed = false;
     for (const row of rows) {
-      if (owned.has(row.parent) && !owned.has(row.pid)) {
-        owned.add(row.pid);
-        changed = true;
-      }
+      if (!owned.has(row.parent) || owned.has(row.pid)) continue;
+      const parentCreated = createdOf.get(row.parent);
+      if (row.created && parentCreated && row.created < parentCreated) continue; // PPID 复用：不是本次的后代
+      owned.add(row.pid);
+      changed = true;
     }
   } while (changed);
   return [...owned];
