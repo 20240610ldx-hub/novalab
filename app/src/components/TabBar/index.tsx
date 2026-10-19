@@ -51,6 +51,14 @@ function stateTitle(t: TFn, tab: NotebookTab): string {
  * @param dimActive 编辑区正显示 Welcome 时为 true：当前 tab 不再呈 selected 态
  *   （aria-selected=false → 去掉 active pill 样式），点击它即回到 notebook。
  */
+/** 恢复日志时间：本地时区 HH:MM（跨日加日期）。 */
+function formatDraftTime(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '—';
+  const hm = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return at.toDateString() === new Date().toDateString() ? hm : `${at.toLocaleDateString()} ${hm}`;
+}
+
 export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const tabs = useNotebooks((s) => s.tabs);
   const activeId = useNotebooks((s) => s.activeId);
@@ -59,6 +67,9 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const flushSaves = useNotebook((s) => s.flushSaves);
   const reloadFromDisk = useNotebook((s) => s.reloadFromDisk);
   const reopenLostTab = useNotebook((s) => s.reopenLostTab);
+  const restoreDraft = useNotebook((s) => s.restoreDraft);
+  const preserveDraft = useNotebook((s) => s.preserveDraft);
+  const discardDraft = useNotebook((s) => s.discardDraft);
   const bridgeStatus = useNotebook((s) => s.bridgeStatus);
   const historyView = useNotebook((s) => s.historyView);
   const openNotebook = useNotebook((s) => s.openNotebook);
@@ -232,6 +243,37 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
           onClick={() => void reopenLostTab(tab.notebookId)}
           className="shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)] disabled:opacity-50"
         >{t('tab.bridgeLostReopen')}</button>
+      </div>
+    ))}
+    {tabs.filter((tab) => tab.draftRecovery).map((tab) => {
+      const offer = tab.draftRecovery!;
+      const vars = { time: formatDraftTime(offer.savedAt), count: offer.dirtyCellIds.length };
+      return (
+        <div key={`draft-${tab.notebookId}`} role="alert" data-testid="draft-recovery"
+          data-baseline-matches={offer.baselineMatches ? 'true' : 'false'}
+          className="space-y-1 border-t border-[var(--border)] px-2 py-2 text-[12px] text-[var(--text)]">
+          <p>{tabLabel(tab.path)} · {offer.baselineMatches ? t('tab.draftFoundMatch', vars) : t('tab.draftFoundChanged', vars)}</p>
+          {offer.error && <p className="text-[var(--accent-err)]">{offer.error}</p>}
+          <div className="flex gap-2">
+            {offer.baselineMatches ? (
+              <button type="button" data-testid="draft-restore" disabled={historyView}
+                onClick={() => restoreDraft(tab.notebookId)}
+                className="rounded border border-[var(--border)] px-2 py-0.5 disabled:opacity-50">{t('tab.draftRestore')}</button>
+            ) : (
+              <button type="button" data-testid="draft-preserve" disabled={bridgeStatus !== 'connected'}
+                onClick={() => void preserveDraft(tab.notebookId)}
+                className="rounded border border-[var(--border)] px-2 py-0.5 disabled:opacity-50">{t('tab.draftPreserve')}</button>
+            )}
+            <button type="button" data-testid="draft-discard" disabled={bridgeStatus !== 'connected'}
+              onClick={() => void discardDraft(tab.notebookId)}
+              className="rounded border border-[var(--border)] px-2 py-0.5 text-[var(--muted)] disabled:opacity-50">{t('tab.draftDiscard')}</button>
+          </div>
+        </div>
+      );
+    })}
+    {tabs.filter((tab) => tab.draftJournalError).map((tab) => (
+      <div key={`draft-error-${tab.notebookId}`} role="status" className="border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)]">
+        {tabLabel(tab.path)} · {tab.draftJournalError}
       </div>
     ))}
     {tabs.filter((tab) => tab.conflict).map((tab) => (

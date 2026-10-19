@@ -4,6 +4,7 @@ import { bridge, BridgeDisconnectedError, type BridgeStatus, type BridgeStatusEv
 import { decideStalePolicy, type StaleContext, type StaleDecision } from '../kernel/stalePolicy';
 import {
   emptyCache,
+  type DraftRecoveryOffer,
   useNotebooks,
   type NotebookCache,
   type NotebookStateResult,
@@ -503,6 +504,12 @@ interface NotebookStore {
   restartKernel: (options?: { allowLive?: boolean }) => Promise<void>;
   /** 新一代 bridge 后由用户点击：clean tab 冷重开（只 notebook.open，不执行、不重放）。 */
   reopenLostTab: (notebookId: string) => Promise<void>;
+  /** 第 7 轮：指纹一致时把恢复日志放回本地草稿（不写盘）。 */
+  restoreDraft: (notebookId: string) => void;
+  /** 第 7 轮：把恢复日志保存为同目录本地副本（第 4 轮 backup_file），不改 notebook。 */
+  preserveDraft: (notebookId: string) => Promise<void>;
+  /** 第 7 轮：丢弃恢复日志。 */
+  discardDraft: (notebookId: string) => Promise<void>;
   /** down 后「重试连接」：Tauri 内先重置监督额度并拉起 bridge，再重新进入重连循环。 */
   retryBridge: () => Promise<void>;
 
@@ -657,6 +664,103 @@ function handleBridgeStatus(event: BridgeStatusEvent): void {
     const drafts = owningCache(tab.notebookId)?.drafts ?? {};
     for (const cellId of Object.keys(drafts)) scheduleCellSave(tab.notebookId, cellId);
   }
+}
+
+/** bridge 通知 → store（run.* / kernel.status / notebook.state / diff.updated …）。 */
+function handleBridgeNotification(method: string, params: unknown): void {
+  const set = useNotebook.setState;
+  const get = useNotebook.getState;
+  const s = get();
+  switch (method) {
+    case 'notebook.externalChange': {
+      const p = asRecord(params);
+      if (typeof p.notebookId === 'string' && typeof p.notebookPath === 'string') {
+        pauseForConflict(p.notebookId, { notebookPath: p.notebookPath, recoveryPath:
+          useNotebooks.getState().tabs.find((t) => t.notebookId === p.notebookId)?.conflict?.recoveryPath ?? null });
+      }
+      break;
+    }
+    case 'run.started':
+    case 'run.stdout':
+    case 'run.stderr':
+    case 'run.mime':
+    case 'run.error':
+    case 'run.notify':
+      set({ cells: applyRunEvent(s.cells, method, params) });
+      break;
+    case 'run.done': {
+      // 除 cells reducer 外，记录 durationMs（级联决策的 lastRunMs 输入，P2.4）
+      const p = asRecord(params);
+      const ms = Number(p.durationMs);
+      set({
+        cells: applyRunEvent(s.cells, method, params),
+        ...(typeof p.cellId === 'string' && p.cellId !== '' && Number.isFinite(ms)
+          ? { lastRunMs: { ...get().lastRunMs, [p.cellId]: ms } }
+          : {}),
+      });
+      break;
+    }
+    case 'kernel.status': {
+      // 旧代 tab 的内核已随上一代 bridge 消失；新代的状态通知不属于它。
+      if (tabBridgeLost(useNotebooks.getState().activeId)) break;
+      const raw = String(asRecord(params).state ?? '');
+      set({ kernelState: mapKernelState(raw) });
+      // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
+      const aid = useNotebooks.getState().activeId;
+      if (
+        aid &&
+        (raw === 'idle' || raw === 'busy' || raw === 'restarting' || raw === 'dead')
+      ) {
+        useNotebooks.getState().setKernelState(aid, raw);
+      }
+      break;
+    }
+    case 'focus.changed': {
+      // P3.1：焦点切换（本端 switchTab 的回声 id===activeId 时跳过，防环）。
+      // 纯本地恢复：不再回调 bridge（避免二次 switch）。
+      const id = String(asRecord(params).notebookId ?? '');
+      const nb = useNotebooks.getState();
+      if (!id || id === nb.activeId) break;
+      if (nb.activeId) nb.saveCache(nb.activeId, captureCache());
+      nb.setActive(id);
+      const tab = nb.tabs.find((t) => t.notebookId === id);
+      set({ notebookPath: tab?.path ?? null, historyView: false });
+      // Uncached focus must stop displaying the previous owner's runtime immediately.
+      const cached = nb.readCache(id);
+      hydrateCache(cached ?? emptyCache());
+      set({ cascadeAsk: null });
+      break;
+    }
+    case 'kernel.schemas': {
+      // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
+      // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
+      const arr = asRecord(params).schemas;
+      if (Array.isArray(arr)) set({ schemas: arr as VarSchema[] });
+      break;
+    }
+    case 'notebook.state':
+      s.applyNotebookState(params);
+      break;
+    case 'agent.confirmRequest':
+    case 'agent.confirmResolved':
+      set({ runConfirms: applyRunConfirmEvent(get().runConfirms, method, params) });
+      break;
+    case 'diff.updated': {
+      // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
+      const merged = mergeDiffMarks(normalizeDiffs(params), get().diffMarks);
+      set({ diffs: merged.diffs, diffMarks: merged.marks });
+      break;
+    }
+  }
+}
+
+/** 通知与状态订阅只注册一次：首连成功、首连失败转重连、或 idle 下直接 retryBridge 都走这里。 */
+let bridgeSubscribed = false;
+function subscribeBridge(): void {
+  if (bridgeSubscribed) return;
+  bridgeSubscribed = true;
+  bridge.onNotification(handleBridgeNotification);
+  bridge.onStatus?.(handleBridgeStatus);
 }
 
 /** UI 状态持久化（ui.set）的 debounce 窗口：折叠切换/激活 cell 共用一条通道。 */
@@ -818,6 +922,91 @@ function runFailureStatus(err: unknown): Cell['status'] {
 }
 
 export const CELL_SAVE_DEBOUNCE_MS = 300;
+/** 第 7 轮：草稿在此时长后仍未保存才写恢复日志（正常自动保存 300 ms 内已完成）。 */
+export const DRAFT_JOURNAL_DEBOUNCE_MS = 1_500;
+
+const journalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelDraftJournal(notebookId: string): void {
+  const timer = journalTimers.get(notebookId);
+  if (timer) clearTimeout(timer);
+  journalTimers.delete(notebookId);
+}
+
+function scheduleDraftJournal(notebookId: string): void {
+  cancelDraftJournal(notebookId);
+  // 断线/bridge-lost：桌面版改由 Tauri 写；浏览器 dev 无写盘通道，草稿只在内存（O4）。
+  if ((bridgeOffline() || tabBridgeLost(notebookId)) && !isTauri()) return;
+  journalTimers.set(notebookId, setTimeout(() => {
+    journalTimers.delete(notebookId);
+    void writeDraftJournal(notebookId);
+  }, DRAFT_JOURNAL_DEBOUNCE_MS));
+}
+
+/**
+ * 去抖后仍未保存的草稿才写日志：只发持久 cell 的 id/code，不含输出、计数或 REPL。
+ * 在线由 bridge 写（指纹取 bridge 记录，O6）；断线或 bridge-lost 时由 Tauri 命令
+ * write_draft_journal 写同格式文件，指纹取本 tab 最后确认的 baselineSha256（O3）。
+ */
+async function writeDraftJournal(notebookId: string): Promise<void> {
+  const offline = bridgeOffline() || tabBridgeLost(notebookId);
+  if (offline && !isTauri()) return;
+  const cache = owningCache(notebookId);
+  if (!cache || Object.keys(cache.drafts).length === 0) return;
+  const cells = cache.cells
+    .filter((c) => c.kind !== 'repl' && c.id !== REPL_CELL_ID)
+    .map((c) => ({ id: c.id, code: cache.drafts[c.id]?.code ?? c.code }));
+  const dirtyCellIds = Object.keys(cache.drafts).filter((id) => cells.some((c) => c.id === id));
+  if (dirtyCellIds.length === 0) return;
+  try {
+    if (offline) {
+      const tab = useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId);
+      if (!tab) return;
+      await invoke('write_draft_journal', {
+        notebookPath: tab.path, baselineSha256: tab.baselineSha256 ?? null, cells, dirtyCellIds,
+      });
+    } else {
+      await bridge.rpc('draft.write', { notebookId, cells, dirtyCellIds });
+    }
+    useNotebooks.getState().setDraftJournaled(notebookId, true);
+    useNotebooks.getState().setDraftJournalError(notebookId);
+  } catch (err) {
+    // Tauri 命令以字符串报错；bridge 以 -32602 报超限。
+    const message = typeof err === 'string' ? err : String(asRecord(err).message ?? '');
+    const tooLarge = /limit/.test(message) && (offline || asRecord(err).code === -32602);
+    if (tooLarge) useNotebooks.getState().setDraftJournalError(notebookId, '草稿超过 2 MB，未写入恢复日志（仍保留在本页）');
+    else console.error(offline ? 'write_draft_journal 失败:' : 'draft.write 失败:', err);
+  }
+}
+
+/** 成功写盘后：待决提示降级为"磁盘已变"；写过日志且已无草稿 → 清日志（Owner：保存成功即删除）。 */
+function afterSuccessfulSave(notebookId: string, draftsLeft: number): void {
+  const nb = useNotebooks.getState();
+  const offer = nb.tabs.find((t) => t.notebookId === notebookId)?.draftRecovery;
+  if (offer) {
+    if (offer.baselineMatches) nb.setDraftRecovery(notebookId, { ...offer, baselineMatches: false });
+    return;
+  }
+  if (draftsLeft > 0 || !nb.tabs.find((t) => t.notebookId === notebookId)?.draftJournaled) return;
+  nb.setDraftJournaled(notebookId, false);
+  cancelDraftJournal(notebookId);
+  void bridge.rpc('draft.clear', { notebookId }).catch((err: unknown) => console.error('draft.clear 失败:', err));
+}
+
+function sanitizeOffer(raw: unknown): DraftRecoveryOffer | undefined {
+  const r = asRecord(raw);
+  if (typeof r.draftId !== 'string' || !Array.isArray(r.cells) || !Array.isArray(r.dirtyCellIds)) return undefined;
+  const cells = (r.cells as unknown[]).map(asRecord)
+    .filter((c) => typeof c.id === 'string' && typeof c.code === 'string')
+    .map((c) => ({ id: c.id as string, code: c.code as string }));
+  return {
+    draftId: r.draftId,
+    savedAt: typeof r.savedAt === 'string' ? r.savedAt : '',
+    baselineMatches: r.baselineMatches === true,
+    dirtyCellIds: (r.dirtyCellIds as unknown[]).filter((id): id is string => typeof id === 'string'),
+    cells,
+  };
+}
 const saveTimers = new Map<string, Map<string, ReturnType<typeof setTimeout>>>();
 const saveQueues = new Map<string, Promise<void>>();
 const pendingSaves = new Map<string, Map<string, { revision: number | undefined; code: string; promise: Promise<void> }>>();
@@ -911,6 +1100,7 @@ function enqueueSave(notebookId: string, cellId: string, code: string): Promise<
     useNotebooks.getState().setBaseline(notebookId, res?.baselineSha256);
     const current = owningCache(notebookId);
     if (!current) return;
+    let draftsLeft = -1;
     // A successful old save does not resolve an external conflict or confirm its draft.
     if (useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId)?.conflict) return;
     const drafts = { ...current.drafts };
@@ -933,6 +1123,8 @@ function enqueueSave(notebookId: string, cellId: string, code: string): Promise<
     }
     writeCache(notebookId, next);
     if (Object.keys(drafts).length === 0) useNotebooks.getState().setError(notebookId);
+    draftsLeft = Object.keys(drafts).length;
+    afterSuccessfulSave(notebookId, draftsLeft);
   }).catch((err: unknown) => {
     saveError(notebookId, err);
     throw err;
@@ -1019,98 +1211,70 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       try {
         await bridge.connect();
       } catch {
-        connectPromise = null; // 允许后续重试（如 P1.8 的重连逻辑）
-        set({ bridgeConnected: false });
+        // 桌面冷启动竞态：WebView 常先于 bridge 监听加载。首连失败不停在 idle 横幅，
+        // 先订阅状态再进入既有有界重连（退避 + 预算，耗尽 → down + 重试按钮；浏览器开发态同样有界）。
+        subscribeBridge();
+        await bridge.retry();
+        if (bridge.getStatus() !== 'connected') connectPromise = null; // down 后允许再次 connectBridge
         return;
       }
-      bridge.onNotification((method, params) => {
-        const s = get();
-        switch (method) {
-          case 'notebook.externalChange': {
-            const p = asRecord(params);
-            if (typeof p.notebookId === 'string' && typeof p.notebookPath === 'string') {
-              pauseForConflict(p.notebookId, { notebookPath: p.notebookPath, recoveryPath:
-                useNotebooks.getState().tabs.find((t) => t.notebookId === p.notebookId)?.conflict?.recoveryPath ?? null });
-            }
-            break;
-          }
-          case 'run.started':
-          case 'run.stdout':
-          case 'run.stderr':
-          case 'run.mime':
-          case 'run.error':
-          case 'run.notify':
-            set({ cells: applyRunEvent(s.cells, method, params) });
-            break;
-          case 'run.done': {
-            // 除 cells reducer 外，记录 durationMs（级联决策的 lastRunMs 输入，P2.4）
-            const p = asRecord(params);
-            const ms = Number(p.durationMs);
-            set({
-              cells: applyRunEvent(s.cells, method, params),
-              ...(typeof p.cellId === 'string' && p.cellId !== '' && Number.isFinite(ms)
-                ? { lastRunMs: { ...get().lastRunMs, [p.cellId]: ms } }
-                : {}),
-            });
-            break;
-          }
-          case 'kernel.status': {
-            // 旧代 tab 的内核已随上一代 bridge 消失；新代的状态通知不属于它。
-            if (tabBridgeLost(useNotebooks.getState().activeId)) break;
-            const raw = String(asRecord(params).state ?? '');
-            set({ kernelState: mapKernelState(raw) });
-            // P3.1：焦点 tab 的内核状态同步到注册表（TabBar 点色 + ended 判定）
-            const aid = useNotebooks.getState().activeId;
-            if (
-              aid &&
-              (raw === 'idle' || raw === 'busy' || raw === 'restarting' || raw === 'dead')
-            ) {
-              useNotebooks.getState().setKernelState(aid, raw);
-            }
-            break;
-          }
-          case 'focus.changed': {
-            // P3.1：焦点切换（本端 switchTab 的回声 id===activeId 时跳过，防环）。
-            // 纯本地恢复：不再回调 bridge（避免二次 switch）。
-            const id = String(asRecord(params).notebookId ?? '');
-            const nb = useNotebooks.getState();
-            if (!id || id === nb.activeId) break;
-            if (nb.activeId) nb.saveCache(nb.activeId, captureCache());
-            nb.setActive(id);
-            const tab = nb.tabs.find((t) => t.notebookId === id);
-            set({ notebookPath: tab?.path ?? null, historyView: false });
-            // Uncached focus must stop displaying the previous owner's runtime immediately.
-            const cached = nb.readCache(id);
-            hydrateCache(cached ?? emptyCache());
-            set({ cascadeAsk: null });
-            break;
-          }
-          case 'kernel.schemas': {
-            // L-3：bridge 在 run.done 后自动 introspect 并广播（kernelVars 显式调用亦广播）
-            // → store.schemas 随每次执行刷新，FixCard"traceback + N schemas"不再恒 0。
-            const arr = asRecord(params).schemas;
-            if (Array.isArray(arr)) set({ schemas: arr as VarSchema[] });
-            break;
-          }
-          case 'notebook.state':
-            s.applyNotebookState(params);
-            break;
-          case 'agent.confirmRequest':
-          case 'agent.confirmResolved':
-            set({ runConfirms: applyRunConfirmEvent(get().runConfirms, method, params) });
-            break;
-          case 'diff.updated': {
-            // P2.3 数据源：bridge 通知为收敛真源；本地 marks 只提升 proposed→edited-staged
-            const merged = mergeDiffMarks(normalizeDiffs(params), get().diffMarks);
-            set({ diffs: merged.diffs, diffMarks: merged.marks });
-            break;
-          }
-        }
-      });
-      bridge.onStatus?.(handleBridgeStatus);
+      subscribeBridge();
       set({ bridgeConnected: true, bridgeStatus: 'connected' });
     })();
     return connectPromise;
+  },
+
+  restoreDraft: (notebookId) => {
+    const nb = useNotebooks.getState();
+    const offer = nb.tabs.find((t) => t.notebookId === notebookId)?.draftRecovery;
+    // 指纹不一致（或未知）时绝不叠加到磁盘版本上：只能保存为本地副本或丢弃。
+    if (!offer?.baselineMatches) return;
+    if (nb.activeId === notebookId && !get().historyView) nb.saveCache(notebookId, captureCache());
+    const cache = owningCache(notebookId);
+    if (!cache) return;
+    const journal = new Map(offer.cells.map((c) => [c.id, c.code]));
+    let revision = cache.draftRevision;
+    const drafts = { ...cache.drafts };
+    let cells = cache.cells;
+    for (const cellId of offer.dirtyCellIds) {
+      const code = journal.get(cellId);
+      if (code === undefined || !cells.some((c) => c.id === cellId)) continue;
+      revision += 1;
+      drafts[cellId] = { code, revision };
+      cells = patchCell(cells, cellId, (c) => ({ ...c, code }));
+    }
+    // 只回到本地草稿：不发 cell.save、不写磁盘；日志保留到下一次保存成功。
+    writeCache(notebookId, { ...cache, cells, drafts, draftRevision: revision });
+    nb.setDraftJournaled(notebookId, true);
+    nb.setDraftRecovery(notebookId);
+  },
+
+  preserveDraft: async (notebookId) => {
+    const nb = useNotebooks.getState();
+    const offer = nb.tabs.find((t) => t.notebookId === notebookId)?.draftRecovery;
+    if (!offer) return;
+    try {
+      const res = await bridge.rpc<{ recoveryPath?: unknown }>('draft.preserve', { notebookId, draftId: offer.draftId });
+      if (typeof res?.recoveryPath !== 'string' || !res.recoveryPath) throw new Error('未返回本地副本路径');
+      useNotebooks.getState().setRecoveryPath(notebookId, res.recoveryPath);
+      useNotebooks.getState().setDraftRecovery(notebookId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(asRecord(err).message ?? err);
+      useNotebooks.getState().setDraftRecovery(notebookId, { ...offer, error: `保存本地副本失败：${message}` });
+    }
+  },
+
+  discardDraft: async (notebookId) => {
+    const offer = useNotebooks.getState().tabs.find((t) => t.notebookId === notebookId)?.draftRecovery;
+    if (!offer) return;
+    try {
+      await bridge.rpc('draft.clear', { notebookId });
+      useNotebooks.getState().setDraftJournaled(notebookId, false);
+      useNotebooks.getState().setDraftRecovery(notebookId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(asRecord(err).message ?? err);
+      useNotebooks.getState().setDraftRecovery(notebookId, { ...offer, error: `丢弃失败：${message}` });
+    }
   },
 
   reopenLostTab: async (notebookId) => {
@@ -1153,6 +1317,8 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
           lastRunMs: {},
         };
         useNotebooks.getState().rekeyTab(notebookId, newId, local, freshBaseline ? { baselineSha256: freshBaseline } : {});
+        // 内存草稿优先于磁盘上的旧日志；日志归新 id，保存成功后清除。
+        useNotebooks.getState().setDraftJournaled(newId, true);
         useNotebooks.getState().setActive(newId);
         set({ notebookPath: tab.path, historyView: false, cascadeAsk: null, kernelState: 'live' });
         hydrateCache(local);
@@ -1178,7 +1344,11 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
         uiCollapsed: latest?.uiCollapsed ?? {},
         activeCellId: cells.some((c) => c.id === latest?.activeCellId) ? latest!.activeCellId : (cells[0]?.id ?? null),
       };
-      useNotebooks.getState().rekeyTab(notebookId, newId, cold, freshBaseline ? { baselineSha256: freshBaseline } : {});
+      const offer = sanitizeOffer((res as { draftRecovery?: unknown }).draftRecovery);
+      useNotebooks.getState().rekeyTab(notebookId, newId, cold, {
+        ...(freshBaseline ? { baselineSha256: freshBaseline } : {}),
+        ...(offer ? { draftRecovery: offer } : {}),
+      });
       // bridge 侧 notebook.open 已把焦点切到新 id：前端同步聚焦这个 tab。
       useNotebooks.getState().setActive(newId);
       set({ notebookPath: tab.path, historyView: false, cascadeAsk: null, kernelState: 'live' });
@@ -1197,6 +1367,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
   },
 
   retryBridge: async () => {
+    subscribeBridge(); // idle（从未订阅）下点击也必须能驱动横幅/状态
     if (isTauri()) {
       try {
         await invoke('restart_bridge');
@@ -1218,6 +1389,8 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
       const id = typeof res?.notebookId === 'string' ? res.notebookId : null;
       if (id) useNotebooks.getState().setBaseline(id, res?.state?.baselineSha256);
       const cached = id && existingIds.has(id) ? useNotebooks.getState().readCache(id) : undefined;
+      const offer = sanitizeOffer(res?.draftRecovery);
+      if (id && !cached && offer) useNotebooks.getState().setDraftRecovery(id, offer);
       const state = res?.state;
       const cells = applyStaleSet(normalizeCells(state?.cells ?? [], state?.execCounts), state?.staleSet ?? []);
       const ownerCache = cached ?? { ...emptyCache(), cells, dagEdges: state?.dagEdges ?? [],
@@ -1312,6 +1485,7 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     writeCache(id, { ...cache, draftRevision: revision,
       drafts: { ...cache.drafts, [cellId]: { code, revision } } });
     scheduleCellSave(id, cellId);
+    scheduleDraftJournal(id);
   },
 
   /** Immediate save keeps the public API; store-owned autosave uses the same FIFO. */

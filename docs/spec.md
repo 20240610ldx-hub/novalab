@@ -139,9 +139,12 @@ introspect（M5 数据源）：对 globals 每名字产出
 
 | method | 方向 | payload 摘要 |
 |---|---|---|
-| `notebook.open` | req | `{path}` |
+| `notebook.open` | req | `{path}`；新建 context 时结果可附 `draftRecovery?: {draftId, savedAt, baselineMatches, dirtyCellIds, cells}`（notebook 旁最新一份草稿恢复日志，只提示不应用，见 §12） |
 | `notebook.state` | res | `{cells, dagEdges, schemas, staleSet, execCounts, baselineSha256?}` |
 | `cell.save` | req | `{notebookId?, cellId, code}` → 重算所属 notebook 的 DAG 并保存 → res `{dagEdges, staleSet, compileError?, baselineSha256?}`；显式 ID 不存在则拒绝，省略时兼容当前焦点 |
+| `draft.write` | req | `{notebookId, cells:[{id,code}], dirtyCellIds}` → `{draftId, bytes}`；bridge 以自身记录的基线指纹写 `.novalab/drafts` 日志（单份 > 2 MiB → -32602）；与同 notebook 保存串行 |
+| `draft.clear` | req | `{notebookId}` → `{removed}` |
+| `draft.preserve` | req | `{notebookId, draftId}` → `{recoveryPath}`：日志 cells 经内核 `backup_file` 写同目录本地副本后清日志，notebook 不变 |
 | `cell.run` | req | `{cellId, cascade: bool?}` |
 | `run.started / run.stdout / run.stderr / run.mime / run.done / run.error` | notif | 流式；`run.done{cellId, execCount, cascaded:[ids], durationMs}`；`run.error{cellId, traceback, frames:[{file,line,fn,srcLine}]}` |
 | `kernel.status` | notif | `{state: idle|busy|restarting|dead, queueDepth}` |
@@ -313,7 +316,8 @@ SessionModal = 该日志 + 当前 cells 的只读投影（segments = 按 >30min 
 - 内核编译错（DAG 环/多重定义）：保存即报，cell 红框 + 原因行内提示，不进运行队列。
 - 运行期异常：traceback 结构化（frames 带 srcLine）→ 存 cell + 触发 FixCard；内核进程存活（exec 隔离在 try/except，globals 不回滚但失败 cell 的 defs 不更新）。
 - 内核进程死：§2 崩溃恢复；session.jsonl 保证审计连续。
-- Bridge 死：Tauri 监督线程有界重启（60 s 内最多 3 次，退避 1/2/4 s；超限后用户「重试连接」重置额度）；前端连接断开即以 `BridgeDisconnectedError` 结算全部 pending、拒绝新 RPC（不排队、不重放），运行中的 cell 标 stale，重连时重新 discovery 与认证（预算 90 s，之后进入 down 并提供重试）。断线期间允许编辑，禁止运行/保存/Diff/REPL/重启。新一代 bridge 上线后旧 notebookId 失效：tab 保留为 bridge-lost，不自动打开；用户点击后按 path 冷 `notebook.open` 并改键，不执行、不重放。dirty tab 重开时比较旧代最后确认的 `baselineSha256` 与新加载的值：一致则保留草稿并恢复自动保存，不一致或未知则进入外部冲突流程（§4），不覆盖磁盘。不做 session resume；WebView 同时死亡时草稿丢失（跨应用草稿恢复另包）。
+- Bridge 死：Tauri 监督线程有界重启（60 s 内最多 3 次，退避 1/2/4 s；超限后用户「重试连接」重置额度）；前端连接断开即以 `BridgeDisconnectedError` 结算全部 pending、拒绝新 RPC（不排队、不重放），运行中的 cell 标 stale，重连时重新 discovery 与认证（预算 90 s，之后进入 down 并提供重试）。断线期间允许编辑，禁止运行/保存/Diff/REPL/重启。新一代 bridge 上线后旧 notebookId 失效：tab 保留为 bridge-lost，不自动打开；用户点击后按 path 冷 `notebook.open` 并改键，不执行、不重放。dirty tab 重开时比较旧代最后确认的 `baselineSha256` 与新加载的值：一致则保留草稿并恢复自动保存，不一致或未知则进入外部冲突流程（§4），不覆盖磁盘。不做 session resume。
+- WebView/应用死亡：草稿在 1.5 s 去抖后仍未保存（保存失败、冲突暂停等）时，bridge 把持久 cell 的 id/code、dirty cell 列表与自身记录的 `baselineSha256` 原子写入 notebook 旁 `.novalab/drafts/<basename>.<ms>-<rand>.draft.json`（临时文件 + fsync + rename；每 notebook 最多 5 份，7 天后删除，单份 ≤ 2 MiB；不含输出、变量、REPL）。保存成功且无剩余草稿即删除。重开新建 context 时只提示最新一份：内容与磁盘相同则静默删除；指纹一致可恢复为本地草稿（不发保存、不写盘）；不一致或未知只能保存为同目录本地副本（`draft.preserve`）或丢弃。断线期间（bridge 不在或 tab 为 bridge-lost）桌面版改由 Tauri 命令 `write_draft_journal` 以同一格式、同一界限写入（基线取前端最后确认的 `baselineSha256`；只接受已存在的绝对 `.py` 普通文件，只写其同级 `.novalab/drafts`）；浏览器 dev 断线时不写。读取、提示、恢复、副本、清除仍只由 bridge 负责。
 - LLM  provider 错/离线：AgentPanel 降级横幅；**notebook 全部本地功能不受影响**（M6 脱网承诺）。
 
 ---
