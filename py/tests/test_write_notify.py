@@ -197,6 +197,27 @@ def test_transient_write_deleted_in_same_exec_is_not_reported(tmp_path):
     assert writes(col, "t1") == [str(keep)]
 
 
+def test_writes_into_environment_dirs_are_not_results(tmp_path, monkeypatch):
+    """matplotlib 首次导入在 MPLCONFIGDIR / ~/.cache 写字体缓存：运行环境自身的写入，不报告。"""
+    import novakernel.runtime as rtmod
+
+    mplcfg = tmp_path / "mplcfg"
+    mplcfg.mkdir()
+    monkeypatch.setenv("MPLCONFIGDIR", str(mplcfg))
+    monkeypatch.setattr(rtmod, "_ENV_ROOTS", None)
+    result = tmp_path / "result.csv"
+    code = (
+        f"open({lit(mplcfg / 'fontlist-v390.json')}, 'w').write('{{}}')\n"
+        f"open({lit(result)}, 'w').write('a')\n"
+    )
+    rt, col = make([("env", code)])
+    try:
+        assert rt.exec_cell("env")["ok"]
+        assert writes(col, "env") == [str(result)]
+    finally:
+        rtmod._ENV_ROOTS = None
+
+
 def test_hook_window_closes_after_exec(tmp_path):
     """exec 结束后宿主进程（runtime 自身/测试代码）的写不再产生通知。"""
     rt, col = make([("n1", "x = 1")])

@@ -164,13 +164,14 @@ READ_NOTIFY_LIMIT = 50
 _READ_IGNORED_EXTS = frozenset({
     ".py", ".pyc", ".pyd", ".so", ".dll", ".pth", ".ttf", ".otf", ".ttc", ".afm",
 })
-_READ_IGNORED_ROOTS: tuple[str, ...] | None = None
+_ENV_ROOTS: tuple[str, ...] | None = None
 
 
-def _read_ignored_roots() -> tuple[str, ...]:
-    """解释器、库与系统目录（只读打开属于运行环境本身，不是数据输入）。惰性计算一次。"""
-    global _READ_IGNORED_ROOTS
-    if _READ_IGNORED_ROOTS is None:
+def _env_roots() -> tuple[str, ...]:
+    """解释器、库、缓存与系统目录：在这里读写属于运行环境本身（import、matplotlib 首次导入写字体缓存…），
+    既不是数据输入也不是结果。惰性计算一次。"""
+    global _ENV_ROOTS
+    if _ENV_ROOTS is None:
         import site
 
         roots: list[str] = [sys.prefix, sys.base_prefix, sys.exec_prefix, os.path.dirname(os.path.abspath(__file__))]
@@ -191,8 +192,8 @@ def _read_ignored_roots() -> tuple[str, ...]:
         else:
             roots.extend(["/proc", "/sys", "/dev", "/etc", "/usr/share"])
         norm = {os.path.normcase(os.path.abspath(r)).rstrip("\\/") for r in roots if r}
-        _READ_IGNORED_ROOTS = tuple(sorted(r + os.sep for r in norm if r))
-    return _READ_IGNORED_ROOTS
+        _ENV_ROOTS = tuple(sorted(r + os.sep for r in norm if r))
+    return _ENV_ROOTS
 
 _ACTIVE_WATCHER: "_WriteWatcher | None" = None
 _AUDIT_INSTALLED = False
@@ -214,6 +215,8 @@ class _WriteWatcher:
       （os.open）时看 flags 写位——只读打开不发；
     - pandas to_csv/to_excel、matplotlib savefig 底层都走 open，自动覆盖；
     - import 触发的字节码缓存写（__pycache__/*.pyc）是解释器噪音，过滤；
+    - 运行环境目录（解释器 / 库 / ~/.cache / matplotlib 配置 / 系统目录）里的写入不发：
+      matplotlib 首次导入会写字体缓存，那不是结果；
     - 同路径去重（normcase+abspath 比较），发出的 path 规整为绝对路径，
       至多 WRITE_NOTIFY_LIMIT 条；exec 结束时已不存在的写入（写完即删的临时文件）不发。
     """
@@ -261,7 +264,7 @@ class _WriteWatcher:
             self._on_read(p)
             return
         key = os.path.normcase(os.path.abspath(p))
-        if key in self._seen:
+        if key in self._seen or key.startswith(_env_roots()):
             return
         self._seen.add(key)
         if len(self.paths) < WRITE_NOTIFY_LIMIT:
@@ -274,7 +277,7 @@ class _WriteWatcher:
         key = os.path.normcase(absp)
         if key in self._seen_reads or len(self.reads) >= READ_NOTIFY_LIMIT:
             return
-        if key.startswith(_read_ignored_roots()) or os.path.isdir(absp):
+        if key.startswith(_env_roots()) or os.path.isdir(absp):
             return
         self._seen_reads.add(key)
         self.reads.append(absp)
