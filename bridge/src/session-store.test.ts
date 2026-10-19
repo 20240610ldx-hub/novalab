@@ -254,10 +254,21 @@ describe('SessionStore · 容错', () => {
     expect(new SessionStore().scanIds(dir)).toEqual(['s-a']);
   });
 
-  it('makeSessionId：同一时钟连续生成也不冲突（随机后缀）', () => {
+  it('makeSessionId：秒级时间戳 + 4 位十六进制随机后缀', () => {
     const t = new Date('2026-10-06T08:00:00Z');
-    const ids = new Set(Array.from({ length: 50 }, () => makeSessionId(t)));
-    expect(ids.size).toBe(50);
-    for (const id of ids) expect(id).toMatch(/^s-20261006T080000-[0-9a-f]{4}$/);
+    expect(makeSessionId(t)).toMatch(/^s-20261006T080000-[0-9a-f]{4}$/);
+    expect(makeSessionId(t, () => 'beef')).toBe('s-20261006T080000-beef');
+  });
+
+  it('begin：同一秒抽到已占用的后缀会重抽，不清空已有会话的事件流', () => {
+    const dir = tmpDir();
+    const t = new Date('2026-10-06T08:00:00Z');
+    const suffixes = ['aaaa', 'aaaa', 'aaaa', 'bbbb'];
+    const store = new SessionStore(() => t, () => suffixes.shift()!);
+    const first = store.begin({ notebookDir: dir, notebookPath: path.join(dir, 'a.py'), cellCount: 1 });
+    first.append({ kind: 'run', actor: 'user' });
+    const second = store.begin({ notebookDir: dir, notebookPath: path.join(dir, 'b.py'), cellCount: 1 });
+    expect([first.id, second.id]).toEqual(['s-20261006T080000-aaaa', 's-20261006T080000-bbbb']);
+    expect(readFileSync(first.jsonlFile, 'utf8')).toContain('"kind":"run"');
   });
 });
