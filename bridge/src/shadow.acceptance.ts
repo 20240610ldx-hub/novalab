@@ -325,6 +325,51 @@ it('预算与每轮确认：同轮只问一次，超出次数 → budget-exceede
   evidence['budget'] = { runsPerTurn: 2, thirdRun: third['status'], confirmsForTwoTurns: h.confirms() };
 }, 90_000);
 
+it('ADR-016 技能包：真实影子内核里核验类别映射守恒与 IPF 配平残差', async () => {
+  const h = await open();
+  await h.ok('agent.turnBegin', { turnId: 't-skills' });
+  const newCode = [
+    'group_map = {"A": "AB", "B": "AB", "C": "CD", "D": "CD"}',
+    'merged = raw.assign(pair=raw["g"].map(group_map)).groupby("pair", as_index=False)["v"].sum()',
+    'seed = pd.DataFrame([[1.0, 2.0], [3.0, 4.0]], index=["r1", "r2"], columns=["c1", "c2"])',
+    'row_t = pd.Series([30.0, 10.0], index=["r2", "r1"])',
+    'col_t = np.array([15.0, 25.0])',
+    'def ipf(m, r, c, tol=1e-9, max_iter=200):',
+    '    m = m.to_numpy(dtype=float).copy()',
+    '    r = r.reindex(seed.index).to_numpy(dtype=float)',
+    '    for i in range(max_iter):',
+    '        m *= (r / m.sum(axis=1))[:, None]',
+    '        m *= c / m.sum(axis=0)',
+    '        resid = max(np.abs(m.sum(axis=1) - r).max(), np.abs(m.sum(axis=0) - c).max())',
+    '        if resid < tol:',
+    '            break',
+    '    return pd.DataFrame(m, index=seed.index, columns=seed.columns), i + 1, resid',
+    'fitted, ipf_iters, ipf_resid = ipf(seed, row_t, col_t)',
+  ].join('\n');
+  const run = await h.ok<Record<string, unknown>>('shadow.run', {
+    changes: [{ targetCellId: 'cccccccc', action: 'insert_below', newCode }],
+  });
+  expect(run['status']).toBe('ok');
+  const ver = await h.ok<{ status: string; contracts: Record<string, unknown>[] }>('shadow.verify', {
+    runId: run['runId'],
+    contracts: [
+      { kind: 'mapping_conserved', mapping: 'group_map', before: { target: 'raw', column: 'g', value: 'v', phase: 'after' }, after: { target: 'merged', column: 'pair', value: 'v' } },
+      { kind: 'mapping_conserved', mapping: { A: 'AB', B: 'AB' }, before: { target: 'raw', column: 'g', phase: 'after' }, after: { target: 'merged', column: 'pair', value: 'v' } },
+      { kind: 'margins_match', target: 'fitted', rows: 'row_t', cols: 'col_t' },
+      { kind: 'margins_match', target: 'seed', rows: 'row_t', cols: 'col_t' },
+    ],
+  });
+  // id 由 bridge 按声明顺序分配：c1 映射、c2 缺两个类别的映射、c3 配平结果、c4 未配平的种子
+  const byId = Object.fromEntries(ver.contracts.map((c) => [c['id'], c]));
+  expect(byId['c1']).toMatchObject({ status: 'pass', total: 2, violations: 0, unmapped: 0 });
+  expect(byId['c2']).toMatchObject({ status: 'fail', unmapped: 2 });
+  expect(byId['c3']).toMatchObject({ status: 'pass', total: 4, violations: 0 });
+  expect(byId['c4']).toMatchObject({ status: 'fail', total: 4, violations: 4 });
+  expect(ver.status).toBe('fail');
+  expect(JSON.stringify(ver)).not.toContain(CANARY);
+  evidence['skillPacks'] = Object.fromEntries(ver.contracts.map((c) => [c['id'], c['status']]));
+}, 60_000);
+
 it('核验 → verified；保存上游 cell 后已入队 diff → expired', async () => {
   const h = await open();
   await h.ok('agent.turnBegin', { turnId: 't1' });

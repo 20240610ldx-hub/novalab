@@ -89,6 +89,8 @@ export interface ContractResult {
   status: 'pass' | 'fail' | 'error';
   total?: number;
   violations?: number;
+  /** mapping_conserved：源数据里没有映射的类别数。 */
+  unmapped?: number;
   maxAbsDiff?: number;
   reason?: ContractReason;
 }
@@ -120,7 +122,7 @@ const CONTRACT_REASONS: readonly ContractReason[] = [
 ];
 export const CONTRACT_KINDS = [
   'columns_present', 'dtype', 'range', 'not_null', 'unique_key', 'row_count', 'sum_conserved', 'row_sums',
-  'match_rate', 'equivalent',
+  'match_rate', 'equivalent', 'mapping_conserved', 'margins_match',
 ] as const;
 const AUTO_KINDS = ['row_stochastic', 'non_empty', 'all_null_column', 'inf_values', 'null_rate'] as const;
 
@@ -273,7 +275,7 @@ export function contractResults(v: unknown, kinds: readonly string[] = [...CONTR
       const out: ContractResult = { id, kind: oneOf(r['kind'], kinds) ?? 'unknown', status };
       const phase = oneOf(r['phase'], ['before', 'after'] as const);
       if (phase) out.phase = phase;
-      for (const k of ['total', 'violations'] as const) {
+      for (const k of ['total', 'violations', 'unmapped'] as const) {
         const n = int(r[k]);
         if (n !== undefined) out[k] = n;
       }

@@ -104,6 +104,26 @@ const contractSchema = z.discriminatedUnion('kind', [
     rightPhase: phase,
   }),
   z.object({ kind: z.literal('equivalent'), targets: columns.min(1).describe('改前改后应当相等的变量'), rtol: z.number().optional() }),
+  // ADR-016 技能包契约：类别映射守恒、边际配平残差
+  z.object({
+    kind: z.literal('mapping_conserved'),
+    mapping: z
+      .union([z.record(z.string(), z.string()).describe('源类别 → 目标类别'), z.string().describe('命名空间里的 dict / Series 变量名')])
+      .describe('类别映射表（键按字符串比较）'),
+    before: z.object({ target, column: z.string().describe('源类别列'), value: z.string().optional().describe('要守恒的数值列；省略 = 行数'), phase }),
+    after: z.object({ target, column: z.string().describe('目标类别列'), value: z.string().optional(), phase }),
+    rtol: z.number().optional(),
+    atol: z.number().optional(),
+  }),
+  z.object({
+    kind: z.literal('margins_match'),
+    target: target.describe('二维数值表或数组'),
+    rows: z.union([z.array(z.number()), z.string()]).optional().describe('行和目标：数字列表，或 Series / 数组变量名（带索引时按标签对齐）'),
+    cols: z.union([z.array(z.number()), z.string()]).optional().describe('列和目标'),
+    rtol: z.number().optional(),
+    atol: z.number().optional().describe('默认 1e-6'),
+    phase,
+  }),
 ]);
 
 export const agentToolSchemas = {
@@ -188,7 +208,7 @@ export const agentToolMeta = {
     title: '核验契约',
     description:
       '在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / ' +
-      'sum_conserved / row_sums / match_rate / equivalent），只返回每条的状态与计数 {runId, verificationId, status, contracts}。' +
+      'sum_conserved / row_sums / match_rate / equivalent / mapping_conserved / margins_match），只返回每条的状态与计数 {runId, verificationId, status, contracts}。' +
       '把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。',
   },
 } satisfies Record<AgentToolName, { title: string; description: string }>;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOOL_NAMES, executeAgentTool, sanitizeToolOutput, type AgentToolHost } from './tools';
 import { guardHost, TOOL_ROUTER_METHODS } from '../agent-runtime/policy';
+import { contractResults } from '../shadow/report';
 
 /**
  * ADR-013：shadow_run / verify 两个新工具 + propose_code_change 的核验参数，
@@ -119,5 +120,20 @@ describe('第二道 M5 闸：影子报告白名单', () => {
   it('propose_code_change 结果携带核验状态', () => {
     const staged = { diffId: 'diff-1', verification: { status: 'verified', level: 'V2', missing: [] } };
     expect(sanitizeToolOutput('propose_code_change', staged).output).toEqual(staged);
+  });
+
+  it('ADR-016 技能包契约：两道闸都保留 unmapped 计数，丢弃回显的类别', () => {
+    const raw = [
+      { id: 'm1', kind: 'mapping_conserved', status: 'fail', total: 3, violations: 2, unmapped: 1, maxAbsDiff: 3, labels: [CANARY] },
+      { id: 'b1', kind: 'margins_match', phase: 'after', status: 'pass', total: 4, violations: 0, maxAbsDiff: 0 },
+    ];
+    const rebuilt = contractResults(raw);
+    expect(rebuilt).toEqual([
+      { id: 'm1', kind: 'mapping_conserved', status: 'fail', total: 3, violations: 2, unmapped: 1, maxAbsDiff: 3 },
+      { id: 'b1', kind: 'margins_match', phase: 'after', status: 'pass', total: 4, violations: 0, maxAbsDiff: 0 },
+    ]);
+    const gate = sanitizeToolOutput('verify', { runId: 'shadow-1', status: 'fail', contracts: rebuilt });
+    expect(gate.droppedKeys).toEqual([]);
+    expect(gate.output).toMatchObject({ contracts: [{ unmapped: 1 }, { kind: 'margins_match' }] });
   });
 });

@@ -249,6 +249,104 @@ def test_contract_results_never_echo_values():
     assert "010101" not in out and "300" not in out
 
 
+# ------------------------------------- skill-pack contracts (mapping / margins)
+
+
+def _skill_ns():
+    src = pd.DataFrame({"g": ["a", "b", "c", "a"], "n": [1, 2, 3, 4], "k": [1, 2, 3, 1]})
+    dst = pd.DataFrame({"h": ["X", "Y"], "n": [7, 3]})
+    off = pd.DataFrame({"h": ["X", "Y"], "n": [7, 2]})
+    rows = pd.DataFrame({"h": ["X", "X", "X", "Y"]})
+    seed = pd.DataFrame([[1.0, 2.0], [3.0, 4.0]], index=["r1", "r2"], columns=["c1", "c2"])
+    return {
+        "before": {"src": src},
+        "after": {
+            "src": src, "dst": dst, "off": off, "rows": rows, "seed": seed,
+            "mat": seed.to_numpy(), "m": {"a": "X", "b": "X", "c": "Y"},
+            "m_int": {1: "X", 2: "X", 3: "Y"},
+            "row_t": pd.Series([7.0, 3.0], index=["r2", "r1"]), "col_t": np.array([4.0, 6.0]),
+        },
+    }
+
+
+def _skill(contract):
+    (r,) = shadow.evaluate_contracts([contract], _skill_ns())
+    return r
+
+
+MAPPING = {"a": "X", "b": "X", "c": "Y"}
+
+
+def test_mapping_conserved_sums_per_target_category():
+    ok = _skill({
+        "kind": "mapping_conserved", "mapping": MAPPING,
+        "before": {"target": "src", "column": "g", "value": "n", "phase": "before"},
+        "after": {"target": "dst", "column": "h", "value": "n"},
+    })
+    assert ok == {"id": "c1", "kind": "mapping_conserved", "status": "pass", "total": 2,
+                  "violations": 0, "unmapped": 0, "maxAbsDiff": 0.0}
+    bad = _skill({
+        "kind": "mapping_conserved", "mapping": MAPPING,
+        "before": {"target": "src", "column": "g", "value": "n"},
+        "after": {"target": "off", "column": "h", "value": "n"},
+    })
+    assert bad["status"] == "fail" and bad["violations"] == 1 and bad["maxAbsDiff"] == 1.0
+
+
+def test_mapping_conserved_counts_unmapped_source_categories():
+    r = _skill({
+        "kind": "mapping_conserved", "mapping": {"a": "X", "b": "X"},
+        "before": {"target": "src", "column": "g", "value": "n"},
+        "after": {"target": "dst", "column": "h", "value": "n"},
+    })
+    # "c" 没有映射：未映射类别 1 个；Y 组的期望为 0、实际为 3 → 再计 1 个不守恒组
+    assert r["status"] == "fail" and r["unmapped"] == 1 and r["violations"] == 2
+
+
+def test_mapping_conserved_row_counts_and_namespace_mappings():
+    counts = _skill({
+        "kind": "mapping_conserved", "mapping": "m",
+        "before": {"target": "src", "column": "g"},
+        "after": {"target": "rows", "column": "h"},
+    })
+    assert counts["status"] == "pass" and counts["total"] == 2
+    # JSON 映射的键总是字符串；数值类别按字符串形式匹配，命名空间里的 int 键也可以
+    for mapping in ({"1": "X", "2": "X", "3": "Y"}, "m_int"):
+        r = _skill({
+            "kind": "mapping_conserved", "mapping": mapping,
+            "before": {"target": "src", "column": "k", "value": "n"},
+            "after": {"target": "dst", "column": "h", "value": "n"},
+        })
+        assert r["status"] == "pass", mapping
+    assert _skill({
+        "kind": "mapping_conserved", "mapping": "nope",
+        "before": {"target": "src", "column": "g"}, "after": {"target": "rows", "column": "h"},
+    })["reason"] == "unknown-target"
+
+
+def test_margins_match_reports_residuals():
+    ok = _skill({"kind": "margins_match", "target": "mat", "rows": [3, 7], "cols": [4, 6]})
+    assert ok["status"] == "pass" and ok["total"] == 4 and ok["violations"] == 0 and ok["phase"] == "after"
+    bad = _skill({"kind": "margins_match", "target": "mat", "rows": [3, 8]})
+    assert bad["status"] == "fail" and bad["violations"] == 1 and bad["maxAbsDiff"] == 1.0
+    # 表 + 带索引的 Series：按标签对齐，而不是按位置
+    aligned = _skill({"kind": "margins_match", "target": "seed", "rows": "row_t", "cols": "col_t"})
+    assert aligned["status"] == "pass"
+    assert _skill({"kind": "margins_match", "target": "mat", "rows": [1, 2, 3]})["reason"] == "invalid-params"
+    assert _skill({"kind": "margins_match", "target": "mat"})["reason"] == "invalid-params"
+    rel = _skill({"kind": "margins_match", "target": "mat", "rows": [3.03, 7], "rtol": 0.02})
+    assert rel["status"] == "pass"
+
+
+def test_skill_contracts_never_echo_labels():
+    out = repr(shadow.evaluate_contracts([
+        {"kind": "mapping_conserved", "mapping": {"a": "SECRET_LABEL"},
+         "before": {"target": "src", "column": "g"}, "after": {"target": "rows", "column": "h"}},
+        {"kind": "margins_match", "target": "seed", "rows": "row_t"},
+    ], _skill_ns()))
+    assert "SECRET_LABEL" not in out and "'X'" not in out and "r1" not in out
+
+
 # ------------------------------------------------- auto checks (domain-neutral)
 
 

@@ -203,6 +203,8 @@ spawn 影子进程，从**源码**执行 `ancestors(C)` 的上游闭包（拓扑
 | `row_sums` | `target, axis, expect, atol` | 迁移矩阵/概率矩阵行和，返回违规行**数量**与 `maxAbsDiff` |
 | `equivalent` | `targets[], rtol?` | 改前改后同名变量 schema 相同、数值在容差内相等。只返回布尔值和不等元素**计数**，不返回哈希（哈希可作数据指纹）。N3 重构专用。 |
 | `match_rate` | `left, right, on[], min` | 合并键匹配率不低于阈值（专抓"前导零丢失"类静默错误） |
+| `mapping_conserved` | `mapping, before: {target, column, value?}, after: {...}, rtol?, atol?` | 技能包（ADR-016）：映射前后按目标类别合计守恒，返回 `unmapped` 与违规组**数量** |
+| `margins_match` | `target, rows?, cols?, rtol?, atol?` | 技能包（ADR-016）：行和 / 列和与目标边际一致，返回违规数与最大残差 |
 
 `target` 只能引用影子闭包内的变量名。`phase: before` 指同一次 `shadow_run` 里原代码基线的值。求值失败（变量不存在、类型不支持）返回 `status: error` 并给出固定枚举原因，不抛出异常文本。
 
