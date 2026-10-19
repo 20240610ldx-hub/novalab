@@ -103,6 +103,7 @@ const contractResult = z.object({
   status: z.enum(['pass', 'fail', 'error']),
   total: z.number().optional(),
   violations: z.number().optional(),
+  unmapped: z.number().optional(),
   maxAbsDiff: z.number().optional(),
   reason: z
     .enum(['unknown-target', 'unknown-column', 'unsupported-type', 'invalid-params', 'evaluation-failed', 'structure-mismatch'])

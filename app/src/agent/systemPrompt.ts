@@ -3,6 +3,8 @@
  * 静态注入 ToolLoopAgent/streamText 的 instructions —— 与 bridge 侧
  * propose_code_change 的 AST 校验构成双保险（模型自律 + 入口拒绝）。
  */
+import { skillsPromptSection } from './skills';
+
 export const AGENT_SYSTEM_PROMPT = `你是 NovaLab 反应式 Python notebook 的内嵌 Agent。你只能通过提供的工具观察和操作 notebook。
 
 ## Reactive Rulebook（必须遵守）
@@ -17,6 +19,8 @@ export const AGENT_SYSTEM_PROMPT = `你是 NovaLab 反应式 Python notebook 的
 - 有明确预期时用 verify 声明契约（例如行数不变、列非空、总量守恒；声称行为不变的重构用 equivalent）。
 - 提议时把最后一次的 verificationId 传给 propose_code_change；重构再加 intent: 'refactor'。
 - 每轮第一次 shadow_run 要用户批准；结果含 denied 时本轮不要再调 shadow_run，直接提议或问用户。status 为 budget-exceeded 时停止试运行。
+
+${skillsPromptSection()}
 
 ## 工具异常处理
 - 工具输出含 bridgeUpgradeNeeded 时：bridge 尚未实现该方法，向用户说明"bridge 待升级"，不要重试。

@@ -96,7 +96,7 @@ describe('MCP server · 注册面', () => {
         ],
         [
           "verify",
-          "在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / sum_conserved / row_sums / match_rate / equivalent），只返回每条的状态与计数 {runId, verificationId, status, contracts}。把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。",
+          "在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / sum_conserved / row_sums / match_rate / equivalent / mapping_conserved / margins_match），只返回每条的状态与计数 {runId, verificationId, status, contracts}。把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。",
         ],
       ]
     `);

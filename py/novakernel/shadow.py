@@ -476,7 +476,7 @@ class _ContractError(Exception):
         self.reason = reason
 
 
-_TARGET_KINDS = {"columns_present", "dtype", "range", "not_null", "unique_key", "row_count", "row_sums"}
+_TARGET_KINDS = {"columns_present", "dtype", "range", "not_null", "unique_key", "row_count", "row_sums", "margins_match"}
 
 
 def _get(nss: dict, target: Any, phase: str) -> Any:
@@ -700,9 +700,130 @@ def _eval_one(c: dict, nss: dict) -> dict:
         res.update(status=_status(bad == 0 and not mismatch), total=total, violations=bad)
         if mismatch:
             res["reason"] = "structure-mismatch"
+    elif kind == "mapping_conserved":
+        res.update(_mapping_conserved(c, nss))
+    elif kind == "margins_match":
+        res.update(_margins_match(c, nss, phase))
     else:
         raise _ContractError("invalid-params")
     return res
+
+
+# 技能包契约（ADR-016）：类别映射守恒、边际配平残差。与上面一样只返回计数与最大偏差，
+# 不回显类别标签或数值本身（映射表是 Agent 自己给的，但源数据里的类别不是）。
+
+_MAX_MAPPING = 5000
+
+
+def _label_key(v: Any) -> str:
+    """类别比较键：JSON 映射的键只能是字符串，所以两边统一按 str 比较。"""
+    return str(v)
+
+
+def _mapping(c: dict, nss: dict) -> dict:
+    m = c.get("mapping")
+    if isinstance(m, str):
+        m = _get(nss, m, "after")
+        if _is_series(m):
+            m = m.to_dict()
+    if not isinstance(m, dict) or not m or len(m) > _MAX_MAPPING:
+        raise _ContractError("invalid-params")
+    return {_label_key(k): _label_key(v) for k, v in m.items()}
+
+
+def _category_totals(spec: Any, nss: dict, default_phase: str, mapping: dict | None) -> tuple[dict, int]:
+    """(类别 → 合计, 未映射类别数)。value 省略时按行计数；mapping 给出时先把类别映射过去。"""
+    import pandas as pd
+
+    if not isinstance(spec, dict):
+        raise _ContractError("invalid-params")
+    df = _need_frame(_get(nss, spec.get("target"), spec.get("phase", default_phase)))
+    cats = _column(df, spec.get("column"))
+    value = spec.get("value")
+    if value is None:
+        vals = pd.Series(1.0, index=df.index)
+    else:
+        vals = _column(df, value)
+        if not _numeric_series(vals):
+            raise _ContractError("unsupported-type")
+        vals = vals.astype(float).fillna(0.0)
+    keys = cats.map(lambda v: None if pd.isna(v) else _label_key(v))
+    unmapped = 0
+    if mapping is not None:
+        present = set(keys.dropna())
+        unmapped = sum(1 for k in present if k not in mapping) + (1 if keys.isna().any() else 0)
+        keys = keys.map(lambda k: mapping.get(k) if k is not None else None)
+    totals = vals[keys.notna()].groupby(keys[keys.notna()]).sum()
+    return {k: float(v) for k, v in totals.items()}, unmapped
+
+
+def _mapping_conserved(c: dict, nss: dict) -> dict:
+    mapping = _mapping(c, nss)
+    rtol = float(c.get("rtol", 1e-9))
+    atol = float(c.get("atol", 1e-9))
+    expected, unmapped = _category_totals(c.get("before"), nss, "before", mapping)
+    actual, _ = _category_totals(c.get("after"), nss, "after", None)
+    groups = set(expected) | set(actual)
+    diffs = [abs(actual.get(g, 0.0) - expected.get(g, 0.0)) for g in groups]
+    bad = sum(1 for g, d in zip(groups, diffs) if d > atol + rtol * abs(expected.get(g, 0.0)))
+    return {
+        "status": _status(bad == 0 and unmapped == 0),
+        "total": len(groups),
+        "violations": bad + unmapped,
+        "unmapped": unmapped,
+        "maxAbsDiff": (_r4(max(diffs)) or 0.0) if diffs else 0.0,
+    }
+
+
+def _margin_target(spec: Any, nss: dict, labels: Any) -> Any:
+    """边际目标：数字列表，或命名空间里的 Series / 数组 / 列表。带索引且与矩阵标签同集合时按标签对齐。"""
+    import numpy as np
+
+    if isinstance(spec, str):
+        spec = _get(nss, spec, "after")
+    if _is_series(spec):
+        if labels is not None and set(spec.index) == set(labels) and len(spec) == len(labels):
+            spec = spec.reindex(labels)
+        if not _numeric_series(spec):
+            raise _ContractError("unsupported-type")
+        return spec.to_numpy(dtype=float)
+    if _is_ndarray(spec):
+        if spec.dtype.kind not in "iuf" or spec.ndim != 1:
+            raise _ContractError("unsupported-type")
+        return spec.astype(float)
+    if isinstance(spec, (list, tuple)) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in spec):
+        return np.asarray(spec, dtype=float)
+    raise _ContractError("invalid-params")
+
+
+def _margins_match(c: dict, nss: dict, phase: str) -> dict:
+    import numpy as np
+
+    v = _get(nss, c.get("target"), phase)
+    mat = _matrix(v)
+    if mat is None:
+        raise _ContractError("unsupported-type")
+    if c.get("rows") is None and c.get("cols") is None:
+        raise _ContractError("invalid-params")
+    rtol = float(c.get("rtol", 0.0))
+    atol = float(c.get("atol", 1e-6))
+    actual: list = []
+    target: list = []
+    for key, axis, labels in (("rows", 1, getattr(v, "index", None)), ("cols", 0, getattr(v, "columns", None))):
+        if c.get(key) is None:
+            continue
+        t = _margin_target(c.get(key), nss, list(labels) if labels is not None else None)
+        s = np.nansum(mat, axis=axis)
+        if t.shape != s.shape:
+            raise _ContractError("invalid-params")
+        actual.append(s)
+        target.append(t)
+    a = np.concatenate(actual)
+    t = np.concatenate(target)
+    diff = np.abs(a - t)
+    bad = int((diff > atol + rtol * np.abs(t)).sum())
+    return {"status": _status(bad == 0), "total": int(diff.size), "violations": bad,
+            "maxAbsDiff": _r4(diff.max()) if diff.size else 0.0}
 
 
 def _compare(b: Any, a: Any, rtol: float) -> tuple[int, int, bool]:
