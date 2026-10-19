@@ -67,6 +67,7 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const flushSaves = useNotebook((s) => s.flushSaves);
   const reloadFromDisk = useNotebook((s) => s.reloadFromDisk);
   const reopenLostTab = useNotebook((s) => s.reopenLostTab);
+  const reopenAllLostTabs = useNotebook((s) => s.reopenAllLostTabs);
   const restoreDraft = useNotebook((s) => s.restoreDraft);
   const preserveDraft = useNotebook((s) => s.preserveDraft);
   const discardDraft = useNotebook((s) => s.discardDraft);
@@ -75,8 +76,10 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
   const openNotebook = useNotebook((s) => s.openNotebook);
   const refreshList = useNotebooks((s) => s.refreshList);
   const { t } = useI18n();
+  const lostTabs = tabs.filter((tab) => tab.bridgeLost && !tab.conflict);
 
   const [adding, setAdding] = useState(false);
+  const [reopeningAll, setReopeningAll] = useState(false);
   const [pathInput, setPathInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -230,7 +233,23 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
         </button>
       )}
     </div>
-    {tabs.filter((tab) => tab.bridgeLost && !tab.conflict).map((tab) => (
+    {lostTabs.length >= 2 && (
+      <div role="status" data-testid="bridge-lost-all"
+        className="flex items-center gap-2 border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)]">
+        <span className="min-w-0 flex-1">{t('tab.bridgeLostAllSummary', { count: lostTabs.length })}</span>
+        <button
+          type="button"
+          data-testid="bridge-lost-reopen-all"
+          disabled={bridgeStatus !== 'connected' || reopeningAll}
+          onClick={() => {
+            setReopeningAll(true);
+            void reopenAllLostTabs().finally(() => setReopeningAll(false));
+          }}
+          className="shrink-0 rounded border border-[var(--accent-run)] px-2 py-0.5 text-[var(--accent-run)] hover:bg-[var(--panel)] disabled:opacity-50"
+        >{reopeningAll ? t('tab.bridgeLostReopeningAll') : t('tab.bridgeLostReopenAll')}</button>
+      </div>
+    )}
+    {lostTabs.map((tab) => (
       <div key={`lost-${tab.notebookId}`} role="status" data-testid="bridge-lost-row"
         className="flex items-center gap-2 border-t border-[var(--border)] px-2 py-1 text-[12px] text-[var(--muted)]">
         <span className="min-w-0 flex-1">
@@ -239,7 +258,7 @@ export function TabBar({ dimActive = false }: { dimActive?: boolean } = {}) {
         <button
           type="button"
           data-testid="bridge-lost-reopen"
-          disabled={bridgeStatus !== 'connected'}
+          disabled={bridgeStatus !== 'connected' || reopeningAll}
           onClick={() => void reopenLostTab(tab.notebookId)}
           className="shrink-0 rounded border border-[var(--border)] px-2 py-0.5 text-[var(--text)] disabled:opacity-50"
         >{t('tab.bridgeLostReopen')}</button>

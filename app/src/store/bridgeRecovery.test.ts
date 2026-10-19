@@ -277,6 +277,67 @@ describe('after a new bridge instance comes up', () => {
     await useNotebook.getState().restartKernel();
     expect(calls('kernel.restart')).toHaveLength(0);
   });
+
+  describe('reopen all (one explicit click, still D1)', () => {
+    function openReturns(failPath?: string) {
+      const opened: string[] = [];
+      rpc.mockImplementation(async (m, p) => {
+        if (m === 'notebook.open') {
+          const path = (p as { path: string }).path;
+          if (path === failPath) throw new Error('kernel spawn failed');
+          opened.push(path);
+          const id = `${path === '/a.py' ? 'A' : 'B'}2`;
+          return { notebookId: id, state: { cells: [{ id: 'c', code: 'z = 1', execCount: 0 }], dagEdges: [], staleSet: [], schemas: [] } };
+        }
+        if (m === 'notebook.list') return opened.map((path) => tab(`${path === '/a.py' ? 'A' : 'B'}2`, path));
+        return {};
+      });
+    }
+
+    it('reopens every bridge-lost tab one at a time in tab order, runs nothing, and returns focus', async () => {
+      emit({ status: 'connected', generation: 2, newInstance: true });
+      await settle();
+      useNotebooks.setState({ activeId: 'B' }); // 用户停在第二个标签上
+      openReturns();
+      await useNotebook.getState().reopenAllLostTabs();
+
+      expect(calls('notebook.open').map(([, p]) => (p as { path: string }).path)).toEqual(['/a.py', '/b.py']);
+      expect(rpc.mock.calls.filter(([m]) => /^(cell\.run|kernel\.|diff\.)/.test(m))).toHaveLength(0);
+      const nb = useNotebooks.getState();
+      expect(nb.tabs.map((t) => [t.notebookId, !!t.bridgeLost])).toEqual([['A2', false], ['B2', false]]);
+      expect(nb.activeId).toBe('B2'); // 焦点回到用户原来的 tab
+      expect(useNotebook.getState().notebookPath).toBe('/b.py');
+    });
+
+    it('keeps going past a failed reopen and leaves that tab reopenable with its error', async () => {
+      emit({ status: 'connected', generation: 2, newInstance: true });
+      await settle();
+      openReturns('/b.py');
+      await useNotebook.getState().reopenAllLostTabs();
+
+      expect(calls('notebook.open')).toHaveLength(2);
+      expect(tabOf('A2')!.bridgeLost).toBeFalsy();
+      expect(tabOf('B')!.bridgeLost).toBe(true);
+      expect(tabOf('B')!.error?.operation).toBe('reopen');
+      expect(useNotebooks.getState().activeId).toBe('A2');
+    });
+
+    it('stops when the bridge drops mid-way instead of erroring every remaining tab', async () => {
+      emit({ status: 'connected', generation: 2, newInstance: true });
+      await settle();
+      rpc.mockImplementation(async (m) => {
+        if (m === 'notebook.open') {
+          emit({ status: 'reconnecting', generation: 2, newInstance: false });
+          throw new BridgeDisconnectedError();
+        }
+        return {};
+      });
+      await useNotebook.getState().reopenAllLostTabs();
+      expect(calls('notebook.open')).toHaveLength(1);
+      expect(tabOf('B')!.bridgeLost).toBe(true);
+      expect(tabOf('B')!.error).toBeUndefined();
+    });
+  });
 });
 
 describe('same bridge instance (WS-only drop)', () => {

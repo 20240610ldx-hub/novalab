@@ -353,6 +353,7 @@ try {
       opens: h.calls.filter((c) => c.method === 'notebook.open' && c.status === 'connected').length,
       rows: document.querySelectorAll('[data-testid="bridge-lost-row"]').length,
       reopenButtons: document.querySelectorAll('[data-testid="bridge-lost-reopen"]').length,
+      reopenAll: document.querySelector('[data-testid="bridge-lost-all"]')?.textContent ?? null,
     };
   });
   const opensBeforeReconnect = await page.evaluate(() => window.__reconnect.calls.filter((c) => c.method === 'notebook.open').length);
@@ -360,6 +361,7 @@ try {
   assert.ok(lost.tabs.every((t) => t.lost && !t.ended), 'all tabs kept, marked bridge-lost, still editable');
   assert.equal(lost.rows, 3);
   assert.equal(lost.reopenButtons, 3, 'D4: clean and dirty tabs all offer reopen (dirty ones are fingerprint-checked)');
+  assert.ok(lost.reopenAll?.startsWith('3 '), `one "reopen all" row counting 3 tabs, got ${lost.reopenAll}`);
   assert.equal((await kernelsOf(gen2)).length, 0, 'D1: no automatic reopen — gen2 starts no kernel');
   step('gen2 connected; tabs kept as bridge-lost; nothing reopened', { generation: lost.generation, opensBeforeReconnect });
 
@@ -396,6 +398,8 @@ try {
   assert.equal(gen2Kernels.length, 1, 'only the reopened clean tab gets a kernel');
   assert.equal(existsSync(replayMarker), false, 'interrupted cell must not have been replayed');
   step('clean tab cold-reopened on click', { notebookOpen: 1, kernels: gen2Kernels.length, replayed: false });
+  const allAfterA = await page.locator('[data-testid="bridge-lost-all"]').textContent();
+  assert.ok(allAfterA?.startsWith('2 '), `"reopen all" now counts 2, got ${allAfterA}`);
 
   // D4 mismatch: dirty B (disk changed during the outage) → conflict flow; nothing saved over the external bytes.
   const savesBeforeB = await page.evaluate(() => window.__reconnect.calls.filter((c) => c.method === 'cell.save').length);
@@ -424,6 +428,7 @@ try {
   assert.equal(bConflict.banner, true);
   assert.equal(await readFile(bPath, 'utf8'), bExternal, 'external bytes on disk untouched');
   step('dirty tab with changed disk → conflict flow; draft kept; disk untouched', { conflict: true });
+  assert.equal(await page.locator('[data-testid="bridge-lost-all"]').count(), 0, '"reopen all" hidden once a single tab is left');
 
   // Existing round-4 resolution: keep a local copy, then load the external version.
   await page.getByRole('button', { name: '保留本地副本并加载磁盘版本', exact: true }).click();
