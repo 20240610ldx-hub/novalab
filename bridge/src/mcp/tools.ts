@@ -25,7 +25,7 @@ export {
   type ToolOutputGateResult,
 } from './output-whitelist';
 
-/** 工具名（spec §7 顺序：4 核心 + 2 只读辅助；ADR-013 追加影子运行与核验）。 */
+/** 工具名（spec §7 顺序：4 核心 + 2 只读辅助；ADR-013 追加影子运行与核验；ADR-014 追加运行历史）。 */
 export const AGENT_TOOL_NAMES = [
   'get_notebook_context',
   'get_cell_output',
@@ -35,6 +35,7 @@ export const AGENT_TOOL_NAMES = [
   'get_cell_code',
   'shadow_run',
   'verify',
+  'get_run_history',
 ] as const;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
@@ -157,6 +158,10 @@ export const agentToolSchemas = {
     runId: z.string().describe('最近一次 shadow_run 返回的 runId'),
     contracts: z.array(contractSchema).max(64),
   }),
+  get_run_history: z.object({
+    cellId: z.string().describe('目标 cell id'),
+    limit: z.number().int().min(1).max(20).optional().describe('返回最近几次尝试（默认 10，最多 20）'),
+  }),
 } satisfies Record<AgentToolName, z.ZodType>;
 
 // ---------- meta（title/description；MCP 注册与 app 工具面板共用） ----------
@@ -210,6 +215,13 @@ export const agentToolMeta = {
       '在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / ' +
       'sum_conserved / row_sums / match_rate / equivalent / mapping_conserved / margins_match），只返回每条的状态与计数 {runId, verificationId, status, contracts}。' +
       '把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。',
+  },
+  get_run_history: {
+    title: '读取运行历史',
+    description:
+      '读取指定 cell 在本会话里的尝试历史（最近 limit 次）：每次的成败、错误类名与行号、谁触发（user / agent）、' +
+      '怎么触发（direct / cascade / accept / repl）、耗时，以及相对上一次的代码变化行（- 旧 / + 新）。' +
+      '不含输出内容与异常信息正文。返回 {cellId, totalAttempts, attempts[{attempt, ok, actor, trigger, durationMs, error?, codeChanged, diff?}]}',
   },
 } satisfies Record<AgentToolName, { title: string; description: string }>;
 
@@ -283,6 +295,10 @@ export async function executeAgentTool(
     case 'verify': {
       const a = agentToolSchemas.verify.parse(args);
       return withCancel(host, opts.signal, () => host.invoke('shadow.verify', { runId: a.runId, contracts: a.contracts }));
+    }
+    case 'get_run_history': {
+      const a = agentToolSchemas.get_run_history.parse(args);
+      return host.invoke('agent.runHistory', { cellId: a.cellId, ...(a.limit !== undefined ? { limit: a.limit } : {}) });
     }
     default: {
       const exhaustive: never = name;

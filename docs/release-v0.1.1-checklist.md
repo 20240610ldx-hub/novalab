@@ -531,6 +531,18 @@ Owner 裁决（2026-10-17）："Approved as recommended: O1 Rust command, O2 any
 
 本轮关闭 A15「断线期间草稿落盘」子项的 Windows 证据；A15 仍取决于 Linux CI，另有生产环境旧内核清理与冷启动首次连接重试（新发现）未做，**A15 保持未勾选**。
 
+### 2026-10-17 第二波第一包：追加式运行日志（ADR-014，Windows-only）
+
+| 项 | 结果 |
+|---|---|
+| 记录 | 每次执行一行 `.runs.jsonl`：尝试序号、触发者 / 方式、级联根、代码 SHA-256（会话内去重）、成败、错误类名 + 行号、输出字节数 / MIME / 写入路径；不存输出正文与 evalue |
+| 预算 | 1 万条 / 200 万代码字符，超出只记哈希 |
+| 读取 / 导出 | rpc `session.runs`；`.ipynb` cell `metadata.novalab.runs` 最近 50 次（无代码） |
+| 界面 | 会话记录 cell 头「N 次运行」→ 尝试列表 + 相邻差异；中英文 |
+| 测试 | run-log 单元 7、router 7、真实内核验收 1（先红：级联根顺序）、app 4 |
+| Agent 读取 | Owner 裁决 O2 = 开放：`get_run_history`（成败 / 错误类名 + 行号 / 触发 / 耗时 / 变化行 ≤2000 字符），过 router + M5 白名单；测试：视图单元 3、router 经工具 + 闸 1（断言 evalue 不出进程）、pi↔zod 参数一致性样例 6 |
+| 边界 | Windows-only；历史快照不存图（Owner 裁决） |
+
 ### 当前放行结论
 
 - [ ] Owner 已确认本版范围、建议发布门与 ADR-011。

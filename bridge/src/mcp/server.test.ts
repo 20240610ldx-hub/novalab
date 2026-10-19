@@ -98,9 +98,13 @@ describe('MCP server · 注册面', () => {
           "verify",
           "在最近一次 shadow_run 保留的影子状态上评估声明式契约（columns_present / dtype / range / not_null / unique_key / row_count / sum_conserved / row_sums / match_rate / equivalent / mapping_conserved / margins_match），只返回每条的状态与计数 {runId, verificationId, status, contracts}。把 verificationId 传给 propose_code_change，审阅卡片上会显示核验状态。",
         ],
+        [
+          "get_run_history",
+          "读取指定 cell 在本会话里的尝试历史（最近 limit 次）：每次的成败、错误类名与行号、谁触发（user / agent）、怎么触发（direct / cascade / accept / repl）、耗时，以及相对上一次的代码变化行（- 旧 / + 新）。不含输出内容与异常信息正文。返回 {cellId, totalAttempts, attempts[{attempt, ok, actor, trigger, durationMs, error?, codeChanged, diff?}]}",
+        ],
       ]
     `);
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(9);
   });
 
   it('propose_code_change 的 JSON schema 形状（zod 单一来源投影）', async () => {

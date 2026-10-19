@@ -57,7 +57,24 @@ export interface ExportCell {
   /** ≤0 / 缺省 → execution_count: null。 */
   execCount?: number | null;
   output?: ExportCellOutput | null;
+  /** ADR-014：该 cell 的尝试历史 → metadata.novalab.runs（无代码正文、无输出）。 */
+  runs?: ExportRunSummary[];
 }
+
+/** 导出用的单次尝试摘要（RunLogRecord 的子集）。 */
+export interface ExportRunSummary {
+  attempt: number;
+  ts: string;
+  durationMs: number;
+  ok: boolean;
+  error?: { name: string; line?: number };
+  actor: string;
+  trigger: string;
+  codeSha256: string;
+}
+
+/** 每个 cell 导出的最近尝试数上限（ADR-014 O4）。 */
+export const EXPORT_RUNS_PER_CELL = 50;
 
 /** notebook 级元数据（写入 metadata.novalab，供追溯；全部可选）。 */
 export interface ExportMeta {
@@ -167,7 +184,7 @@ export function buildNotebook(cells: readonly ExportCell[], meta?: ExportMeta): 
       cell_type: 'code',
       id: ids[i],
       execution_count: ec,
-      metadata: {},
+      metadata: c.runs && c.runs.length > 0 ? { novalab: { runs: c.runs.slice(-EXPORT_RUNS_PER_CELL) } } : {},
       outputs,
       source: toSourceLines(typeof c.code === 'string' ? c.code : ''),
     };

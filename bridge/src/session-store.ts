@@ -11,7 +11,7 @@
  * index.json 宽容读取（损坏 → 空列表，不抛），写入为整文件重写（低频操作）。
  */
 
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type {
@@ -54,7 +54,11 @@ export function notebookPathsMatch(a: string, b: string): boolean {
 }
 
 export class SessionStore {
-  constructor(private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly clock: () => Date = () => new Date(),
+    /** 会话 id 随机后缀（测试注入）。 */
+    private readonly rand: () => string = () => randomBytes(2).toString('hex'),
+  ) {}
 
   /** notebook 目录 → sessions 目录。 */
   static dirFor(notebookDir: string): string {
@@ -68,7 +72,12 @@ export class SessionStore {
     const dir = SessionStore.dirFor(opts.notebookDir);
     mkdirSync(dir, { recursive: true });
     const startedAt = this.clock();
-    const id = makeSessionId(startedAt);
+    const index = this.readIndex(dir);
+    // 同一秒、同目录的两个会话可能抽到同一 16 位后缀：重抽直到未被占用（否则 writeFileSync 会清空旧会话的事件流）
+    let id = makeSessionId(startedAt, this.rand);
+    while (index.some((m) => m.id === id) || existsSync(path.join(dir, `${id}.jsonl`))) {
+      id = makeSessionId(startedAt, this.rand);
+    }
     const meta: SessionMeta = {
       id,
       startedAt: startedAt.toISOString(),
@@ -76,7 +85,6 @@ export class SessionStore {
       source: 'local',
       notebookPath: opts.notebookPath,
     };
-    const index = this.readIndex(dir);
     index.push(meta);
     this.writeIndex(dir, index);
     const jsonlFile = path.join(dir, `${id}.jsonl`);
@@ -211,11 +219,11 @@ export class SessionStore {
     return out;
   }
 
-  /** sessions 目录里全部 jsonl 的会话 id（index 损坏时的兜底重建源）。 */
+  /** sessions 目录里全部事件流 jsonl 的会话 id（index 损坏时的兜底重建源；不含 ADR-014 的 `.runs.jsonl`）。 */
   scanIds(notebookDir: string): string[] {
     try {
       return readdirSync(SessionStore.dirFor(notebookDir))
-        .filter((f) => f.endsWith('.jsonl'))
+        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.runs.jsonl'))
         .map((f) => f.slice(0, -'.jsonl'.length))
         .sort();
     } catch {
