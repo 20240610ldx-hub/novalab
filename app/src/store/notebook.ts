@@ -504,6 +504,8 @@ interface NotebookStore {
   restartKernel: (options?: { allowLive?: boolean }) => Promise<void>;
   /** 新一代 bridge 后由用户点击：clean tab 冷重开（只 notebook.open，不执行、不重放）。 */
   reopenLostTab: (notebookId: string) => Promise<void>;
+  /** 一次点击重开全部 bridge-lost tab（仍是显式操作，D1）：按标签顺序串行，结束时焦点回到原 tab。 */
+  reopenAllLostTabs: () => Promise<void>;
   /** 第 7 轮：指纹一致时把恢复日志放回本地草稿（不写盘）。 */
   restoreDraft: (notebookId: string) => void;
   /** 第 7 轮：把恢复日志保存为同目录本地副本（第 4 轮 backup_file），不改 notebook。 */
@@ -1364,6 +1366,22 @@ export const useNotebook = create<NotebookStore>((set, get) => ({
     } finally {
       reopenInFlight.delete(notebookId);
     }
+  },
+
+  reopenAllLostTabs: async () => {
+    const nb = useNotebooks.getState();
+    const focusPath = nb.tabs.find((t) => t.notebookId === nb.activeId)?.path;
+    const lost = nb.tabs.filter((t) => t.bridgeLost && !t.conflict).map((t) => t.notebookId);
+    // 串行：bridge 的 notebook.open 会切换它自己的焦点，并发会互相抢。
+    // 按标签从左到右重开：新 bridge 的列表按打开顺序排，这样标签不会换位置。
+    for (const id of lost) {
+      if (bridgeOffline()) break; // 中途断线：剩下的保持待重开，不逐个报错
+      await get().reopenLostTab(id);
+    }
+    // 每次重开都会把焦点切过去；重开会改键，所以按路径找回用户原来所在的 tab。
+    const after = useNotebooks.getState();
+    const back = after.tabs.find((t) => t.path === focusPath)?.notebookId;
+    if (back && after.activeId !== back && !bridgeOffline()) await get().switchTab(back);
   },
 
   retryBridge: async () => {
