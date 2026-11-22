@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "novalab-app",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@novalab/app", "exec", "vite", "--host", "127.0.0.1", "--port", "5299", "--strictPort"],
+      "port": 5299
+    },
+    {
+      "name": "novalab-gallery-app",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@novalab/app", "exec", "vite", "--host", "127.0.0.1", "--port", "5199", "--strictPort"],
+      "port": 5199
+    },
+    {
+      "name": "novalab-gallery-bridge",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["demos/.novalab/validation-20261014/gallery-owned-bridge.mjs"],
+      "port": 7788
+    }
+  ]
+}
