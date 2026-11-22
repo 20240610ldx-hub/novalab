@@ -1,9 +1,10 @@
-# ADR-012（提案）Agent harness：是否引入 pi-agent-core
+# ADR-012（已裁决：保持 Vercel AI SDK）Agent harness：是否引入 pi-agent-core
 
-> 状态：**D1 已裁决（Owner，2026-10-16）**：接受 §8 建议 —— pi 适配层作为 flag 后的实验路径保留在本分支，Vercel 路径不动；G-1 真实模型对比待 Owner 填好 `app/.env.local` 后运行（见 §10）。D2–D4 仍待裁决。
+> **最终裁决（Owner，2026-10-16）**：原话是"agent框架还是用vercel"。Agent 框架继续用 Vercel AI SDK，**不采用 pi 适配层**。`bridge/src/agent-runtime/` 只作为参考实现保留：代码不删除，不接线，G-2 至 G-4 不再推进。G-1 的数据（§10.1）显示，两套 harness 在 DeepSeek 上成功率持平，从质量上看没有切换的理由。
+> 此前的状态：D1 曾接受"pi 作为 flag 后的实验路径"，现在被上面的最终裁决取代。G-1 已于 2026-10-16 通过。
 > 原状态：提案。本轮只交付 spike 原型 + 对比数据，未合入主线、未改动现有 Vercel 路径（`app/src/agent/*` 零改动）、未接 WS（`bridge/src/router.ts` 零改动）。
 > 基线：`bce0c2d`（claude/novalab-dead-kernel-restart-b33920）。日期 2026-10-16。
-> **数据口径：没有调用任何真实 LLM。** 本工作树没有 `app/.env.local`，按 ADR-008 不读取其他工作树或凭据存储。全部对比都用脚本化 stub 策略跑出来，下文的"成功率"只衡量 harness 机制，不代表模型能力。
+> **数据口径：** §5 的对比是在没有真实 LLM 的情况下用脚本化 stub 策略跑出来的，那里的"成功率"只衡量 harness 机制，不代表模型能力。真实模型的对比见 §10.1（DeepSeek deepseek-flash）。
 
 ## 1. 问题
 
@@ -142,6 +143,8 @@ token 是估算值：取两边归一化后的请求内容（system、工具声�
 
 ## 8. Go / No-Go 建议
 
+> **裁决结果（2026-10-16）**：Owner 选 A，即保持 Vercel。B 不采用，只作为参考实现保留，不做 G-2 接线。C 不需要做任何事。下面是裁决前的建议原文，留作记录。
+
 **建议：替换 A 为 No-Go；保留 B 作为 flag 后面的实验路径为有条件 Go；C 不需要做任何事，直接写进文档。**
 
 理由：在同等模型行为下，B 没有带来可测的成功率或步数优势（5.2 完全一致）。它的实际收益在于运行中插话、追问、中止这类控制原语是原生的（5.4），以及 provider 覆盖面更广。最有价值的安全增益是第二道 M5 闸（5.3），但这一项**不依赖 pi**，在 A 上也能做（F1）。B 的成本是确定的：81 个包、+1.44 MB、版本节奏快、需要等第六轮。"成功率"这项关键证据目前只有 stub 数据，还缺真实模型的数据。
@@ -156,9 +159,9 @@ B 转为正式 Go 的门槛（全部满足才进入集成）：
 ## 9. 请 Owner 裁决
 
 - ~~**D1**~~：**已裁决（2026-10-16）**：接受。B 作为 flag 后的实验路径保留在本分支，A 不动。
-- **D2**：B 路径里 `execute_cell` 的默认策略。`allow` 与现状一致；`deny` 表示 Agent 只能读和提议，运行一律在用户采纳 diff 时触发。实现位置：`policy.ts` 的 `decideToolGate`。
-- **D3**：F1 的 M5 第二道闸是否先补到 A？与本 ADR 的结论无关，可以单独开一个工作包。
-- **D4**：§6.1 的依赖 pin 纪律是否作为全仓规则（ai、@ai-sdk/* 同样适用）？
+- ~~**D2**~~：**不再需要裁决**（B 未采用）。原问题是：B 路径里 `execute_cell` 的默认策略。`allow` 与现状一致；`deny` 表示 Agent 只能读和提议，运行一律在用户采纳 diff 时触发。实现位置：`policy.ts` 的 `decideToolGate`。
+- **D3**：F1 的 M5 第二道闸是否先补到 A？与框架选型无关，仍然成立，而且 A 是保留下来的路径，这个问题反而更重要。实现已经在 `claude/cool-cray-67d123` 的 `ddec580`，**待 Owner 审阅**；本次裁决没有涉及它。
+- **D4**：§6.1 的依赖 pin 纪律是否作为全仓规则（ai、@ai-sdk/* 同样适用）？与框架选型无关，**仍待裁决**。
 
 ## 10. G-1 运行方式（Owner 手动）
 
@@ -168,7 +171,45 @@ B 转为正式 Go 的门槛（全部满足才进入集成）：
 4. 脚本只读这一个文件，不打印端点和 key。泄漏扫描基于真实 HTTP 请求体（包装了 `globalThis.fetch`）。两边使用同一端点、同一模型、同一 system prompt，输出上限都是 4096（F7）。
 5. 已用本地假 Anthropic 端点做过端到端冒烟：两边各 20 次请求，usage 计数一致，泄漏 0；临时的 `.env.local` 已删除。**没有对真实模型跑过**。
 
+**2026-10-16 尝试记录：没有产生数据。** DeepSeek（openai-compat，`https://api.deepseek.com/v1`；模型先用 deepseek-chat，后改为 deepseek-flash）两次运行中，所有请求都在 TLS 握手阶段失败（`ECONNRESET`），一次也没有到达模型。在本机 shell 里，curl 无论直连还是经 `127.0.0.1:7897` 代理访问 api.deepseek.com 都握手失败，关闭沙箱后也一样；同时 api.github.com 和 npm registry 都正常。所以问题出在本机到该端点的网络或代理规则，与 harness 无关。网络恢复后重跑时，按 Owner 更正的 DeepSeek 地址：openai-compat 用 `https://api.deepseek.com`（两边都请求 `/chat/completions`）；anthropic-compat 要用 `https://api.deepseek.com/anthropic/v1`，不能用不带 `/v1` 的裸地址，否则 `@ai-sdk/anthropic` 会请求 `/anthropic/messages`。另外，第一次运行暴露了 `real.ts` 的问题：插话场景抛出的未捕获异常会把已跑完的结果一起丢掉。已修复，失败只记一行。
+
 G-1 通过判据（沿用 §8）：pi 的 N2/N3 成功率不低于 Vercel，泄漏 = 0，插话场景两边都不产生 staged diff。真实模型的输出有随机性，3 次重复的差距在 1 题以内都视为持平。
+
+### 10.1 G-1 结果（2026-10-16，DeepSeek `deepseek-flash`，openai-compat，`https://api.deepseek.com`，3 次重复）
+
+原始数据：[adr-012-g1-results.json](adr-012-g1-results.json)。`.env.local` 由 Owner 手填，运行结束后已删除，key 不在日志或结果文件里。
+
+**网络失败单独计。** 运行期间 Owner 的网络出现过握手中断，集中在第 2 轮：Vercel 有 3 次 `No output generated`；pi 有 3 次 `Connection error` 和 2 次流中断 `terminated`。这些请求都没有拿到模型的完整回复，不计入成功率。下表只统计有效运行。
+
+| | Vercel | pi |
+|---|---|---|
+| 有效运行 / 总运行 | 27 / 30 | 25 / 30 |
+| **N2 修错** | **17/17** | **16/16** |
+| **N3 重构** | **6/10** | **5/9** |
+| 每次运行的 HTTP 请求 | 4.0 | 4.0 |
+| 每次运行的工具调用 | 6.6 | 6.4 |
+| 每次运行的输入 / 输出 token（provider 计数） | 9316 / 1138 | 8673 / 1091 |
+| 每次运行耗时 | 12.7 s | 12.7 s |
+| canary 泄漏（真实 HTTP 请求体） | **0** | **0** |
+| I1 插话（第 1 个工具结果后说"只诊断"） | 遵从，0 个 staged diff，3 次请求 | 遵从，0 个 staged diff，3 次请求 |
+
+逐题看（✓ 成功，✗ 失败，N 网络失败）：
+
+| 夹具 | Vercel | pi |
+|---|---|---|
+| n2-nameerror / keyerror / typeerror / rulebook | 各 ✓✓✓ | 各 ✓✓✓ |
+| n2-import | ✓✓✓ | ✓N✓ |
+| n2-badargs | ✓N✓ | ✓N✓ |
+| n3-extract、n3-rename | 各 ✓N✓ | 各 ✓N✓ |
+| n3-split | ✗✗✗ | ✗✗✗ |
+| n3-budget | ✓✗✓ | ✓N✗ |
+
+结论：
+
+- **G-1 通过。** 有效运行里，pi 的 N2 为 16/16，Vercel 为 17/17；N3 分别为 5/9 和 6/10，差距在 1 题以内，按判据视为持平。两边泄漏都是 0，插话都被遵从。请求数、工具调用数和耗时几乎相同。pi 的输入 token 每次少约 7%，与 stub 估算的方向一致，但幅度不足以影响决策。
+- **n3-split 两边都是 0/3，这是 F2 在真实模型上的复现。** 模型把 `max_v` 搬到新 cell 时被预检拒绝（原 cell 里仍有 `max_v`），之后没有改用新名字重试，最终只采纳了一个 diff，c 因 NameError 失败。问题出在 diff 预检和队列语义，与 harness 无关。
+- **n3-budget 在真实模型下大多能成功**（Vercel 2/3，pi 1/2 有效）。真实模型会在一条消息里批量读 cell，不会像 stub 那样撞上 10 步上限。失败的两次都是采纳后新插入的 cell 报错（插入位置或引用顺序不对），也与 harness 无关。
+- **端点兼容性**：openai-compat 加裸域名，两边都工作正常，没有 F6 那样的路径问题。输出上限两边都是 4096（F7）。pi 遇到的网络失败比 Vercel 多 2 次（流中断 `terminated`），样本太小，暂不归因。
 
 ## 附：受测源码指纹（git blob，前 12 位）
 

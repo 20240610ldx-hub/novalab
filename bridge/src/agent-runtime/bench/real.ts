@@ -206,8 +206,15 @@ async function main(): Promise<void> {
       }
     }
   }
-  const steer = [];
-  for (const h of ['vercel', 'pi'] as const) steer.push(await steerOnce(h, ep));
+  // 插话场景失败（端点不可达 / 流无输出）只记一行，不能把前面的 rows 一起丢掉
+  const steer: (Awaited<ReturnType<typeof steerOnce>> | { harness: Harness; error: string })[] = [];
+  for (const h of ['vercel', 'pi'] as const) {
+    try {
+      steer.push(await steerOnce(h, ep));
+    } catch (err) {
+      steer.push({ harness: h, error: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
+    }
+  }
 
   const summary = (['vercel', 'pi'] as const).map((h) => {
     const rs = rows.filter((r) => r.harness === h);
